@@ -1,0 +1,33 @@
+Django>=5.0,<6.0
+djangorestframework>=3.15,<4.0
+djangorestframework-simplejwt>=5.3
+django-cors-headers>=4.3
+channels>=4.1
+channels-redis>=4.2
+Pillow>=10.0
+python-multipart>=0.0.9
+qrcode>=7.4
+
+# ===== v3.0 新增：文档正文抽取（全文搜索索引用，缺失时自动跳过，不阻断启动）=====
+pypdf>=4.0            # PDF 正文抽取
+python-docx>=1.1      # .docx 正文抽取
+openpyxl>=3.1         # .xlsx 单元格文本抽取
+
+# ===== v3.0 新增：Office 转 PDF 依赖外部程序 =====
+# 需另行安装 LibreOffice（soffice），并通过环境变量 SOFFICE_PATH 指定可执行文件路径。
+# 未安装时 /api/files/<id>/to-pdf/ 返回结构化提示 LibreOffice 未安装，不会 500。
+#
+# ===== v3.0 新增：AI 助手（无第三方 SDK，走标准库 urllib）=====
+# 兼容 OpenAI Chat Completions 协议的服务，配置以下变量即可启用大模型：
+#   LLM_API_KEY   密钥（未设置时全部 AI 能力自动降级为本地实现）
+#   LLM_BASE_URL  接口地址，默认 https://api.openai.com/v1
+#   LLM_MODEL     模型名，默认 gpt-4o-mini
+# 以上变量可写在 backend/.env 文件（推荐）或系统环境变量，同名时环境变量优先。
+
+# ===== v4.0 新增：.env 配置文件支持（未安装 python-dotenv 时静默跳过，不影响启动）=====
+python-dotenv>=1.0
+
+# ===== v4.1 新增：免费云部署（Render + Neon Postgres）=====
+daphne>=4.0            # ASGI 服务器（channels 4.x 的可选依赖，生产启动命令直接调 daphne，必须显式安装）
+psycopg2-binary>=2.9   # PostgreSQL 驱动（本地 SQLite 环境装了也无害）
+whitenoise>=6.6        # 生产环境静态文件托管（仅 DEBUG=0 时启用）

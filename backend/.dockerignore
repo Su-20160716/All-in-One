@@ -1,0 +1,13 @@
+# 密钥与本地数据绝不进镜像
+.env
+db.sqlite3
+media/
+staticfiles/
+
+# 开发环境杂物
+venv/
+__pycache__/
+*.pyc
+*.log
+.smoke*
+_probe*.py

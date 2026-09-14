@@ -1,0 +1,143 @@
+"""笔记知识库模型：笔记、版本快照、标签"""
+import uuid
+
+from django.conf import settings
+from django.db import models
+
+
+class NoteTag(models.Model):
+    name = models.CharField(max_length=50, verbose_name="标签名")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="note_tags", verbose_name="所有者")
+    color = models.CharField(max_length=16, default="default", verbose_name="颜色")
+
+    class Meta:
+        verbose_name = "笔记标签"
+        verbose_name_plural = "笔记标签"
+        unique_together = [("name", "owner")]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def use_count(self):
+        return self.notes.count()
+
+
+class Note(models.Model):
+    """笔记页面：支持父级嵌套、Markdown 正文、标签、置顶收藏、公开分享、回收站"""
+
+    title = models.CharField(max_length=200, verbose_name="标题")
+    content = models.TextField(blank=True, verbose_name="Markdown 正文")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notes", verbose_name="所有者")
+    parent = models.ForeignKey("self", on_delete=models.CASCADE, null=True, blank=True, related_name="children", verbose_name="父笔记")
+    tags = models.ManyToManyField(NoteTag, related_name="notes", blank=True, verbose_name="标签")
+    is_pinned = models.BooleanField(default=False, verbose_name="置顶")
+    is_favorite = models.BooleanField(default=False, verbose_name="收藏")
+    is_public = models.BooleanField(default=False, verbose_name="公开分享")
+    share_token = models.CharField(max_length=32, blank=True, db_index=True, verbose_name="分享令牌")
+    version = models.IntegerField(default=1, verbose_name="版本号")
+    is_deleted = models.BooleanField(default=False, verbose_name="已删除(回收站)")
+    deleted_at = models.DateTimeField(null=True, blank=True, verbose_name="删除时间")
+    words = models.IntegerField(default=0, verbose_name="字数缓存")
+    # AI 摘要（assistant 模块写入，避免重复调用大模型）
+    ai_summary = models.TextField(blank=True, verbose_name="AI 摘要")
+    ai_summary_at = models.DateTimeField(null=True, blank=True, verbose_name="摘要生成时间")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        verbose_name = "笔记"
+        verbose_name_plural = "笔记"
+        ordering = ["-is_pinned", "-updated_at"]
+
+    def __str__(self):
+        return self.title
+
+    def save(self, *args, **kwargs):
+        if not self.share_token:
+            self.share_token = uuid.uuid4().hex[:16]
+        super().save(*args, **kwargs)
+
+
+class NoteVersion(models.Model):
+    """笔记版本快照（自动保存 + 手动回滚）"""
+
+    note = models.ForeignKey(Note, on_delete=models.CASCADE, related_name="versions", verbose_name="笔记")
+    version = models.IntegerField(verbose_name="版本号")
+    title = models.CharField(max_length=200, verbose_name="标题")
+    content = models.TextField(blank=True, verbose_name="正文快照")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="操作人"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "笔记版本"
+        verbose_name_plural = "笔记版本"
+        ordering = ["-version"]
+        unique_together = [("note", "version")]
+
+    def __str__(self):
+        return f"{self.note.title} v{self.version}"
+
+
+class NoteLink(models.Model):
+    """[[双链]]：笔记正文中出现的 [[标题]] 引用关系
+
+    双向可查：
+    - 出链（outgoing）：source 笔记里引用了谁
+    - 反链（backlinks）：谁引用了 target 笔记
+    target 为空表示「尚未创建的同名笔记」（悬浮链接）。
+    """
+
+    source = models.ForeignKey(
+        Note, on_delete=models.CASCADE, related_name="outgoing_links", verbose_name="来源笔记"
+    )
+    target = models.ForeignKey(
+        Note, on_delete=models.CASCADE, null=True, blank=True,
+        related_name="incoming_links", verbose_name="目标笔记",
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="note_links", verbose_name="所有者"
+    )
+    target_title = models.CharField(max_length=200, verbose_name="引用标题")
+    alias = models.CharField(max_length=200, blank=True, verbose_name="显示别名")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="建立时间")
+
+    class Meta:
+        verbose_name = "笔记双链"
+        verbose_name_plural = "笔记双链"
+        unique_together = [("source", "target_title")]
+        indexes = [models.Index(fields=["owner", "target"]), models.Index(fields=["owner", "target_title"])]
+
+    def __str__(self):
+        return f"[[{self.target_title}]]"
+
+    @property
+    def resolved(self):
+        return self.target_id is not None
+
+
+class NoteCollabState(models.Model):
+    """实时协同编辑状态（Yjs CRDT）
+
+    服务端不做 CRDT 合并，只做「快照 + 增量日志」的中继与持久化：
+    - snapshot：最近一次客户端压缩后的完整状态（Y.encodeStateAsUpdate）
+    - update_log：快照之后的增量更新列表（base64）
+    新加入的客户端依次应用 snapshot + update_log 即可还原（Yjs 更新可交换、幂等）。
+    """
+
+    note = models.OneToOneField(Note, on_delete=models.CASCADE, related_name="collab", verbose_name="笔记")
+    snapshot = models.BinaryField(null=True, blank=True, verbose_name="CRDT 快照")
+    update_log = models.JSONField(default=list, blank=True, verbose_name="增量更新日志")
+    revision = models.IntegerField(default=0, verbose_name="修订号")
+    text_mirror = models.TextField(blank=True, verbose_name="纯文本镜像(供检索/回写)")
+    contributors = models.JSONField(default=list, blank=True, verbose_name="最近协作者")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        verbose_name = "协同编辑状态"
+        verbose_name_plural = "协同编辑状态"
+
+    def __str__(self):
+        return f"collab#{self.note_id} rev{self.revision}"

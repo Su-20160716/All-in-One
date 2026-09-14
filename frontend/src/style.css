@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+  body {
+    @apply bg-ink-50 text-ink-800 text-[14px];
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-ink-200 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-ink-300;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-control px-3 py-1.5 text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-700;
+  }
+  .btn-ghost {
+    @apply btn bg-transparent text-ink-600 hover:bg-ink-100;
+  }
+  .btn-outline {
+    @apply btn border border-ink-200 bg-white text-ink-700 hover:border-brand-400 hover:text-brand-600;
+  }
+  .btn-danger {
+    @apply btn bg-rose-50 text-rose-600 hover:bg-rose-100;
+  }
+  .input {
+    @apply w-full rounded-control border border-ink-200 bg-white px-3 py-1.5 text-[13px] text-ink-800 placeholder:text-ink-400 focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500;
+  }
+  .card {
+    @apply rounded-card border border-ink-100 bg-white shadow-card;
+  }
+  .tag {
+    @apply inline-flex items-center rounded-pill bg-ink-100 px-2 py-0.5 text-[11px] text-ink-600;
+  }
+  .tag-brand {
+    @apply tag bg-brand-50 text-brand-700;
+  }
+  .th {
+    @apply px-3 py-2 text-left text-[12px] font-medium text-ink-500;
+  }
+  .td {
+    @apply px-3 py-2.5 text-[13px] text-ink-700;
+  }
+  .menu-item {
+    @apply flex items-center gap-2.5 rounded-control px-2.5 py-2 text-[13px] text-ink-300 transition-colors hover:bg-white/5 hover:text-white;
+  }
+  .menu-item.active {
+    @apply bg-brand-600/20 text-brand-300;
+  }
+  .markdown-body h1 {
+    @apply mb-2 mt-4 text-[20px] font-bold text-ink-900;
+  }
+  .markdown-body h2 {
+    @apply mb-2 mt-4 text-[17px] font-bold text-ink-900;
+  }
+  .markdown-body h3 {
+    @apply mb-1.5 mt-3 text-[15px] font-semibold text-ink-900;
+  }
+  .markdown-body p {
+    @apply my-2 leading-relaxed text-ink-700;
+  }
+  .markdown-body code {
+    @apply rounded bg-ink-100 px-1 py-0.5 font-mono text-[12px] text-rose-600;
+  }
+  .markdown-body pre {
+    @apply my-3 overflow-x-auto rounded-control bg-ink-900 p-3;
+  }
+  .markdown-body pre code {
+    @apply bg-transparent p-0 text-ink-100;
+  }
+  .markdown-body blockquote {
+    @apply my-3 border-l-4 border-brand-300 pl-3 text-ink-500;
+  }
+  .markdown-body a {
+    @apply text-brand-600 underline;
+  }
+  .markdown-body li {
+    @apply ml-4 list-disc leading-relaxed text-ink-700;
+  }
+}

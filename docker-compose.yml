@@ -1,0 +1,25 @@
+# 全能协作平台 —— 一键容器编排
+# 用法：docker compose up -d --build  然后打开 http://localhost
+services:
+  backend:
+    build: ./backend
+    container_name: aio-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # 持久化数据库与上传文件（容器重建不丢失）
+      - ./backend/db.sqlite3:/app/db.sqlite3
+      - ./backend/media:/app/media
+    environment:
+      DJANGO_DEBUG: "1"
+      DJANGO_ALLOWED_HOSTS: "*"
+
+  frontend:
+    build: ./frontend
+    container_name: aio-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
