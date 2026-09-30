@@ -442,3 +442,25 @@ def public_drill(d, with_answer=False):
         item["answer"] = d["answer"]
         item["explain"] = d["explain"]
     return item
+
+
+# ---- v8 唯一文本合并（dsh 2026-09-30）：F515 术语例证语言 + F516 范式/算法/结构 复杂度与示例 ----
+# 只增不改：只往既有条目上挂新字段，不动任何原有 key；import 失败不影响主流程。
+try:
+    from . import programming_v8 as _p8
+except ImportError:  # 兼容脚本直连导入（无包上下文）
+    try:
+        import programming_v8 as _p8
+    except ImportError:
+        _p8 = None
+
+if _p8 is not None:
+    _GL = getattr(_p8, "GLOSSARY_LANGS", {})
+    _CV = getattr(_p8, "CARD_V8", {})
+    for _g in GLOSSARY:
+        if _g.get("term") in _GL:
+            _g["example_langs"] = _GL[_g["term"]]
+    for _nm in ("PARADIGMS", "ALGORITHMS", "DATA_STRUCTURES"):
+        for _item in globals()[_nm]:
+            if _item.get("key") in _CV:
+                _item.update(_CV[_item["key"]])

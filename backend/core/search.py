@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import html
 import math
 import os
 import re
@@ -284,30 +285,86 @@ def remove_document(module: str, object_id: int):
 # ---------------------------------------------------------------------------
 
 def _snippet(body: str, query_terms: set, width: int = 160) -> str:
-    """截取包含查询词的片段并高亮"""
+    """截取包含查询词的片段并高亮（F662）。
+
+    先按命中词切分、再对每段做 HTML 转义，最后才包 ``<em>`` 标记，
+    因此正文里即便含 ``<script>`` 也不会被注入（防 XSS）。
+    """
     if not body:
         return ""
     plain = normalize(body)
+    terms = sorted({t for t in query_terms if t}, key=len, reverse=True)
     pos = -1
-    for term in sorted(query_terms, key=len, reverse=True):
+    for term in terms:
         pos = plain.find(term)
         if pos >= 0:
             break
     if pos < 0:
-        return body[:width] + ("…" if len(body) > width else "")
+        frag = body[:width]
+        return _escape(frag) + ("…" if len(body) > width else "")
+
     start = max(0, pos - width // 3)
     frag = body[start:start + width]
-    for term in sorted(query_terms, key=len, reverse=True):
-        if len(term) >= 2:
-            frag = re.sub(f"({re.escape(term)})", r"<em>\1</em>", frag, flags=re.IGNORECASE)
-    return ("…" if start > 0 else "") + frag + ("…" if start + width < len(body) else "")
+    pattern = None
+    if terms:
+        pattern = re.compile("(" + "|".join(re.escape(t) for t in terms) + ")", re.IGNORECASE)
+
+    parts = pattern.split(frag) if pattern else [frag]
+    chunks = []
+    for i, part in enumerate(parts):
+        esc = _escape(part)
+        if pattern and i % 2 == 1:
+            chunks.append(f"<em>{esc}</em>")
+        else:
+            chunks.append(esc)
+    return ("…" if start > 0 else "") + "".join(chunks) + ("…" if start + width < len(body) else "")
 
 
-def search(query: str, owner_ids, modules=None, limit: int = 20, offset: int = 0):
+def _escape(text: str) -> str:
+    """HTML 转义（不转义引号，避免破坏既有展示）"""
+    return html.escape(text or "", quote=False)
+
+
+# ---------------------------------------------------------------------------
+# 搜索语法（F662）："精确短语" 与 -排除词
+# ---------------------------------------------------------------------------
+
+_QUOTE_RE = re.compile(r'"([^"]+)"|“([^”]+)”|「([^」]+)」')
+
+
+def parse_syntax(query: str) -> dict:
+    """解析搜索语法，返回剩余关键词、精确短语列表与排除词列表。
+
+    支持：``"精确短语"``（英文双引号 / 中文双引号 / 直角引号）、``-排除词``。
+    """
+    raw = query or ""
+    phrases = [next(g for g in tup if g) for tup in _QUOTE_RE.findall(raw)]
+    rest = _QUOTE_RE.sub(" ", raw)
+    excludes, keep = [], []
+    for token in rest.split():
+        if token.startswith("-") and len(token) > 1 and not token[1].isdigit():
+            excludes.append(token[1:])
+        elif token != "-":
+            keep.append(token)
+    phrases = [p.strip() for p in phrases if p.strip()]
+    excludes = [e.strip() for e in excludes if e.strip()]
+    return {
+        "raw": raw,
+        "phrases": list(dict.fromkeys(phrases))[:8],
+        "excludes": list(dict.fromkeys(excludes))[:8],
+        "terms_text": " ".join(keep),
+    }
+
+
+def search(query: str, owner_ids, modules=None, limit: int = 20, offset: int = 0,
+           phrases=None, excludes=None):
     """全文检索。
 
     :param owner_ids: 可见 owner id 集合；None 表示不限
-    :return: {"total": n, "results": [...], "terms": [...], "took_ms": x}
+    :param phrases: 精确短语列表（缺省时按搜索语法从 query 解析）
+    :param excludes: 排除词列表（同上）
+    :return: {"total": n, "results": [...], "terms": [...], "took_ms": x,
+              "syntax": {...}, "by_module": [{module, count}]}
     """
     import time
 
@@ -315,16 +372,24 @@ def search(query: str, owner_ids, modules=None, limit: int = 20, offset: int = 0
     from core.models import SearchDoc, SearchTerm
 
     started = time.time()
-    terms = [t for t in dict.fromkeys(tokenize(query)) if t]
+    syntax = parse_syntax(query)
+    phrases = list(syntax["phrases"] if phrases is None else phrases)
+    excludes = list(syntax["excludes"] if excludes is None else excludes)
+    base_text = (syntax["terms_text"] + " " + " ".join(phrases)).strip()
+
+    terms = [t for t in dict.fromkeys(tokenize(base_text)) if t]
     if not terms:
-        return {"total": 0, "results": [], "terms": [], "took_ms": 0, "query": query}
+        empty = {"total": 0, "results": [], "terms": [], "took_ms": 0, "query": query,
+                 "syntax": syntax, "by_module": [], "group_counts": {}}
+        return empty
 
     qs = SearchDoc.objects.all()
     if modules:
         qs = qs.filter(module__in=modules)
     if owner_ids is not None:
         if not owner_ids:
-            return {"total": 0, "results": [], "terms": terms, "took_ms": 0, "query": query}
+            return {"total": 0, "results": [], "terms": terms, "took_ms": 0, "query": query,
+                    "syntax": syntax, "by_module": [], "group_counts": {}}
         qs = qs.filter(owner_id__in=owner_ids)
     visible_ids = set(qs.values_list("id", flat=True))
     total_docs = len(visible_ids) or 1
@@ -357,7 +422,58 @@ def search(query: str, owner_ids, modules=None, limit: int = 20, offset: int = 0
         scores[doc_id] *= 1 + 0.25 * (len(hits) - 1)
 
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+
+    # ---------------- 语法过滤：精确短语 / 排除词（F662） ----------------
+    phrase_fallback = False
+    docs_cache: dict = {}
+    if (phrases or excludes) and ranked:
+        docs_cache = {
+            d.id: d for d in SearchDoc.objects.filter(id__in=[i for i, _ in ranked[:5000]])
+        }
+
+        def _hay(doc):
+            return normalize(f"{doc.title or ''} {doc.summary or ''}")
+
+        def _keep_excludes(pair):
+            doc = docs_cache.get(pair[0])
+            if not doc:
+                return False
+            hay = _hay(doc)
+            return not any(normalize(x) and normalize(x) in hay for x in excludes)
+
+        filtered = [p for p in ranked if _keep_excludes(p)]
+        if phrases:
+            np = len(filtered)
+            strict = []
+            for pair in filtered:
+                doc = docs_cache.get(pair[0])
+                if not doc:
+                    continue
+                hay = _hay(doc)
+                if all(normalize(p) in hay for p in phrases):
+                    strict.append(pair)
+            if strict:
+                filtered = strict
+            elif np:
+                # 精确短语只出现在正文（索引摘要仅存前 300 字）→ 退化为词项命中
+                phrase_fallback = True
+        ranked = filtered
+
     total = len(ranked)
+
+    # ---------------- 分组计数（F661 按模块分组） ----------------
+    group_counts: dict = {}
+    if ranked:
+        ids = [i for i, _ in ranked[:5000]]
+        if docs_cache and set(ids) == set(docs_cache):
+            for doc in docs_cache.values():
+                group_counts[doc.module] = group_counts.get(doc.module, 0) + 1
+        else:
+            for _id, _module in SearchDoc.objects.filter(id__in=ids).values_list("id", "module"):
+                group_counts[_module] = group_counts.get(_module, 0) + 1
+    by_module = [{"module": k, "count": v} for k, v in
+                 sorted(group_counts.items(), key=lambda kv: -kv[1])]
+
     page = ranked[offset: offset + limit]
     docs = {d.id: d for d in SearchDoc.objects.filter(id__in=[i for i, _ in page])}
 
@@ -366,12 +482,13 @@ def search(query: str, owner_ids, modules=None, limit: int = 20, offset: int = 0
         doc = docs.get(doc_id)
         if not doc:
             continue
+        hl_terms = set(matched.get(doc_id, set())) | {normalize(p) for p in phrases}
         results.append({
             "id": doc.object_id,
             "doc_id": doc.id,
             "module": doc.module,
             "title": doc.title,
-            "snippet": _snippet(doc.summary or "", matched.get(doc_id, set())),
+            "snippet": _snippet(doc.summary or "", hl_terms),
             "score": round(score, 4),
             "owner_id": doc.owner_id,
             "updated_at": doc.updated_at,
@@ -383,6 +500,9 @@ def search(query: str, owner_ids, modules=None, limit: int = 20, offset: int = 0
         "terms": terms,
         "took_ms": int((time.time() - started) * 1000),
         "query": query,
+        "syntax": {**syntax, "phrase_fallback": phrase_fallback},
+        "by_module": by_module,
+        "group_counts": group_counts,
     }
 
 

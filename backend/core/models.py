@@ -1,6 +1,7 @@
 """公共模型：操作日志、通知中心、通知偏好、系统公告、已读公告、站点设置"""
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class OperationLog(models.Model):
@@ -105,6 +106,8 @@ class Announcement(models.Model):
     )
     is_pinned = models.BooleanField(default=False, verbose_name="置顶")
     is_published = models.BooleanField(default=True, verbose_name="已发布")
+    scheduled_at = models.DateTimeField(null=True, blank=True, verbose_name="定时发布时间")
+    expires_at = models.DateTimeField(null=True, blank=True, verbose_name="到期时间")
     readers = models.ManyToManyField(settings.AUTH_USER_MODEL, through="AnnouncementRead", related_name="read_announcements")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="发布时间")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
@@ -146,14 +149,34 @@ class SiteSetting(models.Model):
 
 
 def notify(recipient, title, content="", category="system", level="info", link=""):
-    """快捷创建通知（尊重用户通知偏好，被关闭的分类不产生通知）"""
-    if recipient is not None and not NotificationSetting.objects.filter(
+    """快捷创建通知（尊重用户通知偏好和免打扰时段，被关闭的分类/免打扰时段不产生推送通知）
+
+    免打扰时段内：通知仍写入数据库（用户稍后可见），但不做即时推送。
+    """
+    if recipient is None:
+        return None
+    # 检查分类开关
+    if NotificationSetting.objects.filter(
         user=recipient, category=category, enabled=False
     ).exists():
-        return Notification.objects.create(
-            recipient=recipient, title=title, content=content, category=category, level=level, link=link
-        )
-    return None
+        return None
+    # 检查免打扰时段（dnd_start/dnd_end 同在 User 上）
+    dnd = False
+    dnd_start = getattr(recipient, "dnd_start", None)
+    dnd_end = getattr(recipient, "dnd_end", None)
+    if dnd_start and dnd_end:
+        now_time = timezone.localtime(timezone.now()).time()
+        if dnd_start <= dnd_end:
+            dnd = dnd_start <= now_time <= dnd_end
+        else:
+            # 跨午夜（如 22:00 ~ 08:00）
+            dnd = now_time >= dnd_start or now_time <= dnd_end
+    notif = Notification.objects.create(
+        recipient=recipient, title=title, content=content, category=category, level=level, link=link
+    )
+    # 免打扰时段不做即时推送（前端 WebSocket 层可根据 dnd 标记跳过 toast）
+    notif.dnd_suppressed = dnd
+    return notif
 
 
 # ---------------------------------------------------------------------------
@@ -210,3 +233,99 @@ class SearchTerm(models.Model):
 
     def __str__(self):
         return f"{self.term}x{self.freq}"
+
+
+class SearchQueryLog(models.Model):
+    """用户搜索词记录：用于搜索历史与热词统计（#63）"""
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="search_queries", verbose_name="用户",
+    )
+    term = models.CharField(max_length=200, db_index=True, verbose_name="搜索词")
+    result_count = models.IntegerField(default=0, verbose_name="结果数")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="时间")
+
+    class Meta:
+        verbose_name = "搜索词记录"
+        verbose_name_plural = "搜索词记录"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["owner", "-created_at"])]
+
+    def __str__(self):
+        return f"{self.owner}:{self.term}"
+
+
+# ===========================================================================
+# v8 新增（F627–F642 管理与平台）—— 纯新增模型，向后兼容
+# ===========================================================================
+
+class AdminCommandRun(models.Model):
+    """F629 管理命令面板：白名单命令的执行记录与上次结果"""
+
+    command = models.CharField(max_length=64, db_index=True, verbose_name="命令名")
+    args = models.CharField(max_length=200, blank=True, verbose_name="参数")
+    ok = models.BooleanField(default=True, verbose_name="是否成功")
+    output = models.TextField(blank=True, verbose_name="输出(截断)")
+    error = models.TextField(blank=True, verbose_name="错误(截断)")
+    duration_ms = models.IntegerField(default=0, verbose_name="耗时(ms)")
+    ran_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="command_runs", verbose_name="触发人",
+    )
+    started_at = models.DateTimeField(auto_now_add=True, verbose_name="开始时间")
+    finished_at = models.DateTimeField(null=True, blank=True, verbose_name="结束时间")
+
+    class Meta:
+        verbose_name = "管理命令执行记录"
+        verbose_name_plural = "管理命令执行记录"
+        ordering = ["-started_at"]
+
+    def __str__(self):
+        return f"{self.command} {'ok' if self.ok else 'fail'} @{self.started_at:%Y-%m-%d %H:%M:%S}"
+
+
+class ExceptionRecord(models.Model):
+    """F633 异常聚合：按「类型 + 规范化消息 + 出错位置」签名去重计数"""
+
+    signature = models.CharField(max_length=40, unique=True, verbose_name="异常签名")
+    etype = models.CharField(max_length=100, db_index=True, verbose_name="异常类型")
+    message = models.CharField(max_length=500, blank=True, verbose_name="消息(已规范化)")
+    location = models.CharField(max_length=200, blank=True, verbose_name="出错位置")
+    path = models.CharField(max_length=200, blank=True, verbose_name="最近请求路径")
+    count = models.IntegerField(default=1, verbose_name="累计次数")
+    sample = models.TextField(blank=True, verbose_name="样本堆栈(截断)")
+    first_at = models.DateTimeField(auto_now_add=True, verbose_name="首次出现")
+    last_at = models.DateTimeField(auto_now=True, verbose_name="最近出现")
+
+    class Meta:
+        verbose_name = "异常记录"
+        verbose_name_plural = "异常记录"
+        ordering = ["-last_at"]
+
+    def __str__(self):
+        return f"{self.etype} x{self.count}"
+
+
+class SlowEndpoint(models.Model):
+    """F632 慢接口采样聚合（前端上报的接口耗时样本，按路径归并）"""
+
+    path = models.CharField(max_length=200, unique=True, verbose_name="接口路径")
+    samples = models.IntegerField(default=0, verbose_name="样本数")
+    total_ms = models.BigIntegerField(default=0, verbose_name="耗时总和(ms)")
+    slow_samples = models.IntegerField(default=0, verbose_name="慢样本数(≥1000ms)")
+    max_ms = models.IntegerField(default=0, verbose_name="最大耗时(ms)")
+    first_at = models.DateTimeField(auto_now_add=True, verbose_name="首个样本")
+    last_at = models.DateTimeField(auto_now=True, verbose_name="最近样本")
+
+    class Meta:
+        verbose_name = "慢接口采样"
+        verbose_name_plural = "慢接口采样"
+        ordering = ["-max_ms"]
+
+    def __str__(self):
+        return f"{self.path} avg={self.avg_ms}ms"
+
+    @property
+    def avg_ms(self) -> int:
+        return int(self.total_ms / self.samples) if self.samples else 0

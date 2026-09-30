@@ -16,6 +16,7 @@ import { onMounted, watch } from 'vue'
 import { useAppStore } from './stores/app'
 import { useUserStore } from './stores/user'
 import { stopWs } from './utils/ws'
+import { coreApi } from './api'
 
 const app = useAppStore()
 const user = useUserStore()
@@ -32,7 +33,45 @@ function syncWs() {
   }
 }
 
-onMounted(syncWs)
+// #57 主题偏好：从 localStorage 读取并应用
+function applyTheme() {
+  const theme = localStorage.getItem('theme') || 'system'
+  const root = document.documentElement
+  if (theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+    root.classList.add('dark')
+  } else {
+    root.classList.remove('dark')
+  }
+}
+
+// #100 站点品牌定制：读取公开设置并应用
+async function applyBranding() {
+  try {
+    const r = await coreApi.publicSettings()
+    const s = r.settings || {}
+    if (s.primary_color) {
+      document.documentElement.style.setProperty('--brand-color', s.primary_color)
+    }
+    if (s.site_name) {
+      document.title = `${s.site_name} · 协作平台`
+    }
+    if (s.logo_url) {
+      let link = document.querySelector('link[rel="icon"]')
+      if (!link) {
+        link = document.createElement('link')
+        link.rel = 'icon'
+        document.head.appendChild(link)
+      }
+      link.href = s.logo_url
+    }
+  } catch (e) { /* ignore */ }
+}
+
+onMounted(() => {
+  applyTheme()
+  applyBranding()
+  syncWs()
+})
 watch(() => user.token, syncWs)
 </script>
 

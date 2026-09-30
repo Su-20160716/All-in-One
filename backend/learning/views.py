@@ -77,7 +77,7 @@ class LangCheatsheetView(APIView):
 
     def get(self, request, key):
         d = _lang(key)
-        return Response({"key": key, "name": d["name"], "cheatsheet": [{"point": a, "code": b} for a, b in d["cheatsheet"]]})
+        return Response({"key": key, "name": d["name"], "cheatsheet": [{"point": a, "code": b, "note": c} for a, b, c in d["cheatsheet"]]})
 
 
 class LangKeywordsView(APIView):
@@ -997,3 +997,372 @@ class LearnToolRunView(APIView):
 
     def get(self, request, tool=None):
         return self._run(tool, request.query_params)
+
+
+# ============================================================
+# 五、v8 学习闭环增强（dsh 2026-09-30）
+#   F519 月度学习报告 / F520 错题重练 / F521 艾宾浩斯复习队列 / F522 连续打卡
+#   F533 学习数据导出导入 / F541 弱项雷达 / F542 学习区全局搜索
+# 只增不改：全部为新增接口，不动任何既有接口的请求与响应契约。
+# ============================================================
+
+# 艾宾浩斯复习间隔（天）：复习次数越多，间隔越长
+_EBBINGHAUS = [1, 2, 4, 7, 15, 30, 60]
+
+
+def _review_due(last_reviewed, review_count):
+    """按艾宾浩斯间隔判断某条记录今天是否该复习。"""
+    if last_reviewed is None:
+        return True
+    idx = min(int(review_count or 0), len(_EBBINGHAUS) - 1)
+    return (dt.date.today() - last_reviewed).days >= _EBBINGHAUS[idx]
+
+
+def _norm_answer(v):
+    """规范化作答后比较：判断题统一成「对/错」，其余去空白并忽略大小写。"""
+    s = str(v if v is not None else "").strip().lower()
+    if s in {"true", "t", "1", "对", "正确", "是", "√", "yes", "y"}:
+        return "对"
+    if s in {"false", "f", "0", "错", "错误", "否", "×", "no", "n"}:
+        return "错"
+    return re.sub(r"\s+", "", s)
+
+
+class StudyStreakView(APIView):
+    """F522 连续打卡：当前连续 / 历史最长 / 今日时长 / 全部有记录的日期。"""
+
+    def get(self, request):
+        qs = StudySession.objects.filter(owner=request.user)
+        days = sorted({s.study_date for s in qs})
+        today = dt.date.today()
+        today_minutes = sum(s.minutes for s in qs if s.study_date == today)
+        if not days:
+            return Response({"current": 0, "longest": 0, "today_minutes": 0,
+                             "total_minutes": 0, "last_date": None, "days": []})
+        longest = run = 1
+        for prev, cur in zip(days, days[1:]):
+            run = run + 1 if (cur - prev).days == 1 else 1
+            longest = max(longest, run)
+        current, cursor = 0, (today if today in days else today - dt.timedelta(days=1))
+        while cursor in days:
+            current += 1
+            cursor -= dt.timedelta(days=1)
+        return Response({
+            "current": current,
+            "longest": max(longest, current),
+            "today_minutes": today_minutes,
+            "total_minutes": sum(s.minutes for s in qs),
+            "last_date": days[-1].isoformat(),
+            "days": [d.isoformat() for d in days],
+        })
+
+
+class StudyReportView(APIView):
+    """F519 月度学习报告：时长 / 活跃天数 / 科目分布 / 错题 / 进度，附 Markdown 导出。"""
+
+    def get(self, request):
+        month = request.query_params.get("month") or dt.date.today().strftime("%Y-%m")
+        try:
+            year, mon = int(month.split("-")[0]), int(month.split("-")[1])
+            first = dt.date(year, mon, 1)
+        except (ValueError, IndexError):
+            return Response({"ok": False, "error": "month 需为 YYYY-MM 格式"}, status=400)
+        nxt = dt.date(year + 1, 1, 1) if mon == 12 else dt.date(year, mon + 1, 1)
+        last = nxt - dt.timedelta(days=1)
+
+        qs = StudySession.objects.filter(owner=request.user, study_date__gte=first, study_date__lte=last)
+        total = sum(s.minutes for s in qs)
+        active = {s.study_date for s in qs}
+        by_subject = {}
+        for s in qs:
+            by_subject[s.subject] = by_subject.get(s.subject, 0) + s.minutes
+
+        mis = MistakeRecord.objects.filter(owner=request.user,
+                                           created_at__date__gte=first, created_at__date__lte=last)
+        mis_total, mis_fixed = mis.count(), mis.filter(mastered=True).count()
+        prog_updates = LearningProgress.objects.filter(
+            owner=request.user, updated_at__date__gte=first, updated_at__date__lte=last).count()
+
+        top = sorted(by_subject.items(), key=lambda kv: -kv[1])[:5]
+        lines = [
+            f"# {year} 年 {mon} 月学习报告",
+            "",
+            f"- 累计学习时长：**{total} 分钟**（约 {round(total / 60, 1)} 小时）",
+            f"- 有记录的天数：**{len(active)} 天**（本月共 {last.day} 天）",
+            f"- 日均时长：**{round(total / last.day, 1)} 分钟**",
+            f"- 本月新增错题：**{mis_total} 道**，已订正 **{mis_fixed} 道**",
+            f"- 进度更新条目：**{prog_updates} 条**",
+            "",
+            "## 科目分布（Top 5）",
+        ]
+        lines += [f"- {k}：{v} 分钟" for k, v in top] or ["- 本月还没有专注记录"]
+        lines += [
+            "",
+            "## 建议",
+            "- " + ("保持每天 25 分钟以上的专注记录" if total else "先从一个番茄钟开始，今天记满 25 分钟"),
+            "- " + ("错题订正率偏低，建议用「错题重练」优先消化未掌握错题"
+                    if mis_total and mis_fixed * 2 < mis_total else "错题订正情况良好，继续按复习队列走"),
+        ]
+        return Response({
+            "month": f"{year}-{mon:02d}", "total_minutes": total, "active_days": len(active),
+            "avg_minutes": round(total / last.day, 1), "by_subject": by_subject,
+            "mistakes": {"total": mis_total, "fixed": mis_fixed},
+            "progress_updates": prog_updates, "markdown": "\n".join(lines),
+        })
+
+
+class StudyReviewQueueView(APIView):
+    """F521 艾宾浩斯复习队列：今日应复习的生词与错题；POST 标记「今天已复习」。"""
+
+    def get(self, request):
+        words = [w for w in WordbookItem.objects.filter(owner=request.user, mastered=False)
+                 if _review_due(w.last_reviewed, w.review_count)]
+        mistakes = [m for m in MistakeRecord.objects.filter(owner=request.user, mastered=False)
+                    if _review_due(m.last_reviewed, m.redrill_attempts)]
+        return Response({
+            "date": dt.date.today().isoformat(),
+            "total": len(words) + len(mistakes),
+            "words": [{"id": w.id, "word": w.word, "phonetic": w.phonetic, "meaning": w.meaning,
+                       "review_count": w.review_count,
+                       "last_reviewed": w.last_reviewed.isoformat() if w.last_reviewed else None}
+                      for w in words],
+            "mistakes": [{"id": m.id, "subject": m.subject, "question_type": m.question_type,
+                          "stem": m.stem, "attempts": m.redrill_attempts,
+                          "last_reviewed": m.last_reviewed.isoformat() if m.last_reviewed else None}
+                         for m in mistakes],
+        })
+
+    def post(self, request):
+        kind, obj_id, today = request.data.get("kind"), request.data.get("id"), dt.date.today()
+        if kind == "word":
+            obj = get_object_or_404(WordbookItem, id=obj_id, owner=request.user)
+            obj.review_count += 1
+        elif kind == "mistake":
+            obj = get_object_or_404(MistakeRecord, id=obj_id, owner=request.user)
+            obj.redrill_attempts += 1
+        else:
+            return Response({"ok": False, "error": "kind 需为 word 或 mistake"}, status=400)
+        obj.last_reviewed = today
+        obj.save()
+        return Response({"ok": True, "kind": kind, "id": obj.id, "last_reviewed": today.isoformat()})
+
+
+class StudyReDrillView(APIView):
+    """F520 错题重练：GET 抽未掌握错题成卷（不含答案）；POST 交卷记二次正确率。"""
+
+    def get(self, request):
+        try:
+            n = max(1, min(int(request.query_params.get("n") or 5), 20))
+        except (TypeError, ValueError):
+            n = 5
+        qs = MistakeRecord.objects.filter(owner=request.user, mastered=False)
+        subject = request.query_params.get("subject")
+        if subject:
+            qs = qs.filter(subject=subject)
+        items = list(qs[:n])
+        return Response({"total": len(items), "list": [{
+            "id": m.id, "stage": m.stage, "subject": m.subject,
+            "question_type": m.question_type, "difficulty": m.difficulty,
+            "stem": m.stem, "attempts": m.redrill_attempts, "redrill_correct": m.redrill_correct,
+        } for m in items]})
+
+    def post(self, request):
+        m = get_object_or_404(MistakeRecord, id=request.data.get("id"), owner=request.user)
+        got, right = _norm_answer(request.data.get("answer")), _norm_answer(m.answer)
+        correct = bool(right) and got == right
+        m.redrill_attempts += 1
+        if correct:
+            m.redrill_correct += 1
+        m.last_reviewed = dt.date.today()
+        m.save()
+        rate = round(m.redrill_correct / m.redrill_attempts * 100) if m.redrill_attempts else 0
+        return Response({"correct": correct, "right_answer": m.answer, "analysis": m.analysis,
+                         "attempts": m.redrill_attempts, "redrill_correct": m.redrill_correct,
+                         "redrill_rate": rate})
+
+
+class StudyWeaknessView(APIView):
+    """F541 弱项雷达：按学科 / 题型算订正率，给出补弱顺序。"""
+
+    def get(self, request):
+        recs = list(MistakeRecord.objects.filter(owner=request.user))
+
+        def agg(key_fn):
+            buckets = {}
+            for m in recs:
+                k = key_fn(m) or "未分类"
+                b = buckets.setdefault(k, {"total": 0, "mastered": 0})
+                b["total"] += 1
+                if m.mastered:
+                    b["mastered"] += 1
+            rows = []
+            for k, v in buckets.items():
+                rate = round(v["mastered"] / v["total"] * 100) if v["total"] else 0
+                rows.append({"name": k, "total": v["total"], "mastered": v["mastered"],
+                             "fixed_rate": rate, "weak": rate < 60})
+            rows.sort(key=lambda r: (r["fixed_rate"], -r["total"]))
+            return rows
+
+        by_subject = agg(lambda m: m.subject)
+        by_type = agg(lambda m: dict(MistakeRecord.TYPES).get(m.question_type, m.question_type))
+        order = [r["name"] for r in by_subject if r["weak"]] or [r["name"] for r in by_subject]
+        return Response({"total": len(recs), "by_subject": by_subject, "by_type": by_type,
+                         "order": order[:5]})
+
+
+class StudyBackupView(APIView):
+    """F533 学习数据导出 / 导入（JSON），只覆盖学习区个人数据。"""
+
+    def get(self, request):
+        def dump(qs, fields):
+            out = []
+            for o in qs:
+                row = {}
+                for f in fields:
+                    v = getattr(o, f)
+                    row[f] = v.isoformat() if hasattr(v, "isoformat") else v
+                out.append(row)
+            return out
+
+        return Response({
+            "version": 1,
+            "exported_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "progress": dump(LearningProgress.objects.filter(owner=request.user),
+                             ["domain", "target_key", "target_name", "status", "percent", "note"]),
+            "bookmarks": dump(SnippetBookmark.objects.filter(owner=request.user),
+                              ["language", "title", "code", "note"]),
+            "wordbook": dump(WordbookItem.objects.filter(owner=request.user),
+                             ["word", "phonetic", "meaning", "mastered", "source", "review_count"]),
+            "mistakes": dump(MistakeRecord.objects.filter(owner=request.user),
+                             ["stage", "subject", "question_type", "difficulty", "stem", "answer",
+                              "user_answer", "analysis", "mastered", "redrill_attempts", "redrill_correct"]),
+            "sessions": dump(StudySession.objects.filter(owner=request.user),
+                             ["subject", "minutes", "study_date", "note"]),
+            "plans": dump(StudyPlan.objects.filter(owner=request.user),
+                          ["title", "subject", "total", "days", "plan", "finished", "start_date"]),
+        })
+
+    def post(self, request):
+        """导入：只新增、不覆盖既有数据（进度按 owner+domain+target_key 去重更新）。"""
+        d = request.data or {}
+        created = {"progress": 0, "bookmarks": 0, "wordbook": 0, "mistakes": 0, "sessions": 0, "plans": 0}
+        for it in d.get("progress", []):
+            LearningProgress.objects.update_or_create(
+                owner=request.user, domain=it.get("domain", "programming"),
+                target_key=it.get("target_key", ""),
+                defaults={"target_name": it.get("target_name", ""),
+                          "status": it.get("status", "learning"),
+                          "percent": int(it.get("percent") or 0), "note": it.get("note", "")})
+            created["progress"] += 1
+        for it in d.get("bookmarks", []):
+            SnippetBookmark.objects.create(owner=request.user, language=it.get("language", ""),
+                                           title=it.get("title", ""), code=it.get("code", ""),
+                                           note=it.get("note", ""))
+            created["bookmarks"] += 1
+        for it in d.get("wordbook", []):
+            WordbookItem.objects.get_or_create(
+                owner=request.user, word=it.get("word", ""),
+                defaults={"phonetic": it.get("phonetic", ""), "meaning": it.get("meaning", ""),
+                          "mastered": bool(it.get("mastered")), "source": it.get("source", "import")})
+            created["wordbook"] += 1
+        for it in d.get("mistakes", []):
+            MistakeRecord.objects.create(
+                owner=request.user, stage=it.get("stage", ""), subject=it.get("subject", ""),
+                question_type=it.get("question_type", "single"), difficulty=int(it.get("difficulty") or 1),
+                stem=it.get("stem", ""), answer=it.get("answer", ""), user_answer=it.get("user_answer", ""),
+                analysis=it.get("analysis", ""), mastered=bool(it.get("mastered")))
+            created["mistakes"] += 1
+        for it in d.get("sessions", []):
+            StudySession.objects.create(
+                owner=request.user, subject=it.get("subject", "通用"),
+                minutes=int(it.get("minutes") or 0),
+                study_date=it.get("study_date") or dt.date.today(), note=it.get("note", ""))
+            created["sessions"] += 1
+        for it in d.get("plans", []):
+            StudyPlan.objects.create(
+                owner=request.user, title=it.get("title", "导入计划"), subject=it.get("subject", ""),
+                total=int(it.get("total") or 0), days=int(it.get("days") or 7),
+                plan=it.get("plan") or [], finished=int(it.get("finished") or 0),
+                start_date=it.get("start_date") or dt.date.today())
+            created["plans"] += 1
+        return Response({"ok": True, "created": created})
+
+
+class ProgRadarView(APIView):
+    """F535 多语言进度雷达的数据面：10 门语言各维度的完成度，供前端手写 SVG。
+
+    维度：进度完成度（LearningProgress.percent）、收藏片段数、是否已开始。
+    """
+
+    def get(self, request):
+        prog = {p.target_key: p for p in LearningProgress.objects.filter(
+            owner=request.user, domain="programming")}
+        marks = {}
+        for b in SnippetBookmark.objects.filter(owner=request.user):
+            marks[b.language] = marks.get(b.language, 0) + 1
+        rows = []
+        for key in LANG_ORDER:
+            brief = lang_brief(key) or {}
+            p = prog.get(key)
+            rows.append({
+                "key": key,
+                "name": brief.get("name", key),
+                "icon": brief.get("icon", ""),
+                "percent": p.percent if p else 0,
+                "status": p.status if p else "not_started",
+                "bookmarks": marks.get(key, 0),
+                "started": bool(p),
+            })
+        started = [r for r in rows if r["started"]]
+        return Response({
+            "langs": rows,
+            "started_count": len(started),
+            "avg_percent": round(sum(r["percent"] for r in started) / len(started)) if started else 0,
+        })
+
+
+class LearningGlobalSearchView(APIView):
+    """F542 学习区全局搜索：诗词 / 单词 / 成语 / 汉字 / 公式 / 题目 / 知识点，一个框。"""
+
+    LIMIT = 6
+
+    def get(self, request):
+        q = (request.query_params.get("q") or "").strip()
+        if not q:
+            return Response({"ok": False, "error": "请输入关键词 q"}, status=400)
+        low = q.lower()
+
+        def hit(*vals):
+            return any(low in str(v or "").lower() for v in vals)
+
+        poems = [{"key": p.get("key"), "title": p.get("title"),
+                  "sub": f"{p.get('dynasty', '')} · {p.get('author', '')}"}
+                 for p in cn.POEMS if hit(p.get("title"), p.get("text"), p.get("author"))][:self.LIMIT]
+        words = [{"word": w.get("word"), "sub": w.get("meaning")}
+                 for w in en.WORDS if hit(w.get("word"), w.get("meaning"))][:self.LIMIT]
+        idioms = [{"word": i.get("word"), "sub": i.get("meaning")}
+                  for i in cn.IDIOMS if hit(i.get("word"), i.get("meaning"))][:self.LIMIT]
+        hanzi = [{"char": h.get("char"), "sub": f"{h.get('pinyin', '')} · {h.get('meaning', '')}"}
+                 for h in cn.HANZI if hit(h.get("char"), h.get("meaning"), h.get("pinyin"))][:self.LIMIT]
+        formulas = [{"key": f.get("key"), "name": f.get("name"), "sub": f.get("formula")}
+                    for f in cu.FORMULAS if hit(f.get("name"), f.get("formula"))][:self.LIMIT]
+        questions = [{"id": x.get("id"), "sub": x.get("stem"),
+                      "meta": f"{x.get('stage')} · {x.get('subject')} · {x.get('type')}"}
+                     for x in qb.QUESTIONS if hit(x.get("stem"), x.get("kp"))][:self.LIMIT]
+        points = []
+        for stage_subject, chapters in cu.KNOWLEDGE.items():
+            for blk in chapters:
+                ch_name = blk.get("chapter", "")
+                for pt_name in blk.get("points", []):
+                    if hit(pt_name, ch_name):
+                        points.append({"stage_subject": stage_subject, "chapter": ch_name, "name": pt_name})
+                    if len(points) >= self.LIMIT:
+                        break
+                if len(points) >= self.LIMIT:
+                    break
+            if len(points) >= self.LIMIT:
+                break
+
+        groups = {"poems": poems, "words": words, "idioms": idioms, "hanzi": hanzi,
+                  "formulas": formulas, "questions": questions, "points": points}
+        return Response({"q": q, "total": sum(len(v) for v in groups.values()), "groups": groups})

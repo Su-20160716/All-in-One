@@ -2,11 +2,14 @@
 from django.urls import path
 
 from projects import views
+from projects import extra_views
 
 urlpatterns = [
     # 项目
     path("", views.ProjectListView.as_view(), name="project-list"),
     path("my-tasks/", views.MyTasksView.as_view(), name="my-tasks"),
+    path("templates/", extra_views.BoardTemplateListView.as_view(), name="board-templates"),
+    path("from-template/", extra_views.ProjectFromTemplateView.as_view(), name="project-from-template"),
     path("<int:pk>/", views.ProjectDetailView.as_view(), name="project-detail"),
     path("<int:pk>/star/", views.ProjectStarView.as_view(), name="project-star"),
     path("<int:pk>/clone/", views.ProjectCloneView.as_view(), name="project-clone"),
@@ -17,6 +20,9 @@ urlpatterns = [
     path("<int:project_id>/activities/", views.ProjectActivityView.as_view(), name="project-activity"),
     path("<int:project_id>/stats/", views.ProjectStatsView.as_view(), name="project-stats"),
     path("<int:project_id>/calendar/", views.ProjectCalendarView.as_view(), name="project-calendar"),
+    path("<int:project_id>/burndown/", extra_views.ProjectBurndownView.as_view(), name="project-burndown"),
+    path("<int:project_id>/share/", extra_views.BoardShareCreateView.as_view(), name="board-share-create"),
+    path("<int:project_id>/share/<str:token>/", extra_views.BoardShareRevokeView.as_view(), name="board-share-revoke"),
     path("cards/batch/", views.CardBatchView.as_view(), name="card-batch"),
     # 看板列
     path("boards/<int:board_id>/", views.BoardDetailView.as_view(), name="board-detail"),
@@ -31,4 +37,9 @@ urlpatterns = [
     path("cards/<int:pk>/worklogs/<int:wid>/", views.WorkLogDetailView.as_view(), name="worklog-detail"),
     path("cards/<int:pk>/comments/", views.CardCommentListView.as_view(), name="comment-list"),
     path("cards/<int:pk>/comments/<int:cid>/", views.CardCommentDetailView.as_view(), name="comment-detail"),
+]
+
+# 公开只读看板分享（免登录），挂在 /share/board/<token>/
+board_share_urlpatterns = [
+    path("share/board/<str:token>/", extra_views.BoardSharePublicView.as_view(), name="board-share-public"),
 ]

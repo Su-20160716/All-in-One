@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="mx-auto max-w-6xl space-y-5">
     <!-- 头图 -->
     <div class="card overflow-hidden">
@@ -35,10 +35,14 @@
             <option v-for="l in langs" :key="l.key" :value="l.key">{{ l.name }}</option>
           </select>
         </div>
+        <p class="mb-3 rounded-lg bg-ink-50 px-3 py-2 text-[12px] leading-5 text-ink-500">
+          今天练哪道？用右上角下拉把题目锁到一门语言（默认全部），可能是四选一的选择题，也可能是让你读程序写结果、
+          填空的文本题；选/写完点「提交判定」立刻对答案，无论对错都给一段解析，没思路就「换一题」重抽。
+        </p>
         <div v-if="daily" class="space-y-3">
           <div class="flex flex-wrap items-center gap-2">
             <span class="tag-brand">{{ langName(daily.lang) }}</span>
-            <span class="tag">{{ typeName(daily.type) }}</span>
+            <span class="rounded-pill px-2 py-0.5 text-[11px]" :class="typeMeta(daily.type).chip">{{ typeName(daily.type) }}</span>
             <span class="tag">难度 {{ daily.level }}</span>
           </div>
           <p class="text-[13px] font-medium text-ink-700">{{ daily.stem }}</p>
@@ -58,6 +62,20 @@
             </span>
           </div>
           <div v-if="dailyResult" class="rounded-control bg-ink-50 p-3 text-[12px] leading-6 text-ink-600">解析：{{ dailyResult.explain }}</div>
+          <div v-if="dailyResult" class="flex flex-wrap items-center gap-2 text-[12px]">
+            <span class="text-ink-500">关联知识点：</span>
+            <template v-if="dailyKnowledge.length">
+              <span v-for="k in dailyKnowledge" :key="k" class="tag-brand">{{ k }}</span>
+              <RouterLink class="text-brand-600 hover:underline" to="/learning/school">去学科中心巩固 →</RouterLink>
+            </template>
+            <template v-else>
+              <span class="rounded-pill px-2 py-0.5 text-[11px]" :class="typeMeta(daily.type).chip">考点 · {{ typeMeta(daily.type).point }}</span>
+              <span class="text-ink-400">这道题暂未标注关联知识点，先按题型考点回看解析</span>
+            </template>
+          </div>
+        </div>
+        <div v-else class="rounded-control bg-ink-50 p-4 text-[13px] leading-6 text-ink-400">
+          还没抽到今日题目：把上方语言切回「全部语言」再等几秒，或刷新页面重抽。
         </div>
       </div>
 
@@ -74,6 +92,10 @@
             <option value="mobile">移动开发</option>
           </select>
         </div>
+        <p class="mb-3 rounded-lg bg-ink-50 px-3 py-2 text-[12px] leading-5 text-ink-500">
+          先回答“我要做什么”：人工智能偏 Python、网站开发看 JavaScript/Go/Java、底层系统盯 C/C++/Rust。
+          挑一个目标，下面给出推荐理由和匹配语言卡片，点「去学」直接带语言参数跳进广场对应详情。
+        </p>
         <p class="mb-3 rounded-control bg-brand-50 p-2.5 text-[12px] leading-6 text-brand-700">{{ recReason }}</p>
         <div class="space-y-2">
           <div v-for="l in recommends" :key="l.key" class="flex items-center gap-3 rounded-control border border-ink-100 p-3">
@@ -82,7 +104,10 @@
               <div class="text-[13px] font-semibold text-ink-800">{{ l.name }}</div>
               <div class="truncate text-[12px] text-ink-400">{{ l.summary }}</div>
             </div>
-            <RouterLink class="btn-ghost" to="/learning/programming">去学</RouterLink>
+            <RouterLink class="btn-ghost" :to="{ path: '/learning/programming', query: { lang: l.key } }">去学</RouterLink>
+          </div>
+          <div v-if="!recommends.length" class="rounded-control bg-ink-50 p-3 text-[12px] leading-6 text-ink-400">
+            这个目标下还没返回语言：换一个目标（试试「求职就业」——它给 Java/Python/JavaScript），或稍后重试。
           </div>
         </div>
       </div>
@@ -91,7 +116,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { learnApi } from '../../api'
 import { useAppStore } from '../../stores/app'
 
@@ -108,6 +133,25 @@ const entries = [
 ]
 const TYPE = { quiz: '单选题', output: '读程序写结果', fill: '代码填空', bug: '找错题' }
 const typeName = (t) => TYPE[t] || t
+// 四种题型的视觉区分：与刷题训练页同一套配色（蓝/紫/黄/红）
+const TYPE_META = {
+  quiz: { chip: 'bg-brand-50 text-brand-700', point: '基础语法与 API 辨析' },
+  output: { chip: 'bg-violet-50 text-violet-700', point: '程序执行跟踪 · 逐行推演' },
+  fill: { chip: 'bg-amber-50 text-amber-700', point: '语法细节与代码补全' },
+  bug: { chip: 'bg-rose-50 text-rose-600', point: '调试排错与代码阅读' },
+}
+const typeMeta = (t) => TYPE_META[t] || { chip: 'bg-ink-100 text-ink-600', point: '综合代码能力' }
+// 判定后展示关联知识点；后端补充 kp/knowledge 字段后自动显示，否则回落到题型考点标签
+const dailyKnowledge = computed(() => {
+  const d = daily.value
+  if (!d) return []
+  const kp = d.kp || d.knowledge_point
+  const arr = d.knowledge || d.points || d.kps || []
+  const out = []
+  if (kp) out.push(...(Array.isArray(kp) ? kp : [kp]))
+  if (Array.isArray(arr)) out.push(...arr)
+  return [...new Set(out.filter(Boolean))]
+})
 const langName = (k) => langs.value.find((l) => l.key === k)?.name || k
 
 const stats = ref({ langs: 10, points: 1500, tools: 40, formulas: 60 })

@@ -56,12 +56,14 @@
           <div class="mb-1.5 flex items-center justify-between text-[12px] font-medium text-ink-600">
             <span>权限点（按模块）</span>
             <div class="flex gap-2">
+              <!-- #74 权限点搜索过滤 -->
+              <input v-model="permSearch" class="input w-32 text-[11px]" placeholder="搜索权限…" />
               <button class="text-brand-600" @click="toggleAllPerms(true)">全选</button>
               <button class="text-ink-400" @click="toggleAllPerms(false)">清空</button>
             </div>
           </div>
           <div class="max-h-64 space-y-2 overflow-y-auto rounded-control border border-ink-100 p-2">
-            <div v-for="(items, mod) in grouped" :key="mod">
+            <div v-for="(items, mod) in filteredGrouped" :key="mod">
               <div class="text-[11px] font-semibold uppercase text-ink-400">{{ mod }}</div>
               <label v-for="p in items" :key="p.id" class="flex items-center gap-1.5 rounded px-1 py-0.5 text-[12px] hover:bg-ink-50">
                 <input v-model="editing.permission_ids" type="checkbox" :value="p.id" />
@@ -77,7 +79,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { adminApi } from '../../api'
 import { useAppStore } from '../../stores/app'
 import Modal from '../../components/Modal.vue'
@@ -87,6 +89,19 @@ const roles = ref([])
 const permissions = ref([])
 const grouped = ref({})
 const editing = ref(null)
+const permSearch = ref('')
+
+// #74 权限点搜索过滤
+const filteredGrouped = computed(() => {
+  if (!permSearch.value) return grouped.value
+  const q = permSearch.value.toLowerCase()
+  const out = {}
+  for (const [mod, items] of Object.entries(grouped.value)) {
+    const filtered = items.filter(p => p.name.toLowerCase().includes(q) || p.code.toLowerCase().includes(q))
+    if (filtered.length) out[mod] = filtered
+  }
+  return out
+})
 
 function permissionNames(ids) {
   return permissions.value.filter((p) => ids?.includes(p.id)).map((p) => p.name)

@@ -1,7 +1,9 @@
 """文件管理视图：文件夹树、分片上传、断点续传、秒传、回收站、共享链接、
 批量操作、在线新建/编辑、复制、收藏备注、存储分析、重复检测、最近访问、打包下载、
 多类型在线预览（含 HTTP Range 流式播放）、Office 转 PDF。"""
+import csv
 import io
+import json
 import mimetypes
 import os
 import re
@@ -20,14 +22,24 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.models import notify
+from core.models import Notification, notify
 from core.scoping import is_visible, scope_queryset
 from core.utils import file_kind, format_size, sha1_file
 from files import office
-from files.models import ChunkUpload, FileMeta, Folder, RecentFile, ShareLink
+from files.models import (
+    ChunkUpload,
+    FileMeta,
+    FileOperationLog,
+    FileTag,
+    FileVisibilitySnapshot,
+    Folder,
+    RecentFile,
+    ShareLink,
+)
 from files.serializers import (
     ChunkInitSerializer,
     FileMetaSerializer,
+    FileTagSerializer,
     FolderSerializer,
     ShareLinkSerializer,
 )
@@ -69,7 +81,88 @@ def _touch_recent(user, fm):
 def _owner_folder(user, folder_id):
     if folder_id in (None, "", "null", "0", 0):
         return None
+    try:
+        folder_id = int(folder_id)
+    except (TypeError, ValueError):
+        return None  # 非法 id 视为根目录，避免 500
     return Folder.objects.filter(pk=folder_id, owner=user).first()
+
+
+# ============ F559 操作记录 / F561 可见性快照 辅助 ============
+
+def _folder_label(folder):
+    return folder.name if folder else "根目录"
+
+
+def _log_op(user, fm, action, detail="", from_folder="", to_folder=""):
+    """写一条文件操作流水；任何异常都不影响主流程"""
+    try:
+        FileOperationLog.objects.create(
+            owner=user, file=fm, file_name=fm.name if fm else "", action=action,
+            detail=str(detail or "")[:500], from_folder=str(from_folder or "")[:200],
+            to_folder=str(to_folder or "")[:200],
+        )
+    except Exception:
+        pass
+
+
+def _active_file_shares(fm):
+    """文件当前有效的共享链接（未撤销、未过期、未达下载上限）"""
+    now = timezone.now()
+    return [l for l in ShareLink.objects.filter(file=fm, is_revoked=False)
+            if l.expire_at is None or l.expire_at > now]
+
+
+def _visibility_state(fm):
+    """计算文件当前可见性状态"""
+    shares = list(ShareLink.objects.filter(file=fm).order_by("-created_at"))
+    active = [l for l in shares if not l.is_expired]
+    if not shares:
+        vis = "private"
+    elif active:
+        vis = "shared"
+    elif all(l.is_revoked for l in shares):
+        vis = "revoked"
+    else:
+        vis = "expired"
+    from core.scoping import describe_scope
+    try:
+        scope = describe_scope(fm.owner).get("scope", "self")
+    except Exception:
+        scope = "self"
+    return {
+        "file_id": fm.id,
+        "file_name": fm.name,
+        "visibility": vis,
+        "visibility_label": {"private": "仅自己可见", "shared": "共享链接可见",
+                             "expired": "链接已过期", "revoked": "链接已撤销"}[vis],
+        "data_scope": scope,
+        "owner": getattr(fm.owner, "display_name", "") or getattr(fm.owner, "username", ""),
+        "active_shares": len(active),
+        "shares": [{
+            "token": l.token, "permission": l.permission, "is_revoked": l.is_revoked,
+            "is_expired": l.is_expired, "expire_at": l.expire_at,
+            "password": bool(l.password), "view_count": l.view_count, "download_count": l.download_count,
+            "url": f"/share/{l.token}",
+        } for l in shares[:20]],
+    }
+
+
+def _record_visibility(fm, user, note="", action=""):
+    """落一条可见性快照（分享创建/修改/撤销时自动调用）"""
+    try:
+        state = _visibility_state(fm)
+        active = _active_file_shares(fm)
+        link = active[0] if active else None
+        FileVisibilitySnapshot.objects.create(
+            file=fm, created_by=user, visibility=state["visibility"],
+            data_scope=state["data_scope"], share_token=link.token if link else "",
+            permission=link.permission if link else "",
+            expire_at=link.expire_at if link else None,
+            snapshot=state, note=note or action,
+        )
+    except Exception:
+        pass
 
 
 # ============ 文件夹 ============
@@ -79,7 +172,13 @@ class FolderListView(APIView):
 
     def get(self, request):
         parent = request.query_params.get("parent")
-        parent = None if parent in (None, "", "null", "0") else int(parent)
+        if parent in (None, "", "null", "0"):
+            parent = None
+        else:
+            try:
+                parent = int(parent)
+            except (TypeError, ValueError):
+                return Response({"message": "parent 必须是整数"}, status=400)
         qs = Folder.objects.filter(owner=request.user, parent_id=parent)
         return Response({"list": FolderSerializer(qs, many=True).data, "total": qs.count()})
 
@@ -179,7 +278,10 @@ class FileListView(APIView):
         if folder_id in (None, "", "null", "0"):
             qs = qs.filter(folder__isnull=True)
         else:
-            qs = qs.filter(folder_id=folder_id)
+            try:
+                qs = qs.filter(folder_id=int(folder_id))
+            except (TypeError, ValueError):
+                return Response({"message": "folder 必须是整数"}, status=400)
         if keyword:
             qs = qs.filter(Q(name__icontains=keyword) | Q(sha1__icontains=keyword) | Q(description__icontains=keyword))
         kind = request.query_params.get("kind")
@@ -190,6 +292,12 @@ class FileListView(APIView):
         ext = request.query_params.get("ext")
         if ext:
             qs = qs.filter(ext__iexact=ext)
+        tag = request.query_params.get("tag")
+        if tag:
+            qs = qs.filter(tags__name=tag).distinct()
+        group = request.query_params.get("group")
+        if group is not None and group != "" :
+            qs = qs.filter(favorite_group=group)
         sort = request.query_params.get("sort", "-created_at")
         allowed = {
             "name", "-name", "size", "-size", "created_at", "-created_at",
@@ -305,7 +413,10 @@ class UploadChunkView(APIView):
 
     def post(self, request):
         upload_id = request.data.get("upload_id")
-        index = int(request.data.get("index", -1))
+        try:
+            index = int(request.data.get("index", -1))
+        except (TypeError, ValueError):
+            return Response({"message": "index 必须是整数"}, status=status.HTTP_400_BAD_REQUEST)
         chunk_file = request.FILES.get("chunk")
         chunk = ChunkUpload.objects.filter(upload_id=upload_id, user=request.user).first()
         if not chunk:
@@ -349,11 +460,22 @@ class UploadCompleteView(APIView):
         rel_dir = os.path.join("files", str(chunk.user_id), year_month)
         abs_dir = _safe_join(MEDIA, rel_dir)
         os.makedirs(abs_dir, exist_ok=True)
+        folder = Folder.objects.filter(pk=chunk.folder_id, owner=request.user).first() if chunk.folder_id else None
         base, ext = os.path.splitext(chunk.filename)
         final_rel = os.path.join(rel_dir, chunk.filename)
         final_abs = _safe_join(MEDIA, final_rel)
+
+        def _name_taken(rel):
+            """F557 重名判定：磁盘已存在 或 同目录下已有同名 FileMeta"""
+            if os.path.exists(_safe_join(MEDIA, rel)):
+                return True
+            return FileMeta.objects.filter(
+                owner=request.user, folder=folder, is_deleted=False,
+                name=os.path.basename(rel),
+            ).exists()
+
         i = 1
-        while os.path.exists(final_abs):
+        while _name_taken(final_rel):
             final_rel = os.path.join(rel_dir, f"{base}({i}){ext}")
             final_abs = _safe_join(MEDIA, final_rel)
             i += 1
@@ -373,7 +495,6 @@ class UploadCompleteView(APIView):
             os.remove(final_abs)
             storage_rel = exist.storage_path
 
-        folder = Folder.objects.filter(pk=chunk.folder_id, owner=request.user).first() if chunk.folder_id else None
         ext = os.path.splitext(chunk.filename)[1].lower().lstrip(".")
         thumb_rel = ""
         if file_kind(chunk.filename) == "image":
@@ -393,7 +514,13 @@ class UploadCompleteView(APIView):
         chunk.status = "completed"
         chunk.save(update_fields=["status", "updated_at"])
         shutil.rmtree(_safe_join(MEDIA, chunk.temp_dir), ignore_errors=True)
-        return Response({"message": "上传完成", "file": FileMetaSerializer(fm).data})
+        _log_op(request.user, fm, "upload", detail="分片上传完成",
+                to_folder=_folder_label(folder))
+        payload = {"message": "上传完成", "file": FileMetaSerializer(fm).data}
+        # F557 重名自动改名：把最终名称回传给前端提示
+        if fm.name != chunk.filename:
+            payload["renamed"] = {"original": chunk.filename, "final": fm.name}
+        return Response(payload)
 
 
 class FileDetailView(APIView):
@@ -420,12 +547,17 @@ class FileDetailView(APIView):
         if not fm:
             return Response({"message": "文件不存在"}, status=status.HTTP_404_NOT_FOUND)
         fields = []
+        from_folder_old = _folder_label(fm.folder)
         if "name" in request.data:
             new_name = request.data["name"].strip()
             if not new_name:
                 return Response({"message": "文件名不能为空"}, status=status.HTTP_400_BAD_REQUEST)
+            old_name = fm.name
             fm.name = new_name
             fields.append("name")
+            if old_name != new_name:
+                _log_op(request.user, fm, "rename", detail=f"{old_name} → {new_name}",
+                        from_folder=from_folder_old, to_folder=from_folder_old)
         if "folder" in request.data:
             new_folder_id = request.data.get("folder")
             if new_folder_id in (None, "", "null"):
@@ -436,6 +568,8 @@ class FileDetailView(APIView):
                     return Response({"message": "目标文件夹不存在"}, status=status.HTTP_404_NOT_FOUND)
                 fm.folder = new_folder
             fields.append("folder")
+            _log_op(request.user, fm, "move", from_folder=from_folder_old,
+                    to_folder=_folder_label(fm.folder))
         if "is_star" in request.data:
             fm.is_star = bool(request.data["is_star"])
             fields.append("is_star")
@@ -492,7 +626,13 @@ class FileBatchView(APIView):
             folder = _owner_folder(request.user, request.data.get("folder"))
             if request.data.get("folder") not in (None, "", "null", "0", 0) and not folder:
                 return Response({"message": "目标文件夹不存在"}, status=404)
-            n = qs.update(folder=folder)
+            n = 0
+            for fm in qs:
+                src = _folder_label(fm.folder)
+                fm.folder = folder
+                fm.save(update_fields=["folder", "updated_at"])
+                _log_op(request.user, fm, "move", from_folder=src, to_folder=_folder_label(folder))
+                n += 1
             return Response({"message": f"已移动 {n} 个文件"})
         if action == "star":
             n = qs.update(is_star=True)
@@ -545,6 +685,8 @@ class FileCopyView(APIView):
             size=fm.size, sha1=fm.sha1, kind=fm.kind, ext=fm.ext, thumbnail_path=fm.thumbnail_path,
             description=fm.description,
         )
+        _log_op(request.user, copy, "copy", detail=f"复制自 {fm.name}",
+                from_folder=_folder_label(fm.folder), to_folder=_folder_label(fm.folder))
         return Response(FileMetaSerializer(copy).data, status=201)
 
 
@@ -563,7 +705,9 @@ class FileCreateTextView(APIView):
         base, ext = os.path.splitext(name)
         rel = os.path.join(rel_dir, name).replace("\\", "/")
         i = 1
-        while os.path.exists(_safe_join(MEDIA, rel)):
+        # F557 重名自动改名：磁盘 + 同目录 FileMeta 双重判定
+        while os.path.exists(_safe_join(MEDIA, rel)) or FileMeta.objects.filter(
+                owner=request.user, folder=folder, is_deleted=False, name=os.path.basename(rel)).exists():
             rel = os.path.join(rel_dir, f"{base}({i}){ext}").replace("\\", "/")
             i += 1
         data = content.encode("utf-8")
@@ -925,11 +1069,18 @@ class RecentFileView(APIView):
 
 
 class StarredFileView(APIView):
-    """收藏的文件"""
+    """收藏的文件：支持 ?group= 按收藏分组筛选，并返回分组聚合；按 favorite_order 自定义排序"""
 
     def get(self, request):
         qs = _file_qs(request.user).filter(is_deleted=False, is_star=True)
-        return Response({"list": FileMetaSerializer(qs, many=True).data, "total": qs.count()})
+        group = request.query_params.get("group")
+        if group is not None and group != "":
+            qs = qs.filter(favorite_group=group)
+        qs = qs.order_by("favorite_order", "-updated_at", "-created_at")
+        groups = list(_file_qs(request.user).filter(is_deleted=False, is_star=True)
+                      .values("favorite_group").annotate(c=Count("id")))
+        return Response({"list": FileMetaSerializer(qs, many=True).data,
+                         "total": qs.count(), "groups": groups})
 
 
 class StorageAnalysisView(APIView):
@@ -1016,11 +1167,16 @@ class TrashActionView(APIView):
 
 
 class TrashAutoCleanView(APIView):
-    """清理超过保留期的回收站文件（按 TRASH_KEEP_DAYS）"""
+    """清理超过保留期的回收站文件（按 TRASH_KEEP_DAYS，可传 days 覆盖）"""
 
     def post(self, request):
         from django.conf import settings as s
-        days = s.TRASH_KEEP_DAYS
+        try:
+            days = int(request.data.get("days") or s.TRASH_KEEP_DAYS)
+        except (TypeError, ValueError):
+            days = s.TRASH_KEEP_DAYS
+        if days < 1:
+            return Response({"message": "days 必须 >= 1"}, status=status.HTTP_400_BAD_REQUEST)
         threshold = timezone.now() - timedelta(days=days)
         qs = FileMeta.objects.filter(owner=request.user, is_deleted=True, deleted_at__lt=threshold)
         count = 0
@@ -1028,7 +1184,12 @@ class TrashAutoCleanView(APIView):
             FileBatchView._remove_physical(fm)
             fm.delete()
             count += 1
-        return Response({"message": f"已清理 {count} 个过期回收文件", "cleaned": count})
+        return Response({"message": f"已清理 {count} 个过期回收文件", "cleaned": count, "days": days})
+
+    def get(self, request):
+        """返回当前清理配置"""
+        from django.conf import settings as s
+        return Response({"trash_keep_days": getattr(s, "TRASH_KEEP_DAYS", 30)})
 
 
 # ============ 共享链接 ============
@@ -1043,6 +1204,11 @@ class ShareLinkCreateView(APIView):
         max_downloads = request.data.get("max_downloads")
         if permission not in ("view", "download", "edit"):
             return Response({"message": "权限值非法"}, status=400)
+        try:
+            hours = int(expire_hours) if expire_hours not in (None, "") else None
+            mlimit = int(max_downloads) if max_downloads not in (None, "", 0, "0") else None
+        except (TypeError, ValueError):
+            return Response({"message": "expire_hours / max_downloads 必须是整数"}, status=400)
 
         target = None
         if file_id:
@@ -1057,7 +1223,7 @@ class ShareLinkCreateView(APIView):
             return Response({"message": "请指定文件或文件夹"}, status=400)
 
         token = uuid.uuid4().hex[:16]
-        expire_at = timezone.now() + timedelta(hours=int(expire_hours)) if expire_hours else None
+        expire_at = timezone.now() + timedelta(hours=hours) if hours else None
         link = ShareLink.objects.create(
             token=token,
             file=target if isinstance(target, FileMeta) else None,
@@ -1066,8 +1232,10 @@ class ShareLinkCreateView(APIView):
             permission=permission,
             expire_at=expire_at,
             password=password[:64],
-            max_downloads=int(max_downloads) if max_downloads not in (None, "", 0, "0") else None,
+            max_downloads=mlimit,
         )
+        if link.file:
+            _record_visibility(link.file, request.user, note="创建共享链接", action="share_create")
         return Response(ShareLinkSerializer(link).data, status=201)
 
 
@@ -1101,25 +1269,41 @@ class ShareLinkDetailView(APIView):
         if not link:
             return Response({"message": "链接不存在"}, status=404)
         if "permission" in request.data:
+            if request.data["permission"] not in ("view", "download", "edit"):
+                return Response({"message": "权限值非法"}, status=400)
             link.permission = request.data["permission"]
         if "password" in request.data:
             link.password = request.data["password"] or ""
         if "max_downloads" in request.data:
             v = request.data["max_downloads"]
-            link.max_downloads = int(v) if v not in (None, "", 0, "0") else None
+            try:
+                link.max_downloads = int(v) if v not in (None, "", 0, "0") else None
+            except (TypeError, ValueError):
+                return Response({"message": "max_downloads 必须是整数"}, status=400)
         if "expire_hours" in request.data:
             eh = request.data["expire_hours"]
-            link.expire_at = timezone.now() + timedelta(hours=int(eh)) if eh else None
+            if eh not in (None, ""):
+                try:
+                    link.expire_at = timezone.now() + timedelta(hours=int(eh))
+                except (TypeError, ValueError):
+                    return Response({"message": "expire_hours 必须是整数"}, status=400)
+            else:
+                link.expire_at = None
         if "is_revoked" in request.data:
             link.is_revoked = bool(request.data["is_revoked"])
         link.save()
+        if link.file:
+            _record_visibility(link.file, request.user, note="更新共享链接", action="share_update")
         return Response(ShareLinkSerializer(link).data)
 
     def delete(self, request, token):
         link = self._get(request, token)
         if not link:
             return Response({"message": "链接不存在"}, status=404)
+        fm = link.file
         link.delete()
+        if fm:
+            _record_visibility(fm, request.user, note="撤销共享链接", action="share_revoke")
         return Response({"message": "链接已撤销"})
 
 
@@ -1189,3 +1373,702 @@ class ShareDownloadView(APIView):
         link.download_count += 1
         link.save(update_fields=["download_count"])
         return FileResponse(open(abs_path, "rb"), as_attachment=True, filename=fm.name)
+
+
+# ============ 文件标签（多标签体系） ============
+
+# 内置文件夹模板（一键递归建夹）
+FOLDER_TEMPLATES = [
+    {"key": "project-docs", "name": "项目文档", "structure": {
+        "立项": [], "需求": [], "设计": [], "测试": [], "发布": []}},
+    {"key": "product-rd", "name": "产品研发", "structure": {
+        "产品文档": [], "技术方案": [], "迭代记录": [], "会议纪要": []}},
+    {"key": "personal", "name": "个人资料", "structure": {
+        "证件": [], "财务": [], "学习": [], "生活": []}},
+    {"key": "marketing", "name": "市场营销", "structure": {
+        "素材": [], "文案": [], "活动": [], "竞品": []}},
+    {"key": "team", "name": "团队协作", "structure": {
+        "周报": [], "月报": [], "培训": [], "制度": []}},
+]
+
+
+class FileTagListView(APIView):
+    """文件标签列表（含用量）/ 新建标签"""
+
+    def get(self, request):
+        qs = FileTag.objects.filter(owner=request.user).order_by("name")
+        return Response({"list": FileTagSerializer(qs, many=True).data, "total": qs.count()})
+
+    def post(self, request):
+        name = (request.data.get("name") or "").strip()
+        if not name:
+            return Response({"message": "标签名不能为空"}, status=status.HTTP_400_BAD_REQUEST)
+        tag, created = FileTag.objects.get_or_create(
+            name=name[:50], owner=request.user,
+            defaults={"color": request.data.get("color", "default")},
+        )
+        if not created:
+            return Response({"message": "标签已存在"}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(FileTagSerializer(tag).data, status=status.HTTP_201_CREATED)
+
+
+class FileTagDetailView(APIView):
+    """文件标签重命名 / 改色 / 删除"""
+
+    def get_object(self, request, pk):
+        return FileTag.objects.filter(pk=pk, owner=request.user).first()
+
+    def patch(self, request, pk):
+        tag = self.get_object(request, pk)
+        if not tag:
+            return Response({"message": "标签不存在"}, status=404)
+        if "name" in request.data and request.data["name"].strip():
+            tag.name = request.data["name"].strip()[:50]
+        if "color" in request.data:
+            tag.color = request.data["color"]
+        tag.save()
+        return Response(FileTagSerializer(tag).data)
+
+    def delete(self, request, pk):
+        tag = self.get_object(request, pk)
+        if not tag:
+            return Response({"message": "标签不存在"}, status=404)
+        tag.delete()
+        return Response({"message": "标签已删除"})
+
+
+class FileBatchTagView(APIView):
+    """给一批文件打标签 / 移除标签（add / remove / set）"""
+
+    def post(self, request):
+        action = request.data.get("action", "set")
+        ids = request.data.get("file_ids") or []
+        names = request.data.get("tags") or []
+        if not ids:
+            return Response({"message": "未选择文件"}, status=status.HTTP_400_BAD_REQUEST)
+        qs = FileMeta.objects.filter(owner=request.user, id__in=ids)
+        tags = []
+        for n in names:
+            n = str(n).strip()
+            if not n:
+                continue
+            tag, _ = FileTag.objects.get_or_create(name=n[:50], owner=request.user)
+            tags.append(tag)
+        n = 0
+        for fm in qs:
+            if action == "add":
+                fm.tags.add(*tags)
+            elif action == "remove":
+                fm.tags.remove(*tags)
+            else:
+                fm.tags.set(tags)
+            n += 1
+        return Response({"message": f"已为 {n} 个文件更新标签", "updated": n})
+
+
+class FileBatchRenameView(APIView):
+    """批量重命名：
+    - mode=prefix  加序号前缀：{prefix}{i:02d}_原名
+    - mode=replace 正则/字面替换：find -> replace
+    """
+
+    def post(self, request):
+        ids = request.data.get("file_ids") or []
+        mode = request.data.get("mode", "prefix")
+        if not ids:
+            return Response({"message": "未选择文件"}, status=status.HTTP_400_BAD_REQUEST)
+        qs = list(FileMeta.objects.filter(owner=request.user, id__in=ids, is_deleted=False))
+        if not qs:
+            return Response({"message": "没有可重命名的文件"}, status=400)
+        try:
+            start = int(request.data.get("start", 1))
+            pad = int(request.data.get("pad", 2))
+        except (TypeError, ValueError):
+            return Response({"message": "start / pad 必须是整数"}, status=400)
+        prefix = request.data.get("prefix", "") or ""
+        find = request.data.get("find", "") or ""
+        repl = request.data.get("replace", "") or ""
+        results = []
+        for idx, fm in enumerate(qs):
+            base, ext = os.path.splitext(fm.name)
+            if mode == "replace":
+                new_base = base.replace(find, repl) if find else base
+                new_name = f"{new_base}{ext}"
+            else:
+                new_name = f"{prefix}{str(start + idx).zfill(pad)}_{fm.name}"
+            new_name = new_name[:255]
+            if new_name and new_name != fm.name:
+                fm.name = new_name
+                fm.save(update_fields=["name", "updated_at"])
+            results.append({"id": fm.id, "name": fm.name})
+        return Response({"message": f"已重命名 {len(results)} 个文件", "renamed": results})
+
+
+class FolderTemplatesView(APIView):
+    """内置文件夹模板清单"""
+
+    def get(self, request):
+        return Response({"list": FOLDER_TEMPLATES, "total": len(FOLDER_TEMPLATES)})
+
+
+class FolderFromTemplateView(APIView):
+    """从模板一键递归创建文件夹。
+
+    入参：{"key": "project-docs"} 或 {"structure": {"子目录": ["孙目录", ...]}, "parent": 0}
+    """
+
+    def post(self, request):
+        parent = _owner_folder(request.user, request.data.get("parent"))
+        structure = request.data.get("structure")
+        if not structure:
+            key = request.data.get("key")
+            tpl = next((t for t in FOLDER_TEMPLATES if t["key"] == key), None)
+            if not tpl:
+                return Response({"message": "模板不存在"}, status=404)
+            structure = tpl["structure"]
+        created = []
+
+        def walk(node_structure, parent_node):
+            if isinstance(node_structure, dict):
+                for name, children in node_structure.items():
+                    folder = Folder.objects.create(
+                        name=str(name), parent=parent_node, owner=request.user
+                    )
+                    created.append(folder.name)
+                    walk(children, folder)
+            elif isinstance(node_structure, list):
+                for item in node_structure:
+                    if isinstance(item, dict):
+                        walk(item, parent_node)
+                    else:
+                        folder = Folder.objects.create(
+                            name=str(item), parent=parent_node, owner=request.user
+                        )
+                        created.append(folder.name)
+
+        walk(structure, parent)
+        return Response({"message": f"已创建 {len(created)} 个文件夹", "created": created, "count": len(created)})
+
+
+class FileCleanConfigView(APIView):
+    """回收站自动清理配置（读取；days 仅作展示，实际清理由 auto-clean 与管理命令执行）"""
+
+    def get(self, request):
+        return Response({
+            "trash_keep_days": getattr(settings, "TRASH_KEEP_DAYS", 30),
+            "file_max_size_mb": getattr(settings, "FILE_MAX_SIZE_MB", 1024),
+        })
+
+
+# =====================================================================
+# =========== F547–F564 文件中心新增能力（只增不改） ====================
+# =====================================================================
+
+def _int_param(request, name, default, lo=None, hi=None):
+    """安全取整数查询参数；非法值抛 ValueError（调用方转 400）"""
+    raw = request.query_params.get(name, request.data.get(name, None)) \
+        if hasattr(request, "query_params") else request.data.get(name, None)
+    if raw in (None, ""):
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"参数 {name} 必须是整数")
+    if lo is not None and val < lo:
+        raise ValueError(f"参数 {name} 不能小于 {lo}")
+    if hi is not None and val > hi:
+        raise ValueError(f"参数 {name} 不能大于 {hi}")
+    return val
+
+
+def _bad(message, code=400):
+    return Response({"message": message, "ok": False, "error": message}, status=code)
+
+
+class DuplicatesView(APIView):
+    """F547 重复文件检测：按 sha1 分组，返回每组文件明细与可释放空间"""
+
+    def get(self, request):
+        try:
+            limit = _int_param(request, "limit", 100, lo=1, hi=500)
+        except ValueError as e:
+            return _bad(str(e))
+        active = _file_qs(request.user).filter(is_deleted=False).exclude(sha1="").exclude(size=0)
+        dup = (active.values("sha1").annotate(c=Count("id")).filter(c__gt=1)
+               .order_by("-c")[:limit])
+        groups, wasted, file_count = [], 0, 0
+        for g in dup:
+            files = list(active.filter(sha1=g["sha1"]).order_by("-created_at"))
+            size = files[0].size if files else 0
+            w = size * (g["c"] - 1)
+            wasted += w
+            file_count += g["c"]
+            groups.append({
+                "sha1": g["sha1"], "count": g["c"], "size": size,
+                "size_text": format_size(size), "wasted": w, "wasted_text": format_size(w),
+                "files": FileMetaSerializer(files, many=True).data,
+            })
+        return Response({
+            "groups": groups, "group_count": len(groups), "file_count": file_count,
+            "wasted_bytes": wasted, "wasted_text": format_size(wasted),
+        })
+
+
+class StorageTrendView(APIView):
+    """F548 存储体积 30 天趋势：由文件创建/删除时间重建逐日曲线（前端渲染 SVG）"""
+
+    def get(self, request):
+        try:
+            days = _int_param(request, "days", 30, lo=7, hi=90)
+        except ValueError as e:
+            return _bad(str(e))
+        rows = _file_qs(request.user).values_list("created_at", "size", "deleted_at")
+        events = {}
+        for created, size, deleted in rows:
+            if not created:
+                continue
+            size = size or 0
+            cd = timezone.localtime(created).date()
+            events[cd] = events.get(cd, 0) + size
+            if deleted:
+                dd = timezone.localtime(deleted).date()
+                events[dd] = events.get(dd, 0) - size
+        today = timezone.localdate()
+        start = today - timedelta(days=days - 1)
+        first = min(events) if events else start
+        if first > start:
+            first = start
+        points, running, day = [], 0, first
+        while day <= today:
+            running += events.get(day, 0)
+            if day >= start:
+                val = max(running, 0)
+                points.append({"date": day.isoformat(), "bytes": val, "text": format_size(val)})
+            day += timedelta(days=1)
+        latest = points[-1]["bytes"] if points else 0
+        earliest = points[0]["bytes"] if points else 0
+        peak = max([p["bytes"] for p in points], default=0)
+        change = latest - earliest
+        return Response({
+            "days": days, "points": points,
+            "latest_bytes": latest, "latest_text": format_size(latest),
+            "peak_bytes": peak, "peak_text": format_size(peak),
+            "change_bytes": change, "change_text": format_size(abs(change)),
+            "change_pct": round(change / earliest * 100, 1) if earliest else (100.0 if latest else 0.0),
+        })
+
+
+class LargeFilesView(APIView):
+    """F549 大文件清单：阈值可调（min_mb，默认 50MB）"""
+
+    def get(self, request):
+        try:
+            min_mb = float(request.query_params.get("min_mb", 50))
+            limit = _int_param(request, "limit", 200, lo=1, hi=1000)
+        except (ValueError, TypeError) as e:
+            return _bad(str(e) if str(e) else "min_mb 必须是数字")
+        if min_mb < 0:
+            return _bad("min_mb 不能为负")
+        threshold = int(min_mb * 1024 * 1024)
+        qs = _file_qs(request.user).filter(is_deleted=False, size__gte=threshold).order_by("-size")
+        total_bytes = qs.aggregate(s=Sum("size"))["s"] or 0
+        files = list(qs[:limit])
+        return Response({
+            "threshold_mb": min_mb, "count": qs.count(),
+            "files": FileMetaSerializer(files, many=True).data,
+            "total_bytes": total_bytes, "total_text": format_size(total_bytes),
+        })
+
+
+class FileExportCsvView(APIView):
+    """F550 文件清单导出 CSV（支持 keyword/kind/tag/star 过滤，UTF-8 BOM）"""
+
+    def get(self, request):
+        qs = _file_qs(request.user).filter(is_deleted=False)
+        keyword = request.query_params.get("keyword") or request.query_params.get("q")
+        if keyword:
+            qs = qs.filter(Q(name__icontains=keyword) | Q(description__icontains=keyword))
+        kind = request.query_params.get("kind")
+        if kind:
+            qs = qs.filter(kind=kind)
+        tag = request.query_params.get("tag")
+        if tag:
+            qs = qs.filter(tags__name=tag).distinct()
+        if request.query_params.get("star") == "1":
+            qs = qs.filter(is_star=True)
+        qs = qs.order_by("-created_at")
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["ID", "文件名", "文件夹", "类型", "扩展名", "大小(字节)", "大小",
+                         "SHA1", "标签", "备注", "收藏", "创建时间", "更新时间"])
+        for fm in qs.iterator():
+            try:
+                tag_names = ",".join(fm.tags.values_list("name", flat=True))
+            except Exception:
+                tag_names = ""
+            writer.writerow([
+                fm.id, fm.name, _folder_label(fm.folder), fm.kind, fm.ext, fm.size,
+                format_size(fm.size), fm.sha1, tag_names, fm.description,
+                "是" if fm.is_star else "",
+                timezone.localtime(fm.created_at).strftime("%Y-%m-%d %H:%M") if fm.created_at else "",
+                timezone.localtime(fm.updated_at).strftime("%Y-%m-%d %H:%M") if fm.updated_at else "",
+            ])
+        resp = HttpResponse("\ufeff" + buf.getvalue(), content_type="text/csv; charset=utf-8")
+        resp["Content-Disposition"] = "attachment; filename=files.csv"
+        return resp
+
+
+class TrashStatsView(APIView):
+    """F551 回收站统计（一键清空沿用 /trash/action/ action=empty）"""
+
+    def get(self, request):
+        qs = _file_qs(request.user).filter(is_deleted=True)
+        agg = qs.aggregate(count=Count("id"), bytes=Sum("size"))
+        total = agg["count"] or 0
+        total_bytes = agg["bytes"] or 0
+        by_kind = []
+        for row in qs.values("kind").annotate(c=Count("id"), s=Sum("size")).order_by("-s"):
+            by_kind.append({"kind": row["kind"], "count": row["c"],
+                            "bytes": row["s"] or 0, "text": format_size(row["s"] or 0)})
+        oldest = qs.order_by("deleted_at").values_list("deleted_at", flat=True).first()
+        newest = qs.order_by("-deleted_at").values_list("deleted_at", flat=True).first()
+        return Response({
+            "count": total, "bytes": total_bytes, "text": format_size(total_bytes),
+            "by_kind": by_kind,
+            "oldest_at": oldest, "newest_at": newest,
+            "keep_days": getattr(settings, "TRASH_KEEP_DAYS", 30),
+            "avg_text": format_size(total_bytes // total) if total else "0 B",
+            "empty_api": "/api/files/trash/action/",
+        })
+
+
+def _image_dimensions(path):
+    """读取图片宽高；PIL 不可用或读取失败时返回 None（降级不报错）"""
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            w, h = img.size
+            return int(w), int(h)
+    except Exception:
+        return None
+
+
+class ImageDimsView(APIView):
+    """F553 图片分辨率批量徽章：按需计算并缓存 width/height"""
+
+    def get(self, request):
+        raw = request.query_params.get("ids", "")
+        qs = _file_qs(request.user).filter(is_deleted=False)
+        if raw.strip():
+            try:
+                ids = [int(x) for x in raw.split(",") if str(x).strip()][:300]
+            except ValueError:
+                return _bad("ids 必须是逗号分隔的整数")
+            qs = qs.filter(id__in=ids)
+        else:
+            qs = qs.filter(kind="image", width__isnull=True)[:100]
+        items = []
+        for fm in qs:
+            if not (fm.width and fm.height):
+                if fm.kind == "image" or fm.ext in FileMeta.IMAGE_EXTS:
+                    dim = _image_dimensions(_safe_join(MEDIA, fm.storage_path))
+                    if dim:
+                        fm.width, fm.height = dim
+                        fm.save(update_fields=["width", "height"])
+            items.append({
+                "id": fm.id, "name": fm.name,
+                "width": fm.width, "height": fm.height,
+                "label": f"{fm.width}×{fm.height}" if fm.width and fm.height else "",
+            })
+        return Response({"list": items, "total": len(items)})
+
+
+class StarredOrderView(APIView):
+    """F555 收藏夹自定义排序：按传入顺序写入 favorite_order"""
+
+    def post(self, request):
+        ids = request.data.get("file_ids")
+        if not isinstance(ids, list) or not ids:
+            return _bad("file_ids 必须是非空数组")
+        n = 0
+        for idx, fid in enumerate(ids, start=1):
+            try:
+                fid = int(fid)
+            except (TypeError, ValueError):
+                continue
+            n += FileMeta.objects.filter(pk=fid, owner=request.user, is_star=True) \
+                .update(favorite_order=idx)
+        return Response({"message": f"已更新 {n} 个收藏的排序", "updated": n})
+
+
+class FolderHitsView(APIView):
+    """F556 文件夹搜索命中计数徽章：按文件夹聚合关键词命中数"""
+
+    def get(self, request):
+        q = (request.query_params.get("q") or request.query_params.get("keyword") or "").strip()
+        if not q:
+            return Response({"keyword": "", "hits": [], "total": 0})
+        try:
+            limit = _int_param(request, "limit", 500, lo=1, hi=2000)
+        except ValueError as e:
+            return _bad(str(e))
+        qs = _file_qs(request.user).filter(is_deleted=False).filter(
+            Q(name__icontains=q) | Q(description__icontains=q)
+        )
+        folder_names = {f.id: f.name for f in Folder.objects.filter(owner=request.user)}
+        hits, total = [], 0
+        for row in qs.values("folder_id").annotate(c=Count("id")).order_by("-c"):
+            fid = row["folder_id"] or 0
+            ids = list(qs.filter(folder_id=row["folder_id"]).values_list("id", flat=True)[:limit])
+            total += row["c"]
+            hits.append({
+                "folder_id": fid,
+                "folder_name": folder_names.get(fid, "根目录") if fid else "根目录",
+                "count": row["c"], "ids": ids,
+            })
+        return Response({"keyword": q, "hits": hits, "total": total})
+
+
+class FileOperationListView(APIView):
+    """F559 移动/复制等文件操作记录"""
+
+    def get(self, request):
+        qs = FileOperationLog.objects.filter(owner=request.user)
+        action = request.query_params.get("action")
+        if action:
+            qs = qs.filter(action=action)
+        file_id = request.query_params.get("file_id")
+        if file_id:
+            try:
+                qs = qs.filter(file_id=int(file_id))
+            except (TypeError, ValueError):
+                return _bad("file_id 必须是整数")
+        try:
+            limit = _int_param(request, "limit", 50, lo=1, hi=500)
+        except ValueError as e:
+            return _bad(str(e))
+        rows = list(qs[:limit])
+        labels = dict(FileOperationLog.ACTION_CHOICES)
+        data = [{
+            "id": x.id, "file_id": x.file_id, "file_name": x.file_name,
+            "action": x.action, "action_label": labels.get(x.action, x.action),
+            "detail": x.detail, "from_folder": x.from_folder, "to_folder": x.to_folder,
+            "created_at": x.created_at,
+        } for x in rows]
+        return Response({"list": data, "total": len(data)})
+
+
+class ShareExpiringView(APIView):
+    """F560 分享链接到期前提醒（默认 3 天窗口），同时推送站内通知（去重）"""
+
+    def get(self, request):
+        try:
+            days = _int_param(request, "days", 3, lo=1, hi=60)
+        except ValueError as e:
+            return _bad(str(e))
+        now = timezone.now()
+        horizon = now + timedelta(days=days)
+        links = ShareLink.objects.filter(
+            created_by=request.user, is_revoked=False,
+            expire_at__isnull=False, expire_at__gte=now, expire_at__lte=horizon,
+        ).select_related("file", "folder").order_by("expire_at")
+        items, notified = [], 0
+        for link in links:
+            hours = (link.expire_at - now).total_seconds() / 3600
+            name = link.file.name if link.file else (link.folder.name if link.folder else "")
+            items.append({
+                "token": link.token, "url": f"/share/{link.token}",
+                "target": name, "target_type": "file" if link.file else "folder",
+                "permission": link.permission, "expire_at": link.expire_at,
+                "hours_left": round(hours, 1), "days_left": max(1, int((hours + 23) // 24)),
+            })
+            # 同一到期窗口内只提醒一次
+            already = Notification.objects.filter(
+                recipient=request.user, content__contains=link.token,
+                created_at__gte=link.expire_at - timedelta(days=days + 2),
+            ).exists()
+            if not already:
+                notify(
+                    request.user,
+                    f"分享链接「{name}」即将过期",
+                    content=f"链接 /share/{link.token} 将于 {link.expire_at:%Y-%m-%d %H:%M} 过期（{int(hours)} 小时后）。",
+                    category="files", level="warning", link="/files/shares",
+                )
+                notified += 1
+        return Response({"days": days, "list": items, "total": len(items), "notified": notified})
+
+
+class FileVisibilityView(APIView):
+    """F561 文件可见性快照：GET 当前状态 + 历史快照；POST 手动补记一条"""
+
+    def _get(self, request, pk):
+        return _get_file(request.user, pk, include_deleted=True)
+
+    def get(self, request, pk):
+        fm = self._get(request, pk)
+        if not fm:
+            return _bad("文件不存在", 404)
+        state = _visibility_state(fm)
+        labels = dict(FileVisibilitySnapshot.VISIBILITY_CHOICES)
+        history = [{
+            "id": s.id, "visibility": s.visibility,
+            "visibility_label": labels.get(s.visibility, s.visibility),
+            "data_scope": s.data_scope, "share_token": s.share_token,
+            "permission": s.permission, "expire_at": s.expire_at,
+            "note": s.note, "created_at": s.created_at,
+            "recorded_by": (getattr(s.created_by, "display_name", "")
+                            or getattr(s.created_by, "username", "")) if s.created_by else "",
+        } for s in FileVisibilitySnapshot.objects.filter(file=fm)[:50]]
+        state["history"] = history
+        state["history_count"] = len(history)
+        state["can_write"] = fm.owner_id == request.user.id
+        return Response(state)
+
+    def post(self, request, pk):
+        fm = self._get(request, pk)
+        if not fm:
+            return _bad("文件不存在", 404)
+        if fm.owner_id != request.user.id:
+            return _bad("仅文件所有者可以记录可见性快照", 403)
+        note = str(request.data.get("note") or "手动记录快照")[:255]
+        _record_visibility(fm, request.user, note=note, action="manual")
+        return Response({"message": "已记录可见性快照", "state": _visibility_state(fm)},
+                        status=status.HTTP_201_CREATED)
+
+
+class FileTagStatsView(APIView):
+    """F563 标签统计与点击过滤（过滤由 /files/?tag= 承接）"""
+
+    def get(self, request):
+        base = _file_qs(request.user).filter(is_deleted=False)
+        total_bytes = base.aggregate(s=Sum("size"))["s"] or 0
+        total_count = base.count()
+        items = []
+        for t in FileTag.objects.filter(owner=request.user).annotate(
+                c=Count("files", filter=Q(files__is_deleted=False))).order_by("-c", "name"):
+            files = base.filter(tags=t)
+            b = files.aggregate(s=Sum("size"))["s"] or 0
+            cnt = t.c or 0
+            items.append({
+                "id": t.id, "name": t.name, "color": t.color, "count": cnt,
+                "bytes": b, "bytes_text": format_size(b),
+                "pct": round(b / total_bytes * 100, 1) if total_bytes else 0.0,
+                "count_pct": round(cnt / total_count * 100, 1) if total_count else 0.0,
+            })
+        return Response({
+            "list": items, "total_tags": len(items), "total_files": total_count,
+            "total_bytes": total_bytes, "total_text": format_size(total_bytes),
+            "untagged": base.filter(tags__isnull=True).count(),
+        })
+
+
+class FavoritesExportView(APIView):
+    """F564 收藏/标签导出 JSON（浏览器直接下载）"""
+
+    def get(self, request):
+        qs = _file_qs(request.user).filter(is_deleted=False, is_star=True) \
+            .order_by("favorite_order", "-created_at")
+        files = [{
+            "id": f.id, "name": f.name, "folder": _folder_label(f.folder),
+            "group": f.favorite_group, "star": True,
+            "tags": list(f.tags.values_list("name", flat=True)),
+            "size": f.size, "sha1": f.sha1,
+            "created_at": f.created_at.isoformat() if f.created_at else "",
+        } for f in qs]
+        tags = [{"name": t.name, "color": t.color} for t in FileTag.objects.filter(owner=request.user)]
+        payload = {
+            "type": "files-favorites", "version": 1,
+            "exported_at": timezone.now().isoformat(),
+            "file_count": len(files), "tag_count": len(tags),
+            "files": files, "tags": tags,
+        }
+        resp = HttpResponse(json.dumps(payload, ensure_ascii=False, indent=2),
+                            content_type="application/json; charset=utf-8")
+        resp["Content-Disposition"] = "attachment; filename=file_favorites.json"
+        return resp
+
+
+class FavoritesImportView(APIView):
+    """F564 收藏/标签导入 JSON：按文件名（+目录）匹配，回填收藏/分组/标签"""
+
+    def post(self, request):
+        payload = request.data.get("payload")
+        if payload is None:
+            payload = request.data
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                return _bad("payload 不是合法 JSON")
+        if not isinstance(payload, dict):
+            return _bad("payload 必须是对象")
+        if payload.get("type") not in (None, "files-favorites"):
+            return _bad("不支持的导入类型")
+        items = payload.get("files")
+        if not isinstance(items, list):
+            return _bad("files 必须是数组")
+        if len(items) > 1000:
+            return _bad("单次最多导入 1000 条")
+
+        # 标签定义（带颜色）先落库
+        tags_created = 0
+        for t in payload.get("tags") or []:
+            if not isinstance(t, dict):
+                continue
+            name = str(t.get("name") or "").strip()[:50]
+            if not name:
+                continue
+            _, created = FileTag.objects.get_or_create(
+                name=name, owner=request.user,
+                defaults={"color": str(t.get("color") or "default")[:16]},
+            )
+            if created:
+                tags_created += 1
+
+        existing = list(_file_qs(request.user).filter(is_deleted=False))
+        by_name = {}
+        for fm in existing:
+            by_name.setdefault(fm.name, []).append(fm)
+
+        matched = starred = tag_links = skipped = 0
+        for item in items:
+            if not isinstance(item, dict):
+                skipped += 1
+                continue
+            name = str(item.get("name") or "").strip()
+            cands = by_name.get(name) or []
+            if not cands:
+                skipped += 1
+                continue
+            fm = cands[0]
+            if len(cands) > 1 and item.get("folder"):
+                for c in cands:
+                    if _folder_label(c.folder) == str(item.get("folder")):
+                        fm = c
+                        break
+            matched += 1
+            if item.get("star", True) and not fm.is_star:
+                fm.is_star = True
+                fm.save(update_fields=["is_star", "updated_at"])
+                starred += 1
+            group = str(item.get("group") or "").strip()[:50]
+            if group and fm.favorite_group != group:
+                fm.favorite_group = group
+                fm.save(update_fields=["favorite_group", "updated_at"])
+            names = item.get("tags") or []
+            if isinstance(names, list) and names:
+                tags = []
+                for n in names:
+                    n = str(n).strip()[:50]
+                    if not n:
+                        continue
+                    tag, _ = FileTag.objects.get_or_create(name=n, owner=request.user)
+                    tags.append(tag)
+                if tags:
+                    fm.tags.add(*tags)
+                    tag_links += len(tags)
+        return Response({
+            "message": f"导入完成：匹配 {matched} 个文件，新增收藏 {starred} 个",
+            "matched": matched, "starred": starred, "tag_links": tag_links,
+            "tags_created": tags_created, "skipped": skipped,
+        })

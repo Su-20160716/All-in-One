@@ -43,6 +43,11 @@ urlpatterns = [
     path("api/core/", include("core.urls")),
     path("api/learning/", include("learning.urls")),
     path("api/assistant/", include("assistant.urls")),
+    path("api/devtools/", include("devtools.urls")),
+    path("api/minitools/", include("minitools.urls")),
+    path("api/dataintel/", include("dataintel.urls")),
+    path("api/officesuite/", include("officesuite.urls")),
+    path("api/code/", include("code.urls")),
     path("api/auth/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/auth/verify/", TokenVerifyView.as_view(), name="token_verify"),
 ]
@@ -51,6 +56,16 @@ urlpatterns = [
 from files.urls import share_urlpatterns
 
 urlpatterns += share_urlpatterns
+
+# 看板只读分享（无需登录）
+from projects.urls import board_share_urlpatterns
+
+urlpatterns += board_share_urlpatterns
+
+# 代码工坊公开分享（无需登录，只读）
+from code.urls import public_urlpatterns as code_public_urlpatterns
+
+urlpatterns += code_public_urlpatterns
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

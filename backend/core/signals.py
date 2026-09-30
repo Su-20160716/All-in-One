@@ -94,3 +94,41 @@ def on_task_saved(sender, instance, **kwargs):
     except Exception:
         owner_id = None
     _safe(index_document, "task", instance.id, owner_id, instance.title, instance.description or "")
+
+
+# ---------- v6 代码工坊：代码文件入全文索引（第 79 条）----------
+# 复用 core.search 已有的 TEXT_EXTS（含 py/js/ts/vue/java/c/cpp/go/rs/rb/php/sql/sh），
+# 因此代码片段天然可被「/api/core/search/fulltext/」检索到，无需额外索引结构。
+
+
+@receiver(post_save, sender="code.CodeFile")
+def on_code_file_saved(sender, instance, **kwargs):
+    """代码文件保存后写入全文索引（标题取 path，正文为源码）。"""
+    from core.search import index_document
+
+    title = f"{instance.workspace.name}/{instance.path}" if instance.workspace_id else instance.path
+    _safe(index_document, "code", instance.id, instance.owner_id, title, instance.content or "")
+
+
+@receiver(post_delete, sender="code.CodeFile")
+def on_code_file_deleted(sender, instance, **kwargs):
+    from core.search import remove_document
+
+    _safe(remove_document, "code", instance.id)
+
+
+@receiver(post_save, sender="code.CodeSnippet")
+def on_code_snippet_saved(sender, instance, **kwargs):
+    """代码片段入索引，标题+描述+代码正文。"""
+    from core.search import index_document
+
+    body = f"{instance.description}\n{instance.code}"
+    _safe(index_document, "snippet", instance.id, instance.owner_id, instance.title, body,
+          summary=instance.description or instance.code[:200])
+
+
+@receiver(post_delete, sender="code.CodeSnippet")
+def on_code_snippet_deleted(sender, instance, **kwargs):
+    from core.search import remove_document
+
+    _safe(remove_document, "snippet", instance.id)

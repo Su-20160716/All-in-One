@@ -8,6 +8,25 @@
       <select v-model="typeFilter" class="input w-28" @change="load">
         <option value="">全部类型</option><option value="file">文件</option><option value="folder">文件夹</option>
       </select>
+      <span class="ml-auto text-[12px] text-ink-400">共 {{ list.length }} 条链接</span>
+    </div>
+
+    <!-- F560 分享链接到期前 3 天提醒 -->
+    <div v-if="expiring.length" class="card border-l-4 border-amber-400 p-3">
+      <div class="mb-1.5 flex items-center gap-2">
+        <span class="text-[13px] font-semibold text-amber-600">⏰ 即将到期提醒（{{ expiringDays }} 天内）</span>
+        <span class="text-[12px] text-ink-400">共 {{ expiring.length }} 条链接即将失效</span>
+        <button class="btn-ghost ml-auto px-2 text-[12px]" @click="loadExpiring">刷新</button>
+      </div>
+      <div class="space-y-1">
+        <div v-for="e in expiring" :key="e.token" class="flex items-center justify-between rounded-control bg-amber-50/60 px-3 py-1.5 text-[12px]">
+          <span class="truncate">{{ e.target || '(已删除对象)' }} <span class="font-mono text-ink-400">{{ e.url }}</span></span>
+          <span class="shrink-0 text-amber-600">
+            {{ e.hours_left < 24 ? `${Math.max(1, Math.round(e.hours_left))} 小时后` : `${e.days_left} 天后` }}到期
+            <button class="ml-2 text-brand-600" @click="copyUrl(e.url)">复制链接</button>
+          </span>
+        </div>
+      </div>
     </div>
 
     <div class="card overflow-hidden">
@@ -57,6 +76,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { fileApi } from '../../api'
+import { filesx } from '../../api/filesx'
 import { formatTime } from '../../utils/format'
 import { useAppStore } from '../../stores/app'
 import Modal from '../../components/Modal.vue'
@@ -68,26 +88,38 @@ const typeFilter = ref('')
 const editing = ref(null)
 const editForm = ref({})
 const permName = (p) => ({ view: '仅预览', download: '可下载', edit: '可编辑' }[p] || p)
+// F560 到期前 3 天提醒
+const expiring = ref([])
+const expiringDays = ref(3)
 
 async function load() {
   const r = await fileApi.shares({ status: statusFilter.value, type: typeFilter.value })
   list.value = r.list
 }
-function copy(s) {
-  navigator.clipboard?.writeText(`${location.origin}${s.url}`)
+async function loadExpiring() {
+  try {
+    const r = await filesx.expiringShares(expiringDays.value)
+    expiring.value = r.list || []
+  } catch (e) { expiring.value = [] }
+}
+function copyUrl(url) {
+  navigator.clipboard?.writeText(`${location.origin}${url}`)
   app.toastMsg('链接已复制', 'success')
 }
+function copy(s) { copyUrl(s.url) }
 function edit(s) { editing.value = s; editForm.value = { permission: s.permission, password: '', max_downloads: s.max_downloads } }
 async function save() {
   await fileApi.updateShare(editing.value.token, editForm.value)
   editing.value = null
   app.toastMsg('已更新', 'success')
   load()
+  loadExpiring()
 }
 async function revoke(s) {
   if (!confirm('确定让该链接立即失效？')) return
   await fileApi.revokeShare(s.token)
   load()
+  loadExpiring()
 }
-onMounted(load)
+onMounted(() => { load(); loadExpiring() })
 </script>

@@ -1,0 +1,5 @@
+﻿System check identified no issues (0 silenced).
+AST OK 10 files
+urlpatterns = 104 expected = 104
+public = 2
+

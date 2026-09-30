@@ -1,14 +1,16 @@
 """看板视图：项目、看板列、卡片拖拽、子任务、工时、评论、成员、活动、统计、我的任务"""
 from datetime import timedelta
+
 from django.db.models import Count as ModelsCount, Max as ModelsMax, Sum as ModelsSum, Q
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
 from core.models import notify
-from projects.models import Board, CardComment, Project, ProjectActivity, Subtask, TaskCard, WorkLog
+from projects.models import Board, BoardShareLink, CardComment, Project, ProjectActivity, Subtask, TaskCard, WorkLog
 from projects.serializers import (
     BoardSerializer,
     CardCommentSerializer,

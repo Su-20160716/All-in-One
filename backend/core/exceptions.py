@@ -3,8 +3,23 @@ from rest_framework.response import Response
 from rest_framework.views import exception_handler
 
 
+def _record(exc, context):
+    """F633 异常聚合：把未处理的服务端异常按签名去重计数（失败静默，绝不影响响应）"""
+    try:
+        from core.platform import record_exception
+
+        request = (context or {}).get("request")
+        record_exception(exc, getattr(request, "path", "") if request else "")
+    except Exception:
+        pass
+
+
 def custom_exception_handler(exc, context):
     response = exception_handler(exc, context)
+    if response is None:
+        _record(exc, context)
+    elif response.status_code >= 500:
+        _record(exc, context)
     if response is not None:
         data = response.data
         if isinstance(data, dict) and "detail" in data and len(data) == 1:

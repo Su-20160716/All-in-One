@@ -208,3 +208,14 @@ PHONETICS = {
         {"ipa": "dz", "example": "beds /bedz/", "tip": "d 与 z 合成。"},
     ],
 }
+
+# F508+F510：合并 english_v8.WORD_V8 增强字段（防御式，import 失败不炸）
+try:
+    from .english_v8 import WORD_V8 as _WORD_V8
+except Exception:
+    try:
+        from english_v8 import WORD_V8 as _WORD_V8
+    except Exception:
+        _WORD_V8 = {}
+for _e in WORDS:
+    _e.update(_WORD_V8.get(str(_e.get("word", "")).lower(), {}))

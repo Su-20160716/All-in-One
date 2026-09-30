@@ -16,6 +16,11 @@ export const authApi = {
   deactivate: (password) => request.post('/auth/profile/deactivate/', { password }),
   exportData: () => request.get('/auth/profile/export/'),
   loginHistory: () => request.get('/auth/profile/login-history/'),
+  badges: () => request.get('/auth/profile/badges/'),
+  invites: () => request.get('/auth/profile/invites/'),
+  createInvite: (data) => request.post('/auth/profile/invites/', data),
+  sessions: () => request.get('/auth/profile/sessions/'),
+  revokeSession: (id) => request.post(`/auth/profile/sessions/${id}/revoke/`, {}),
   heartbeat: () => request.post('/auth/heartbeat/', {}),
   directory: (q) => request.get('/auth/directory/', { params: { q } }),
   myPermissions: () => request.get('/auth/me/permissions/'),
@@ -73,6 +78,15 @@ export const fileApi = {
   pdfUrl: (id) => `/api/files/${id}/pdf/`,
   toPdf: (id, force = false) => request.post(`/files/${id}/to-pdf/`, { force }),
   officeCapability: () => request.get('/files/office-capability/'),
+  fileTags: () => request.get('/files/tags/'),
+  createFileTag: (data) => request.post('/files/tags/', data),
+  updateFileTag: (id, data) => request.patch(`/files/tags/${id}/`, data),
+  deleteFileTag: (id) => request.delete(`/files/tags/${id}/`),
+  batchTag: (data) => request.post('/files/batch-tag/', data),
+  batchRename: (data) => request.post('/files/batch-rename/', data),
+  folderTemplates: () => request.get('/files/folder-templates/'),
+  folderFromTemplate: (data) => request.post('/files/folders/from-template/', data),
+  cleanConfig: () => request.get('/files/clean-config/'),
   trashList: () => request.get('/files/trash/'),
   trashAction: (action, file_ids) => request.post('/files/trash/action/', { action, file_ids }),
   trashAutoClean: () => request.post('/files/trash/auto-clean/', {}),
@@ -116,6 +130,12 @@ export const noteApi = {
   dangling: () => request.get('/notes/dangling/'),
   fromTitle: (title) => request.post('/notes/from-title/', { title }),
   rebuildLinks: () => request.post('/notes/links/rebuild/', {}),
+  batchImport: (data) => request.post('/notes/batch-import/', data),
+  tagCloud: () => request.get('/notes/tag-cloud/'),
+  exportSelected: (data) =>
+    request.post('/notes/export-selected/', data, { responseType: 'blob' }),
+  flashcards: (id) => request.get(`/notes/${id}/flashcards/`),
+  aiOutline: (id) => request.post(`/notes/${id}/ai-outline/`, {}),
 }
 
 // ===== 项目看板 =====
@@ -163,6 +183,11 @@ export const projectApi = {
   activities: (projectId) => request.get(`/projects/${projectId}/activities/`),
   stats: (projectId) => request.get(`/projects/${projectId}/stats/`),
   calendar: (projectId) => request.get(`/projects/${projectId}/calendar/`),
+  burndown: (projectId) => request.get(`/projects/${projectId}/burndown/`),
+  templates: () => request.get('/projects/templates/'),
+  fromTemplate: (data) => request.post('/projects/from-template/', data),
+  createShare: (projectId) => request.post(`/projects/${projectId}/share/`, {}),
+  revokeShare: (projectId, token) => request.delete(`/projects/${projectId}/share/${token}/`),
   myTasks: (params) => request.get('/projects/my-tasks/', { params }),
 }
 
@@ -183,9 +208,16 @@ export const imApi = {
   recall: (id) => request.post(`/im/messages/${id}/recall/`, {}),
   deleteMsg: (id) => request.post(`/im/messages/${id}/delete/`, {}),
   forward: (id, session_ids) => request.post(`/im/messages/${id}/forward/`, { session_ids }),
-  searchMessages: (q) => request.get('/im/sessions/search-messages/', { params: { q } }),
+  searchMessages: (params) => request.get('/im/sessions/search-messages/', { params: typeof params === 'string' ? { q: params } : params }),
   unreadTotal: () => request.get('/im/unread-total/'),
   unreadSummary: () => request.get('/im/sessions/unread-summary/'),
+  pinMsg: (id) => request.post(`/im/messages/${id}/pin/`, {}),
+  quickReplies: () => request.get('/im/quick-replies/'),
+  createQuickReply: (data) => request.post('/im/quick-replies/', data),
+  updateQuickReply: (id, data) => request.patch(`/im/quick-replies/${id}/`, data),
+  deleteQuickReply: (id) => request.delete(`/im/quick-replies/${id}/`),
+  keywordAlert: () => request.get('/im/keyword-alert/'),
+  saveKeywordAlert: (keywords) => request.post('/im/keyword-alert/', { keywords }),
 }
 
 // ===== 通知 / 公告 / 日志 / 搜索 / 设置 =====
@@ -204,6 +236,9 @@ export const coreApi = {
   createAnnouncement: (data) => request.post('/core/admin/announcements/', data),
   updateAnnouncement: (id, data) => request.patch(`/core/admin/announcements/${id}/`, data),
   deleteAnnouncement: (id) => request.delete(`/core/admin/announcements/${id}/`),
+  announcementReadersExportUrl: (id) => `/api/core/admin/announcements/${id}/readers/export/`,
+  storageTopUsers: () => request.get('/core/admin/storage/top-users/'),
+  backup: () => request.post('/core/admin/backup/', {}),
   logs: (params) => request.get('/core/logs/', { params }),
   myLogs: (params) => request.get('/core/my-logs/', { params }),
   logStats: () => request.get('/core/logs/stats/'),
@@ -232,6 +267,17 @@ export const dashApi = {
 export const toolApi = {
   catalog: () => request.get('/tools/catalog/'),
   run: (tool, params) => request.post('/tools/run/', { tool, ...params }),
+}
+
+// ===== v5 能力域（devtools / dataintel / officesuite，目录驱动）=====
+// catalog 响应: { ok, data: { domain, domain_name, subsystems, endpoint_count, endpoints } }
+// endpoints 为接口明细 [{path, methods}]，path 形如 "text/case/"、wiki/<int:pk>/move/
+export const suiteApi = {
+  catalog: (domain) => request.get(`/${domain}/catalog/`),
+  call: (domain, path, method = 'POST', data = null) =>
+    method === 'GET'
+      ? request.get(`/${domain}/${path}`, { params: data || {} })
+      : request.post(`/${domain}/${path}`, data || {}),
 }
 
 // ===== 管理后台别名（与 authApi 中管理员方法一致）=====
@@ -331,6 +377,9 @@ export const learnApi = {
   addPlan: (data) => request.post('/learning/study/plans/', data),
   updatePlan: (data) => request.patch('/learning/study/plans/', data),
   delPlan: (id) => request.delete(`/learning/study/plans/?id=${id}`),
+  // —— 学习雷达（v8：弱项 / 多语言进度，手写 SVG）——
+  weaknessRadar: () => request.get('/learning/study/weakness/'),
+  progRadar: () => request.get('/learning/prog/radar/'),
   // —— 40 个学习工具 ——
   toolCatalog: () => request.get('/learning/tools/catalog/'),
   toolRun: (tool, params) => request.post('/learning/tools/run/', { tool, ...params }),
@@ -343,6 +392,10 @@ export const searchApi = {
   stats: () => request.get('/core/search/stats/'),
   reindex: (data = { scope: 'own' }) => request.post('/core/search/reindex/', data),
   global: (q) => request.get('/core/search/', { params: { q } }),
+  history: () => request.get('/core/search/history/'),
+  clearHistory: () => request.delete('/core/search/history/'),
+  hot: () => request.get('/core/search/hot/'),
+  exportUrl: (q) => `/api/core/search/export/?q=${encodeURIComponent(q)}`,
 }
 
 // ===== 组织架构 / 数据范围 / 多租户 =====
@@ -384,4 +437,8 @@ export const aiApi = {
   deleteQuestions: (ids) => request.delete('/assistant/questions/', { data: { ids } }),
   grade: (items, recordMistakes = true) =>
     request.post('/assistant/grade/', { items, record_mistakes: recordMistakes }, { timeout: AI_TIMEOUT }),
+  // 自动标签 / 写作润色 / 每日摘要（#59 #61 #60）
+  autoTag: (data) => request.post('/assistant/auto-tag/', data, { timeout: AI_TIMEOUT }),
+  polish: (data) => request.post('/assistant/polish/', data, { timeout: AI_TIMEOUT }),
+  dailyDigest: (data = {}) => request.post('/assistant/daily-digest/', data, { timeout: AI_TIMEOUT }),
 }

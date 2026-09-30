@@ -19,14 +19,17 @@ class NoteSerializer(serializers.ModelSerializer):
     tag_names = serializers.SerializerMethodField()
     tag_ids = serializers.SerializerMethodField()
     child_count = serializers.SerializerMethodField()
+    folder_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Note
         fields = [
             "id", "title", "content", "parent", "tags", "tag_names", "tag_ids",
-            "is_pinned", "is_favorite", "is_public", "share_token",
+            "is_pinned", "is_favorite", "is_public", "is_archived", "share_token",
             "version", "is_deleted", "deleted_at", "words", "child_count",
             "ai_summary", "ai_summary_at", "created_at", "updated_at",
+            # F572 颜色 / F573 来源 / F582 分组文件夹
+            "color", "source", "folder", "folder_name",
         ]
         read_only_fields = ["share_token", "version", "words", "ai_summary", "ai_summary_at"]
 
@@ -38,6 +41,9 @@ class NoteSerializer(serializers.ModelSerializer):
 
     def get_child_count(self, obj):
         return obj.children.filter(is_deleted=False).count()
+
+    def get_folder_name(self, obj):
+        return obj.folder.name if obj.folder_id else ""
 
 
 class NoteLinkSerializer(serializers.ModelSerializer):

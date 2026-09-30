@@ -1,9 +1,11 @@
-# 全能协作平台 · 功能清单（v4.0.0）
+# 全能协作平台 · 功能清单（v6.0.0）
 
-技术栈：Django 5 + DRF + Channels(WebSocket) + SimpleJWT ｜ Vue3 + Vite + TailwindCSS + Pinia
+技术栈：Django 5 + DRF + Channels(WebSocket) + SimpleJWT ｜ Vue3 + Vite + TailwindCSS + Pinia + CodeMirror 6
 - v2：共 **177 项后端能力（143 个业务接口 + 34 个在线工具）** 与 **20 个前端页面**。
 - **v3 全新方向「学习中心」：新增 100 项功能 = 编程学习 30 项 + K12 学科 30 项 + 学习工具 40 个，另加 9 个前端页面与 6 张个人学习数据表（不改动既有业务模块，仅新增独立 app `learning` 并在 settings/根路由/前端菜单做必要装配）。**
 - **v4 平台能力补全：新增 11 大横切能力 = 多类型在线预览 · Office→PDF · 全文搜索(中文分词+BM25) · Yjs 实时协同 · `[[双链]]` · 数据行级权限 · 组织架构/部门 · 多租户 · LLM 聊天助手 · 笔记 AI 问答/摘要 · AI 出题与批改；新增独立 app `assistant` 与 `core/scoping.py`，并新增 3 个前端页面（全文搜索 / AI 助手 / 组织架构）。**
+- **v5 三大能力域（目录驱动）：新增 3 个独立 app（`devtools` / `dataintel` / `officesuite`），共 **76 个子系统 + 501 个接口**（devtools 27 子系统 154 接口 · dataintel 20 子系统 114 接口 · officesuite 29 子系统 233 接口），三域 catalog 全量返回接口明细（路径 + 方法）供前端动态渲染；前端一份 `DomainExplorer` 组件驱动三个域的浏览与调试，新增 3 个页面（总 26→29 个）。**
+- **v6 代码工坊（2026-09-19）：新增独立 app `code`，落地 100 项能力 = 编辑内核 22 + 执行沙箱 20 + 智能化 22 + 协作工程化 22 + 竞技教学 14；新增 **15 张表 · 104 个登录接口 + 2 个公开接口 · 3 个前端页面**（代码工坊 / 代码学习中心 / 分享代码）。编辑器内核为 CodeMirror 6，执行走进程级沙箱 + 可降级适配器，AI 全程支持本地降级。**
 
 ## 一、后端接口计数（业务自有，共 143 个）
 
@@ -237,3 +239,241 @@ LearningProgress 学习进度、SnippetBookmark 代码收藏、WordbookItem 生�
 - **排障实录（2026-09-13）**：前端 axios 全局超时 60s < 后端 `LLM_TIMEOUT` 90s，大模型响应慢时前端先报 `timeout of 60000ms exceeded`；已把 `aiApi` 中走大模型的 6 个 POST 放宽到 180s（`AI_TIMEOUT`），普通接口维持全局 60s。
 - NIM 的 `deepseek-v4-flash-0731` / `deepseek-v4-pro-0813` 实测持续挂起（>100s 无响应，关 thinking 同样），默认模型改为 `nvidia/nemotron-3-super-120b-a12b`（关闭思考实测 ~1-4s）；新增 `LLM_EXTRA_BODY`（JSON 字符串，透传合并进 `/chat/completions` 请求体，用于厂商专属开关，解析失败自动忽略不影响启动）。
 
+# 九、v5 新增：三大能力域（目录驱动，76 子系统 + 501 接口）
+
+> 设计原则（沿用 v4 约定并加强）：三域全部**只增不改**（不动任何既有接口契约）；所有计算类接口统一 `endpoint` 装饰器兜底——ValueError→400、其余异常→422（结构化 `{"ok":false,"error":...}`，**绝不 500**）；外部依赖缺失一律可降级（AI 走本地实现、导出走 CSV 兜底）；行级权限继续收口在 `core/scoping.py`。
+> 三个域的 `/catalog/` 目录接口（GET）返回 `domain / domain_name / subsystems / subsystem_count / endpoint_count`，并在 v5 收尾时**新增 `endpoints` 明细字段**（`[{path, methods}]`，从 urlpatterns 反射还原每个路径的真实 GET/POST）——前端据此目录驱动渲染，后端加接口无需改前端。
+
+## 9.1 devtools 开发者工具箱（27 子系统 · 154 接口）
+
+| 子系统 | 接口 | 子系统 | 接口 |
+|---|---:|---|---:|
+| text 文本处理 | 6 | num 数字进制 | 6 |
+| str 字符串进阶 | 6 | color 颜色实验室 | 6 |
+| md Markdown 工具链 | 6 | date 日期数学 | 6 |
+| json JSON 进阶 | 6 | cron CRON 表达式 | 4 |
+| log 日志分析 | 5 | math 数学扩展 | 6 |
+| encode 编码转换 | 5 | unit 单位换算 | 4 |
+| regex 正则实验室 | 6 | net 网络工具 | 6 |
+| hash 哈希扩展 | 5 | fake 模拟数据 | 7 |
+| token 令牌与密钥 | 6 | fun 趣味盒子 | 8 |
+| code 代码工具 | 6 | cheatsheet 速查手册 | 8 |
+| diff 差异对比 | 5 | asciiart ASCII 艺术 | 6 |
+| id 标识符 | 4 | qr 码制 | 3 |
+| file 文件工具 | 6 | web 接口助手 | 6 |
+| db SQL 助手 | 5 | catalog 目录 | 1 |
+
+合计 154（含目录）。亮点：jwt-sign/jwt-verify、otp/nanoid/password-audit、sql-format/where-builder/join-explain、ieee754/bitwise/combinatorics、dijkstra/linear-solve、CRON 解析/校验/推演、zip-list/data-url/编码探测、ASCII banner/sparkline/progress、模拟身份/银行卡（Luhn 生成）/Lorem 等。
+
+## 9.2 dataintel 数据智能中心（20 子系统 · 114 接口）
+
+| 子系统 | 接口 | 子系统 | 接口 |
+|---|---:|---|---:|
+| dataset 数据集管理 | 6 | ai AI 增强 | 8 |
+| profile 数据画像 | 5 | report 智能报表 | 5 |
+| transform 数据变换 | 6 | chart 图表数据 | 8 |
+| calc 数据计算器 | 5 | abtest A/B 实验 | 5 |
+| stats 统计检验 | 8 | cohort 留存分析 | 4 |
+| forecast 时间序列 | 6 | sampling 抽样 | 4 |
+| regress 回归拟合 | 5 | geo 轻地理计算 | 6 |
+| cluster 聚类 | 4 | insight 自动洞察 | 6 |
+| outlier 异常检测 | 4 | nlp 中文 NLP | 8 |
+| textmine 文本挖掘 | 5 | vector 向量运算 | 5 |
+| catalog 目录 | 1 | | |
+
+合计 114（含目录）。亮点：数据集 CRUD + 行级导入查询、pivot/groupby/filter-expr、t 检验/卡方/比例区间、移动平均/指数平滑/线性趋势/季节朴素/分解、线性/多项式/logit 回归、kmeans/层次/DBSCAN/肘部、zscore/IQR/MAD/LOF、分词/关键词/情感/摘要/实体/相似度/可读性、simhash、cosine/knn/质心、AI 对话/翻译/改写/分类/抽取（本地降级）、A/B 分流+显著性、留存矩阵、分层/系统/Bootstrap 抽样、haversine/geohash/多边形/ETA、自动洞察叙述。
+
+## 9.3 officesuite 办公套件（29 子系统 · 233 接口，5 大家族）
+
+- **流程域 flow（41）**：approval 通用审批 12（模板/提交/我的已发/待我处理/统计/详情/同意/驳回/撤回/评论/流转记录/催办，已批准单全员可见、其余仅 owner 与超管）；seal 用印 6；expense 报销 8（提交/台账/统计/CSV 导出/详情/批/驳/付款）；travel 差旅 7；contract 合同 8（台账/到期预警/回款）。
+- **资源域 res（45）**：meeting 会议室 10（房间管理/预订/冲突检查 availability/我的预订/统计）；asset 固定资产 9；vehicle 车辆 7；supplies 办公用品 7；visitor 访客 7；mailroom 快递代收 5。
+- **人员域 people（66）**：duty 值班排班 9；timesheet 工时 9（填报/周视图/汇总/导出/审批）；training 培训 10（报名/花名册/签到/反馈，报名全员开放、报名记录按 本人/负责人/超管 收口）；recognition 表彰墙 6；standup 每日站会 7；okr 目标 10（O/KR/进度/总览/历史沿 Objective 可见性）；decision 决策记录 7；todobox 轻待办 8。
+- **知识域 know（71）**：faq 7；policy 制度 7（确认回执/确认名单）；template 模板 7（分类/渲染）；wiki 团队 Wiki 9（树/修订/移动带环检测）；minutes 会议纪要 7（行动项）；formcollect 收集表 8（填报/entries/导出）；announcement 部门公告 8（置顶/已读名单）；poll 投票 9（我的票/结果/开关）；helpdesk 工单 9（指派/回复/解决/重开/优先级）。
+- **日历域 calendar（9）**：共享日程（事件 CRUD/今日与本周 agenda/RSVP/出席名单）+ 目录 1。
+
+合计 233。行级权限对无 owner 字段的模型（TrainingEnrollment/KeyResult）显式实现 `_get_enrollment` 等规则，不走 `scope_queryset`（避免 FieldError）。
+
+## 9.4 前端接入（目录驱动，页面 26→29）
+
+- **`views/toolbox/DomainExplorer.vue`（一份代码三域复用）**：三栏布局 = 子系统列表 → 接口列表（GET/POST 徽标，来自 catalog `endpoints` 明细）→ 执行器（方法/路径/JSON 请求体可编辑，GET 自动转 query string，含 `<int:pk>` 占位符提示）；常用接口预置参数模板（约 30 组启发式），响应 JSON 美化展示、一键复制；顶部关键字搜索（子系统名 + 接口路径）。
+- **路由与导航**：`/toolbox/devtools`（开发工具箱）、`/toolbox/dataintel`（数据智能中心）、`/toolbox/office`（办公套件）三条路由共用同一组件（props 传域），侧边栏新增 3 个入口，版本号升级 v5.0。
+- **`suiteApi`**（`src/api/index.js`）：`catalog(domain)` + `call(domain, path, method, data)`；`request.js` 错误链补 `response.data.error` 透传（v5 结构化错误体直达 Toast）。
+- officesuite 的 URL 首段与子系统 key 存在三处不同（form→formcollect、ticket→helpdesk、todo→todobox），前端目录分组做别名归位。
+
+## 9.5 v5 验证结果（2026-09-14 全绿）
+
+- **v5 套件冒烟 `suite_smoke_test.py`**：12 轮迭代收敛，**通过 537 / 失败 0**（覆盖 501 接口 + 36 个深度断言：权限矩阵、wiki 环检测、留存矩阵、降级 4xx 结构化等）。
+- **四套串行回归**（防 SQLite `database is locked`）：`smoke_test.py` v2 160✓/0✗、`learning_smoke_test.py` v3 81✓/0✗、`extensions_smoke_test.py` v4 EXIT:0、`suite_smoke_test.py` v5 537✓/0✗；`manage.py check` EXIT:0。
+- **catalog 端到端（APIClient 全链路）**：devtools 27 子系统/153 明细、dataintel 20/113、officesuite 29/232，方法反射与真实行为一致（GET 抽测 200），合计 498 明细 + 3 目录 = 501。
+- **前端 `vite build`**：170 模块构建成功（DomainExplorer 7.63 kB / gzip 3.79 kB），EXIT:0。
+
+# 十、v6 新增：代码工坊（15 表 + 104 接口 + 2 公开接口 + 3 页面）
+
+> **定位**：把「写代码 / 跑代码 / 学代码」这件事整个搬进平台，做成一个自包含的在线 IDE + 教学系统。
+> **设计原则**（沿用 v4/v5 约定）：`code` 为**独立 app，只增不改**——不动任何既有接口契约，仅在 `settings.INSTALLED_APPS`、根路由、前端菜单做必要装配；全部计算类接口走 `devtools/common.py` 的 `endpoint` 装饰器兜底（ValueError→400、其余→422，**绝不 500**）；外部依赖缺失一律**可降级**（无 LLM 密钥走本地实现、无运行时返回结构化 `RUNTIME_NOT_FOUND`，前端置灰而非崩溃）；行级权限统一走 `core/scoping.py`。
+
+## 10.1 能力分层（100 项）
+
+| 层 | 名称 | 项数 | 覆盖范围 |
+|---|---|---:|---|
+| L1 | 编辑内核 | 22 | CodeMirror 6 编辑器、语法高亮、多语言、文件树、工作区、版本快照/diff/回滚、片段库、导入导出 |
+| L2 | 执行沙箱 | 20 | 多语言执行、REPL、stdin/args/env、超时、标准输出/错误、执行历史与统计、清空、结果展示 |
+| L3 | 智能化 | 22 | 静态分析 8（指标/大纲/复杂度/质量/流程图/相似度/密钥扫描/重构建议）+ AI 辅助 15（生成/转换/报错解释/正则/NL2SQL/学习路径/对话改码/行内补全/应用补丁/翻译/注释/优化/单测/摘要/状态） |
+| L4 | 协作工程化 | 22 | 行评论与解决、协同状态与 WS、只读/可运行分享、zip 导出，以及 6 个工程化接口（blame / TODO 聚合 / diff / 洞察 / 贡献者 / 并排 diff） |
+| L5 | 竞技教学 | 14 | 每日一题（今日/提交/历史）、成就徽章（列表/我的）、错题本（列表/收录/复习/删除）、学习路径（列表/生成/详情/勾选/删除）、竞技场（战力榜/随机挑战/提交）、学习总览 |
+
+## 10.2 数据模型（15 张表，新增 app `code`）
+
+**L1/L2 基础 9 张**：`CodeWorkspace`（代码工作区，含 owner/语言/星标/克隆源）、`CodeFile`（代码文件，含路径/语言/内容/收藏/排序/最后执行）、`CodeVersion`（文件版本快照，含序号/内容/摘要/创建者，`unique(file, version)`）、`CodeSnippet`（可复用代码片段 + 标签，支持从文件一键提取）、`CodeRun`（执行记录，含语言/代码/stdin/exit_code/stdout/stderr/duration/verdict）、`CodeCollabState`（协同状态，Yjs 文档快照 + 版本号）、`CodeJudgeTask`（判题任务，含多用例结果/通过数/耗时）、`CodeComment`（行级评论，含行号/内容/是否已解决）、`CodeShare`（分享链接，含 token/权限/过期/访问计数）。
+
+**L5 教学 6 张**：`CodeDailyChallenge`（每日一题，`date` 唯一 + 标题/描述/语言/难度/模板/题解/测试用例/标签）、`CodeDailyRecord`（打卡记录，`unique(user, challenge)`，含通过用例数/耗时）、`CodeAchievement`（成就定义，`key` 唯一 + 规则 JSON + 层级 bronze/silver/gold）、`CodeUserAchievement`（用户成就进度，`unique(user, achievement)`）、`CodeWrongBook`（错题本，含来源/来源 ID/失败用例/掌握状态/复习次数）、`CodeLearningPath`（学习路径，含阶段 JSON/进度 JSON + `total_items` / `done_items` / `percent` 三个 property）。
+
+> L3/L4 接口**零新模型**：静态分析、AI 辅助、blame、TODO、diff、洞察、贡献者全部复用既有 9 张表计算得出。
+
+## 10.3 接口清单（104 登录接口 + 2 公开接口）
+
+路由定义在 `code/urls.py`，采用 `SUBSYSTEMS`（供前端目录页渲染）+ `VIEWS`（路由串 → 视图函数显式映射，避免手写 path 出错）双表结构，结尾 `_EXPECTED = 104` **契约断言**防止无声破坏。
+
+| 子系统 | 接口 | 说明 |
+|---|---:|---|
+| meta 元信息 | 4 | catalog / runtimes / languages / templates |
+| workspace 工作区 | 5 | 列表 / 创建 / 详情 / 星标 / 克隆（+ update / delete 走 VIEWS） |
+| file 代码文件 | 8 | 列表 / 创建 / 详情 / 收藏 / 读取入口 / 移动 / 批量 / 树 |
+| version 版本历史 | 5 | 列表 / 创建快照 / 差异对比 / 回滚 / 删除 |
+| run 安全执行 | 7 | 执行 / REPL / 历史 / 详情 / 删除 / 清空 / 统计 |
+| judge 判题 | 4 | 判题 / 历史 / 详情 / 排行榜 |
+| snippet 片段库 | 6 | 列表 / 创建 / 详情 / 复制 / 标签 / 从文件提取 |
+| analyze 静态分析 | 8 | 指标 / 大纲 / 复杂度 / 质量 / 流程图 / 相似度 / 密钥扫描 / 重构建议 |
+| ai 智能辅助 | 15 | 状态 / 生成 / 转换 / 报错解释 / 正则 / NL2SQL / 学习路径 / 对话改码 / 行内补全 / 应用补丁 · **翻译 / 注释 / 优化 / 单测 / 摘要** |
+| collab 协作 | 6 | 评论列表 / 发评论 / 解决 / 删除 / 协同状态 / WS 信息 |
+| share 分享 | 4 | 列表 / 创建 / 更新 / 吊销 |
+| export 导出 | 2 | zip 打包 / 单文件下载 |
+| daily 每日一题 | 3 | 今日题目 / 提交 / 打卡历史 |
+| achievement 成就徽章 | 2 | 徽章列表 / 我的进度 |
+| wrongbook 错题本 | 4 | 列表 / 收录 / 复习 / 删除 |
+| learnpath 学习路径 | 5 | 列表 / 生成 / 详情 / 勾选进度 / 删除 |
+| arena 竞技场 | 3 | 战力榜 / 随机挑战 / 提交 |
+| learn 学习总览 | 1 | 个人学习看板聚合 |
+| engineering 工程化 | 6 | blame / TODO 聚合 / diff / 洞察 / 贡献者 / 并排 diff |
+| **合计** | **104** | |
+
+**公开接口（无需登录，挂 `/api/share/code/<token>/`）**：
+- `GET /share/code/<token>/`：只读查看分享的代码（含语言、内容、展示元信息）。
+- `POST /share/code/<token>/run/`：**只跑分享内容本身**——不允许请求体覆盖代码绕过高危扫描，超时硬限 10s，不落 `CodeRun` 表，防匿名刷库。
+
+## 10.4 编辑器内核（CodeMirror 6）
+
+- **5 个 Compartment 动态重配**：语言 / 主题 / 缩进 / 字体 / 键位图各自独立 compartment，改任一设置只重配对应部分、不重建编辑器，光标与滚动位置不丢。
+- **按需异步加载语言包**：语言包走动态 `import()`，切语言时才拉对应 chunk（构建产物中 code 相关 chunk 426.87 kB / gzip 138.87 kB，独立成块不拖累首屏）。
+- **可热切换项**：主题、缩进（空格/Tab + 宽度）、字号/行高/字族、自动换行、括号配对、行号、活跃行高亮、vim 键位。
+- **跳转与定位**：`editorRef.goToLine(n)` 供 TODO 面板点击直达源码行（配合 `nextTick` 等编辑器挂载完成）。
+
+## 10.5 执行沙箱与静态分析（`code/runtime.py`）
+
+- **进程级隔离**：`subprocess.Popen(shell=False)`（杜绝 shell 注入）+ 独立临时目录 + 环境变量**白名单**（不透传宿主环境）+ `communicate(timeout)` 到点强杀 + POSIX 下 `resource.setrlimit` 限内存与 CPU；Windows 无 `resource` 模块时**自动降级**为纯超时约束。
+- **可降级适配器**：语言运行时未安装时返回结构化 `RUNTIME_NOT_FOUND`（附安装提示），而非抛异常；`allow_dangerous` 开关控制高危能力，默认关闭。
+- **恒返回 dict**：`run_code(...)` 无论成功失败都返回统一结构，上游无需 try/except 分支。
+- **静态分析纯 Python 实现**：`analyze_metrics()`（函数/类/行数/注释率）、`to_flow_nodes()`（返回 `{nodes, edges}` 用于流程图渲染）、复杂度估算、代码质量评分、`secret-scan`（密钥/凭据模式扫描）、`refactor-hints`（可读性/重复/长度提示），**不依赖任何第三方分析库**。
+
+## 10.6 L4 工程化实现要点
+
+- **blame（代码归属）**：沿版本链**正序**逐版跑 `difflib.SequenceMatcher` diff，把每行的归属累积到 `ownership[j] = {author, version_id, at}`——谁最后动这行就是谁。
+- **todos（TODO 聚合）**：8 类标记（`TODO` / `FIXME` / `HACK` / `XXX` / `BUG` / `OPTIMIZE` / `REVIEW` / `NOTE`）按严重度分级（high: FIXME·BUG / medium: TODO·HACK·XXX / low: OPTIMIZE·REVIEW / info: NOTE），支持 `level` 排序 + `by_tag` / `by_file` 双维度分组，点击直达源码行。
+- **diff**：三种模式自适应 —— `{file, v1, v2}`（版本间）/ `{file, version}`（版本对当前）/ `{file_a, file_b}`（跨文件），输出结构化 hunks + unified 文本。
+- **insights（工程洞察）**：语言占比 + 目录分布 + 30 天活跃度 + 执行成功率 + **健康度评分**（4 条扣分规则：无版本快照、TODO 堆积、执行失败率高、长期未活动）。
+- **contributors**：按版本创建者聚合贡献量。
+- **side-by-side**：行号对齐的并排 diff，前端可直接双栏渲染。
+
+## 10.7 L5 竞技教学实现要点
+
+- **每日一题（确定性轮换）**：内置 7 道题（两数之和 / 斐波那契 / 回文串 / 数组最大值 / 括号匹配 / 去重排序 / 质数筛），`idx = day.toordinal() % len(_FALLBACK_PROBLEMS)` —— **不落定时任务，全员同日同题**，访问即 `_ensure_daily()` 补建当日题目。
+- **打卡与连续天数**：`_daily_streak(user)` 按打卡记录回溯计算连续天数；提交未通过自动写入错题本（`get_or_create(user, source="daily", source_id=ch.id, ...)`，幂等不重复）。
+- **成就徽章（惰性结算）**：14 个内置徽章，**不用 Celery / 定时任务**——用户访问时 `check_achievements(user)` 现算 9 项指标（文件数/执行数/通过数/连续打卡/片段数/工作区数/错题复习数/路径完成度/分享数），命中规则即解锁并写入 `unlocked_at`，返回本次新解锁列表供前端弹窗。
+- **学习路径**：按语言给内置模板（python / js / java）+ 通用兜底，难度调节系数 `_LEVEL_ADJUST`（beginner 1.0 / intermediate 0.6 / advanced 0.3）控制阶段条目量；`_parse_stages(raw)` 兼容 LLM 返回的多种结构，解析失败自动回落本地模板。
+- **竞技场**：`arena_board` 战力榜（按判题通过数 & 执行成功率综合排序）+ `arena_challenge` 随机抽题 + `arena_submit` 复用与判题**同一个核心**。
+- **判题核心抽成纯函数**：`run_judge(language, code, cases, timeout=5, ignore_ws=True)` —— 只跑代码 + 比对，**不落库**，返回 `(verdict, passed, results, total_ms)`。普通判题 / 每日一题 / 竞技场三处共用，杜绝逻辑分叉。
+
+## 10.8 前端接入（新增 3 个页面，总 29→32 个）
+
+- **`views/code/CodeForge.vue`（代码工坊，~1700 行）**：三栏布局 = 工作区/文件树 → CodeMirror 编辑器（多标签页）→ 执行输出/AI 面板；顶栏含运行 / 判题 / 设置 / `📌 TODO` / `📈 洞察` / `🏅 学习` 入口；内含 TODO 聚合面板（760px）与工程洞察面板两个模态框；行评论、协同、分享、导出、片段库全部在此收口。
+- **`views/code/LearnCenter.vue`（代码学习中心，新增）**：6 个标签页 = 总览 / 每日一题 / 成就 / 错题本 / 学习路径 / 竞技场；`switchTab(k)` **惰性加载** + `loaded` ref 防重复请求；含生成学习路径模态框。路由 `/code/learn`。
+- **`views/code/SharedCode.vue`（分享代码，公开页）**：无需登录，`/share/code/:token`；只读展示 + 可直接试跑（请求只传 `stdin`，代码由服务端按 token 取，防止篡改）。
+- **路由与导航**：`/code`（代码工坊）与 `/code/learn`（代码学习中心）挂登录内；`/share/code/:token` 为顶层公开路由（`meta: { public: true }`）；侧边栏新增「🧑‍💻 代码工坊」「🏅 代码学习中心」两个入口。
+- **API 层**：`src/api/code.js` 新增 24 个方法（含 2 个公开接口），统一 `RUN_TIMEOUT = 60000`、`AI_TIMEOUT = 180000`（走大模型的接口单独放宽，避免前端先于后端超时）。
+
+## 10.9 v6 验证结果（2026-09-19）
+
+- `manage.py check` → **System check identified no issues (0 silenced)**；`code` 迁移 `0002_codeachievement_...` **Applying ... OK**。
+- 后端 **10 个源文件 AST 解析全部 OK**；`code/urls.py` 路由断言 `104 == _EXPECTED` 通过，`public_urlpatterns` = 2。
+- 前端 `vite build` → **✓ built in 5.93s**：`LearnCenter-VxkeE5-6.js` 26.60 kB（gzip 8.58）、`CodeForge-BMXZQVUr.js` 65.58 kB（gzip 19.78）、CodeMirror 相关 chunk 426.87 kB（gzip 138.87）。
+- **未覆盖的验证**：`manage.py test code` / `code_smoke_test.py` / 启动 Daphne 做端到端，在当前开发机上被安全策略拦截，**运行时行为改由人工验收**。这是 v6 目前唯一的验证缺口。
+
+## 10.10 v6 环境变量
+
+| 变量 | 作用 | 默认 |
+|---|---|---|
+| `CODE_RUN_TIMEOUT` | 单次代码执行超时（秒） | 5 |
+| `CODE_MAX_OUTPUT` | 标准输出截断上限（字符） | 20000 |
+| `CODE_ALLOW_DANGEROUS` | 是否允许高危执行能力 | `False` |
+| `LLM_API_KEY` 等 | 复用 v4 的 LLM 配置；未设置则 AI 全部本地降级 | 空 |
+
+
+
+---
+
+# 十一、v7 新增：100 项模块增强 + 320 个迷你工具（2026-09-25）
+
+> v7.0：落地《可快速落地的100项功能清单》全部 100 项模块增强，覆盖 11 个模块。
+> v7.1：新建独立 app minitools，目录驱动 catalog + 纯函数 run，批量落地 320 个纯函数工具（19 大家族），前端复用 DomainExplorer 动态渲染。
+
+## 11.1 minitools 迷你工具箱（320 工具 · 19 家族 · 321 URL）
+
+独立 Django app minitools，挂载 /api/minitools/，全部无状态纯函数，不落库不调外部 API。前端 DomainExplorer 一份组件驱动。
+
+v7.0 首批 210 工具（9 家族）：text(30) / num(28) / encode(25) / date(22) / color(18) / gen(25) / validate(22) / convert(22) / fun(18)
+v7.1 追加 110 工具（10 新家族，已与 devtools/dataintel/officesuite/tools 去重）：finance(16) / health(12) / geo(10) / security(10) / algo(13) / science(13) / tx(10) / biz(10) / fmt(8) / funx(8)
+
+工程规约：复用 devtools/common.py endpoint 装饰器（ValueError→400、其余→422，绝不500）；urls.py 契约断言 == 321；零第三方依赖。
+
+## 11.2 百项模块增强（100 项，11 模块）
+
+| 模块 | 项数 | 关键交付 |
+|---|---:|---|
+| 文件中心 #1-12 | 12 | FileTag模型+M2M标签、分片进度、文件夹模板、EXIF、到期清理、收藏分组、批量重命名、类型图标、空格预览 |
+| 笔记知识库 #13-24 | 12 | is_archived归档、AI大纲(本地降级)、批量导入MD、闪卡、阅读统计、双链补全、模板插入、版本差异高亮、标签云 |
+| 项目看板 #25-36 | 12 | 卡片标签、逾期提醒、模板库、SVG燃尽图、只读分享、筛选/紧凑视图/逾期高亮/子任务进度条/主题/复制/分组 |
+| 即时消息 #37-47 | 11 | 引用回复、消息置顶、会话归档、JSON导出、快捷回复、关键词提醒、代码高亮、搜索筛选、已读回执、emoji |
+| 账号个人 #48-57 | 10 | Badge/InviteCode/ActiveSession三模型、在线状态、密码强度、安全日志、邀请注册、头像裁剪、设备管理、主题 |
+| 智能搜索 #58-66 | 9 | 全局命令面板(Ctrl+K)、AI自动标签、每日摘要、写作润色、代码评审、搜索历史热词、条件记忆、CSV导出 |
+| 管理后台 #67-74 | 8 | DRF限流、备份恢复命令、日志筛选、公告定时发布、在线用户、存储TOP、已读导出、权限搜索 |
+| 代码工坊 #75-82 | 8 | 质量报告SVG、片段筛选、模板插入、主题字号切换、执行统计、判题耗时、导出命名规范、快捷键面板 |
+| 学习中心 #83-88 | 6 | 学习日历、掌握度雷达/热力图、时长看板、错题复习、进度徽章、每日一题历史 |
+| 办公套件 #89-93 | 5 | ICS导出、待办IM提醒、工单筛选、行动项转待办、值班周视图 |
+| 平台体验 #94-100 | 7 | 性能监控P50/P95、统一时区、错误码目录、快捷入口、免打扰、骨架屏、品牌定制 |
+
+## 11.3 新增数据表与接口
+
+新增约 12 张表：FileTag、CardLabel、BoardShare、QuickReply、KeywordAlert、Badge、InviteCode、ActiveSession、SearchQueryLog；新增字段若干（Note.is_archived、Message.reply_to/is_pinned、Conversation.is_archived、User.tags/dnd、Announcement.scheduled_at/expires_at、FileMeta.tags/favorite_group）。
+
+新增接口：minitools 321 + files 7 + notes 5 + projects 6 + im 8 + accounts 10 + core 6 + assistant 3 + code 1 + officesuite 2。code 路由断言 104→105，officesuite 233→235。
+
+## 11.4 v7 验证结果（2026-09-25 全绿）
+
+| 检查项 | 结果 |
+|---|---|
+| manage.py check | 0 issues |
+| 迁移 | 全部已应用，无待执行 |
+| v2 smoke_test.py | 160 通过 / 0 失败 |
+| v3 learning_smoke | 80 通过 / 0 失败 |
+| v4 extensions_smoke | 78 通过 / 0 失败 |
+| v5 suite_smoke | 537 通过 / 0 失败 |
+| minitools v7 smoke | catalog 19子系统/321接口，32/32工具通过 |
+| minitools v7.1 smoke | 99/99新工具通过，无500 |
+| npm run build | 成功（3.87s） |
+| 后端总URL数 | 1707 |
+
+说明：冒烟全部串行执行；admin密码曾漂移已重置为admin123；ECharts未安装，图表改用SVG；#86/#91/#93为部分实现，核心接口就绪。
+
+## 11.5 设计文档
+- docs/10-可快速落地的100项功能清单.md
+- docs/11-新增200+简单功能设计清单.md（含v7.1追加110项章节）

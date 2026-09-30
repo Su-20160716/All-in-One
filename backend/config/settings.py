@@ -49,6 +49,11 @@ INSTALLED_APPS = [
     "dashboard",
     "learning",
     "assistant",
+    "devtools",
+    "minitools",
+    "dataintel",
+    "officesuite",
+    "code",
     "ws_app",
 ]
 
@@ -207,6 +212,14 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.JSONRenderer",
     ),
     "EXCEPTION_HANDLER": "core.exceptions.custom_exception_handler",
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.AnonRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "user": "1000/min",
+        "anon": "100/min",
+    },
 }
 
 # JWT
@@ -227,7 +240,7 @@ PAGE_SIZE_MAX = 100
 # 回收站保留天数（到期可由清理任务清除）
 TRASH_KEEP_DAYS = int(os.environ.get("TRASH_KEEP_DAYS", "30"))
 # 平台版本
-PLATFORM_VERSION = "4.0.0"
+PLATFORM_VERSION = "5.0.0"
 
 # ---------------------------------------------------------------------------
 # 多租户 / 行级数据权限

@@ -20,5 +20,8 @@ frontend/dist/
 *.tmp
 .DS_Store
 
+# ---- 临时脚本归档（2026-09-30 dsh 从根目录清理出来的 12 个 _*.py）----
+_archive_temp_*/
+
 # ---- 工作区私有数据（AI 助手记忆，不上云）----
 .workbuddy/

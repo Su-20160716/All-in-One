@@ -1,4 +1,6 @@
 """任务看板模型：项目、看板列、任务卡片、子任务、工时、评论、成员、活动"""
+import uuid
+
 from django.conf import settings
 from django.db import models
 
@@ -60,6 +62,7 @@ class TaskCard(models.Model):
     sort_order = models.IntegerField(default=0, verbose_name="列内排序")
     started_at = models.DateTimeField(null=True, blank=True, verbose_name="开始时间")
     completed_at = models.DateTimeField(null=True, blank=True, verbose_name="完成时间")
+    last_overdue_notified_at = models.DateTimeField(null=True, blank=True, verbose_name="上次逾期提醒时间")
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="created_cards", verbose_name="创建者"
     )
@@ -142,3 +145,36 @@ class ProjectActivity(models.Model):
 
     def __str__(self):
         return f"{self.action} {self.target}"
+
+
+class BoardShareLink(models.Model):
+    """看板只读分享链接（免登录查看）"""
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="share_links", verbose_name="项目")
+    token = models.CharField(max_length=32, unique=True, db_index=True, verbose_name="令牌")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="board_share_links", verbose_name="创建者")
+    is_revoked = models.BooleanField(default=False, verbose_name="已失效")
+    expire_at = models.DateTimeField(null=True, blank=True, verbose_name="过期时间")
+    view_count = models.IntegerField(default=0, verbose_name="浏览次数")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "看板分享链接"
+        verbose_name_plural = "看板分享链接"
+
+    def __str__(self):
+        return self.token
+
+    @staticmethod
+    def make_token():
+        return uuid.uuid4().hex[:16]
+
+    @property
+    def is_expired(self):
+        from django.utils import timezone
+
+        if self.is_revoked:
+            return True
+        if self.expire_at and self.expire_at < timezone.now():
+            return True
+        return False

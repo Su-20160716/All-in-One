@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="mx-auto max-w-6xl space-y-4">
     <div class="flex items-center justify-between">
       <div>
@@ -13,6 +13,11 @@
 
     <!-- 知识点树 -->
     <div v-if="tab === 'point'" class="grid grid-cols-12 gap-4">
+      <p class="col-span-12 rounded-lg bg-ink-50 px-3 py-2 text-[12px] leading-5 text-ink-500">
+        第一间「知识点」：先选学段、再选学科，或直接在搜索框输「方程」回车。左侧是章节—知识点树（搜索时变成结果列表），
+        点一枚标签，右侧给出编号、蓝底定义、核心要点、黑底公式、典型例题、学习方法和红色易错点；
+        讲解 / 考法 / 易错三段后端补齐后会自动出现，最后可「标记为学习中」写进个人进度。
+      </p>
       <div class="col-span-12 flex flex-wrap items-end gap-3">
         <label class="block"><span class="mb-1 block text-[12px] text-ink-500">学段</span>
           <select v-model="stage" class="input w-32" @change="onStage"><option v-for="s in stages" :key="s.key" :value="s.key">{{ s.name }}</option></select>
@@ -30,16 +35,22 @@
           <button v-for="p in pointResults" :key="p.id" class="block w-full rounded-control px-2 py-1.5 text-left text-[13px] hover:bg-ink-50" @click="openPoint(p.id)">{{ p.chapter }} / {{ p.name }}</button>
         </div>
         <template v-else>
+          <div v-if="pointQ" class="mb-2 rounded-control bg-amber-50 px-3 py-1.5 text-[12px] leading-5 text-amber-700">
+            没有匹配「{{ pointQ }}」的知识点——换个别名试试（如「方程」试试「方程组」），下面先显示章节树。
+          </div>
           <div v-for="(c, ci) in chapters" :key="ci" class="mb-2">
             <div class="rounded-control bg-ink-50 px-3 py-1.5 text-[13px] font-semibold text-ink-700">{{ c.chapter }}</div>
             <div class="flex flex-wrap gap-1.5 p-2">
               <button v-for="(pt, pi) in c.points" :key="pi" class="tag-brand cursor-pointer" @click="openPoint(`${stage}.${subject}.${ci}.${pi}`)">{{ pt }}</button>
             </div>
           </div>
+          <div v-if="!chapters.length" class="px-1 text-[13px] leading-6 text-ink-400">
+            这个学段 / 学科还没有章节：换个学科（小学数学、初中物理都各有内容），或用上方搜索框直接找知识点。
+          </div>
         </template>
       </div>
       <div class="card col-span-5 max-h-[70vh] overflow-auto p-4">
-        <div v-if="!point" class="grid h-40 place-items-center text-[13px] text-ink-400">点击知识点查看详情</div>
+        <div v-if="!point" class="grid h-40 place-items-center px-4 text-center text-[13px] leading-6 text-ink-400">点左边任意知识点标签，这里展开定义、要点、例题和易错点</div>
         <div v-else>
           <div class="flex items-center gap-2">
             <h3 class="text-[15px] font-semibold text-ink-900">{{ point.name }}</h3>
@@ -52,6 +63,11 @@
             <div class="rounded-control bg-brand-50 p-3">
               <div class="text-[12px] font-semibold text-brand-700">定义</div>
               <div class="mt-1 text-[12px] leading-6 text-ink-700">{{ point.detail.definition }}</div>
+            </div>
+
+            <div v-if="point.detail.insight" class="rounded-control bg-white p-3 ring-1 ring-ink-100">
+              <div class="text-[12px] font-semibold text-ink-700">讲解</div>
+              <div class="mt-1 text-[12px] leading-6 text-ink-600">{{ point.detail.insight }}</div>
             </div>
 
             <div v-if="point.detail.key_points?.length">
@@ -80,6 +96,16 @@
               <div class="mt-1 text-[12px] leading-6 text-ink-600">{{ point.detail.methods }}</div>
             </div>
 
+            <div v-if="point.detail.exam_tip" class="rounded-control bg-amber-50 p-3">
+              <div class="text-[12px] font-semibold text-amber-700">考法</div>
+              <div class="mt-1 text-[12px] leading-6 text-amber-700">{{ point.detail.exam_tip }}</div>
+            </div>
+
+            <div v-if="point.detail.pitfall" class="rounded-control bg-rose-50 p-3">
+              <div class="text-[12px] font-semibold text-rose-600">易错</div>
+              <div class="mt-1 text-[12px] leading-6 text-rose-500">{{ point.detail.pitfall }}</div>
+            </div>
+
             <div v-if="point.detail.common_mistakes?.length">
               <div class="text-[12px] font-semibold text-rose-600">常见易错点</div>
               <ul class="mt-1 ml-4 list-disc space-y-0.5">
@@ -99,10 +125,18 @@
 
     <!-- 公式手册 -->
     <div v-else-if="tab === 'formula'" class="grid grid-cols-12 gap-4">
+      <p class="col-span-12 rounded-lg bg-ink-50 px-3 py-2 text-[12px] leading-5 text-ink-500">
+        第二间「公式手册」：60 条公式按学段（小学 / 初中 / 高中）和学科（数学 / 物理 / 化学）过滤。
+        左边点一条，右边黑底显示公式本身、用法说明，下面按公式里的变量自动生成带中文提示的输入框；
+        填数值点「代入计算」，服务端用安全的 AST 求值（内置 π、e、g）算出结果——查得到，也算得出。
+      </p>
       <div class="card col-span-5 max-h-[70vh] overflow-auto p-3">
         <div class="mb-2 flex gap-2">
           <select v-model="fStage" class="input w-28"><option value="">全部学段</option><option v-for="s in stages" :key="s.key" :value="s.key">{{ s.name }}</option></select>
           <select v-model="fSubject" class="input w-32"><option value="">全部学科</option><option value="math">数学</option><option value="physics">物理</option><option value="chemistry">化学</option></select>
+        </div>
+        <div v-if="!filteredFormulas.length" class="px-1 text-[13px] leading-6 text-ink-400">
+          当前筛选没有公式：把学段 / 学科切回「全部」，60 条公式就都回来了。
         </div>
         <button v-for="f in filteredFormulas" :key="f.key" class="block w-full rounded-control px-3 py-2 text-left"
           :class="activeFormula?.key === f.key ? 'bg-brand-600 text-white' : 'hover:bg-ink-50'" @click="pickFormula(f)">
@@ -111,11 +145,18 @@
         </button>
       </div>
       <div class="card col-span-7 p-5">
-        <div v-if="!activeFormula" class="grid h-40 place-items-center text-[13px] text-ink-400">选择公式后代入数值计算</div>
+        <div v-if="!activeFormula" class="grid h-40 place-items-center px-6 text-center text-[13px] leading-6 text-ink-400">
+          左边点一条公式（如勾股定理、欧姆定律），这里会给出黑底公式、按变量生成的输入框和「代入计算」按钮
+        </div>
         <div v-else class="space-y-3">
           <h3 class="text-[16px] font-semibold text-ink-900">{{ activeFormula.name }}</h3>
           <div class="rounded-control bg-ink-900 p-3 text-center font-mono text-[15px] text-ink-100">{{ activeFormula.formula }}</div>
-          <p v-if="formulaDetail.usage" class="text-[12px] leading-6 text-ink-500">{{ formulaDetail.usage }}</p>
+          <div v-if="usageObj" class="space-y-1 rounded-control bg-ink-50 p-3 text-[12px] leading-6 text-ink-600">
+            <div v-if="usageObj.scenario"><span class="font-semibold text-ink-700">适用场景：</span>{{ usageObj.scenario }}</div>
+            <div v-if="usageObj.pitfall" class="text-rose-500"><span class="font-semibold text-rose-600">易错：</span>{{ usageObj.pitfall }}</div>
+            <div v-if="usageObj.example" class="font-mono text-[12px] text-brand-700"><span class="font-sans font-semibold">例子：</span>{{ usageObj.example }}</div>
+          </div>
+          <p v-else-if="formulaDetail.usage" class="text-[12px] leading-6 text-ink-500">{{ formulaDetail.usage }}</p>
           <div class="grid grid-cols-2 gap-3">
             <label v-for="pair in activeFormula.vars" :key="pair[0]" class="block">
               <span class="mb-1 block text-[12px] text-ink-500">{{ pair[1] }}（{{ pair[0] }}）</span>
@@ -130,18 +171,32 @@
 
     <!-- 英语语法 -->
     <div v-else-if="tab === 'grammar'" class="grid grid-cols-12 gap-4">
+      <p class="col-span-12 rounded-lg bg-ink-50 px-3 py-2 text-[12px] leading-5 text-ink-500">
+        第三间「英语语法」：28 个语法点按学段筛（小学到高中）。左边点标题，右边给一条蓝底规则讲解，
+        下面逐条配等宽例句；后端补齐后还会出现「易错」和「相近语法辨析」两段——正好解决“规则会背、
+        一做就混”的问题。
+      </p>
       <div class="card col-span-4 max-h-[70vh] overflow-auto p-3">
         <select v-model="gStage" class="input mb-2"><option value="">全部学段</option><option v-for="s in stages" :key="s.key" :value="s.key">{{ s.name }}</option></select>
+        <div v-if="!filteredGrammar.length" class="px-1 text-[13px] leading-6 text-ink-400">这个学段暂时没有语法点，把筛选切回「全部学段」。</div>
         <button v-for="g in filteredGrammar" :key="g.key" class="block w-full rounded-control px-3 py-2 text-left text-[13px]"
           :class="grammar?.key === g.key ? 'bg-brand-600 text-white' : 'hover:bg-ink-50'" @click="openGrammar(g.key)">{{ g.title }}</button>
       </div>
       <div class="card col-span-8 p-5">
-        <div v-if="!grammar" class="grid h-40 place-items-center text-[13px] text-ink-400">选择语法点查看规则与例句</div>
+        <div v-if="!grammar" class="grid h-40 place-items-center px-6 text-center text-[13px] leading-6 text-ink-400">在左边点一个语法点（如「一般现在时」），这里给出规则和例句</div>
         <div v-else>
           <h3 class="text-[16px] font-semibold text-ink-900">{{ grammar.title }}</h3>
           <p class="mt-3 rounded-control bg-brand-50 p-3 text-[13px] leading-7 text-brand-800">{{ grammar.rule }}</p>
           <div class="mt-3 space-y-1.5">
             <div v-for="(e, i) in grammar.examples" :key="i" class="rounded-control border border-ink-100 p-2 font-mono text-[13px] text-ink-700">{{ e }}</div>
+          </div>
+          <div v-if="grammar.pitfall" class="mt-3 rounded-control bg-rose-50 p-3">
+            <div class="text-[12px] font-semibold text-rose-600">易错</div>
+            <div class="mt-1 text-[13px] leading-6 text-rose-500">{{ grammar.pitfall }}</div>
+          </div>
+          <div v-if="grammar.contrast" class="mt-2 rounded-control bg-amber-50 p-3">
+            <div class="text-[12px] font-semibold text-amber-700">相近语法辨析</div>
+            <div class="mt-1 text-[13px] leading-6 text-amber-700">{{ grammar.contrast }}</div>
           </div>
         </div>
       </div>
@@ -149,8 +204,13 @@
 
     <!-- 化学 -->
     <div v-else class="space-y-4">
+      <p class="rounded-lg bg-ink-50 px-3 py-2 text-[12px] leading-5 text-ink-500">
+        第四间「化学」：上半部分是元素周期表——按碱金属、卤素等类别筛选，一格格是序数、符号、中文名，
+        点某格下方给出相对原子质量、类别与常温状态（存在 / 用途 / 特性补齐后会一起展示）；
+        下半部分是化学方程式卡片，标着反应类型、学段和条件，点卡片可展开配平思路与考点。
+      </p>
       <div class="card p-4">
-        <div class="mb-3 flex items-center gap-2">
+        <div class="mb-3 flex flex-wrap items-center gap-2">
           <h3 class="text-[15px] font-semibold text-ink-800">常用元素（{{ elements.length }}）</h3>
           <button v-for="c in elemCats" :key="c" class="tag cursor-pointer" :class="elemCat === c ? 'bg-brand-600 text-white' : ''" @click="elemCat = elemCat === c ? '' : c">{{ c }}</button>
         </div>
@@ -161,18 +221,41 @@
             <div class="text-[18px] font-bold text-ink-800">{{ e.symbol }}</div>
             <div class="text-[11px] text-ink-500">{{ e.name }}</div>
           </button>
+          <div v-if="!filteredElements.length" class="col-span-3 rounded-control bg-ink-50 p-3 text-center text-[13px] leading-6 text-ink-400 md:col-span-6 lg:col-span-9">
+            这个类别下没有收录元素：再点一次类别标签取消筛选，118 个常用元素就都显示了。
+          </div>
         </div>
-        <div v-if="element" class="mt-3 rounded-control bg-ink-50 p-3 text-[13px] text-ink-700">
+        <div v-if="element" class="mt-3 rounded-control bg-ink-50 p-3 text-[13px] leading-6 text-ink-700">
           {{ element.number }} 号元素 {{ element.name }}（{{ element.symbol }}），相对原子质量 {{ element.mass }}，类别 {{ element.category }}，常温状态 {{ element.state }}
+          <div v-if="element.story" class="mt-1.5 space-y-1 border-t border-ink-200 pt-1.5 text-[12px] text-ink-600">
+            <div v-if="element.story.occurrence"><span class="font-semibold text-ink-700">存在：</span>{{ element.story.occurrence }}</div>
+            <div v-if="element.story.uses"><span class="font-semibold text-ink-700">用途：</span>{{ element.story.uses }}</div>
+            <div v-if="element.story.trait"><span class="font-semibold text-ink-700">特性：</span>{{ element.story.trait }}</div>
+            <div v-if="!element.story.occurrence && !element.story.uses && !element.story.trait" class="text-ink-400">该元素的存在 / 用途 / 特性讲解待后端补充。</div>
+          </div>
         </div>
       </div>
       <div class="card p-4">
-        <h3 class="mb-3 text-[15px] font-semibold text-ink-800">化学方程式（{{ equations.length }}）</h3>
+        <h3 class="mb-3 text-[15px] font-semibold text-ink-800">化学方程式（{{ equations.length }}）· 点卡片看配平思路与考点</h3>
         <div class="grid gap-2 md:grid-cols-2">
-          <div v-for="eq in equations" :key="eq.key" class="rounded-control border border-ink-100 p-3">
-            <div class="flex items-center gap-2"><span class="tag-brand">{{ eq.type }}</span><span class="tag">{{ stageName(eq.stage) }}</span><span v-if="eq.condition" class="tag">条件：{{ eq.condition }}</span></div>
+          <div v-for="eq in equations" :key="eq.key" class="cursor-pointer rounded-control border p-3 transition-colors"
+            :class="openEq === eq.key ? 'border-brand-300 bg-brand-50/40 ring-2 ring-brand-100' : 'border-ink-100 hover:border-brand-200'"
+            @click="toggleEq(eq.key)">
+            <div class="flex items-center gap-2"><span class="tag-brand">{{ eq.type }}</span><span class="tag">{{ stageName(eq.stage) }}</span><span v-if="eq.condition" class="tag">条件：{{ eq.condition }}</span>
+              <span class="ml-auto text-[11px] text-brand-600">{{ openEq === eq.key ? '收起 ▲' : '讲解 ▼' }}</span></div>
             <div class="mt-1.5 font-mono text-[14px] text-ink-900">{{ eq.equation }}</div>
-            <div v-if="eq.phenomenon" class="mt-1 text-[12px] text-ink-500">现象：{{ eq.phenomenon }}</div>
+            <div v-if="eq.phenomenon || eq.phenomenon_note" class="mt-1 text-[12px] text-ink-500">现象：{{ eq.phenomenon || eq.phenomenon_note }}</div>
+            <div v-if="openEq === eq.key" class="mt-2 space-y-1 border-t border-ink-100 pt-2 text-[12px] leading-6">
+              <div v-if="eq.balance_tip"><span class="font-semibold text-ink-700">配平思路：</span><span class="text-ink-600">{{ eq.balance_tip }}</span></div>
+              <div v-if="!eq.phenomenon && eq.phenomenon_note" class="text-ink-500"><span class="font-semibold text-ink-700">现象：</span>{{ eq.phenomenon_note }}</div>
+              <div v-if="eq.exam_tip" class="text-amber-700"><span class="font-semibold">考点：</span>{{ eq.exam_tip }}</div>
+              <div v-if="!eq.balance_tip && !eq.exam_tip" class="text-ink-400">
+                本条的配平思路与考点还在逐条补齐；先把上面的反应类型、条件和现象记牢（{{ stageName(eq.stage) }} 范围）。
+              </div>
+            </div>
+          </div>
+          <div v-if="!equations.length" class="card grid h-32 place-items-center px-6 text-center text-[13px] leading-6 text-ink-400">
+            方程式还没加载出来：刷新页面重取，52 条方程式会按反应类型分列在这里。
           </div>
         </div>
       </div>
@@ -233,6 +316,11 @@ async function pickFormula(f) {
   calcVals.value = {}
   formulaDetail.value = (await learnApi.formula(f.key))
 }
+// usage 兼容两种后端返回：纯字符串 / {scenario, pitfall, example} 对象
+const usageObj = computed(() => {
+  const u = formulaDetail.value?.usage
+  return u && typeof u === 'object' && !Array.isArray(u) ? u : null
+})
 async function calc() {
   const data = await learnApi.formulaCalc(activeFormula.value.key, calcVals.value)
   calcResult.value = data.result
@@ -251,6 +339,9 @@ const element = ref(null)
 const elemCats = ref([])
 const elemCat = ref('')
 const equations = ref([])
+// 方程式卡片可点开（S5/F503）：配平思路 / 现象解读 / 考点，字段不存在时不渲染
+const openEq = ref('')
+function toggleEq(k) { openEq.value = openEq.value === k ? '' : k }
 const filteredElements = computed(() => elements.value.filter((e) => !elemCat.value || e.category === elemCat.value))
 async function openElement(n) { element.value = (await learnApi.element(n)) }
 

@@ -416,3 +416,40 @@ HANZI = [
 ]
 
 PINYIN_MAP = {h["char"]: h["pinyin"] for h in HANZI}
+
+# ---- v8 唯一文本合并（dsh 2026-09-30）：把 chinese_v8 的逐条讲解原地并入条目 ----
+# 任何字段缺失都不影响原有数据；HANZI_V8 可能后补，用 getattr 防御。
+try:
+    from . import chinese_v8 as _v8
+except Exception:  # pragma: no cover
+    _v8 = None
+
+
+def _v8_merge(entries, dict_name, id_field):
+    d = getattr(_v8, dict_name, {}) if _v8 else {}
+    if not isinstance(d, dict):
+        return
+    for e in entries:
+        hit = d.get(e.get(id_field))
+        if hit:
+            e.update(hit)
+
+
+_v8_merge(POEMS, "POEM_V8", "key")
+_v8_merge(IDIOMS, "IDIOM_V8", "word")
+_v8_merge(HANZI, "HANZI_V8", "char")
+
+# ---- F506：汉字「组词 / 造句 / 形近字辨析」（独立文件 hanzi_v8.py，dsh 2026-09-30）----
+# 181 字逐条唯一文本；只增不改，缺失时静默跳过。
+try:
+    from . import hanzi_v8 as _h8
+except Exception:  # pragma: no cover
+    _h8 = None
+
+_HANZI_V8 = getattr(_h8, "HANZI_V8", {}) if _h8 else {}
+if isinstance(_HANZI_V8, dict):
+    for _h in HANZI:
+        _hit = _HANZI_V8.get(_h.get("char"))
+        if _hit:
+            _h.update(_hit)
+del _v8_merge

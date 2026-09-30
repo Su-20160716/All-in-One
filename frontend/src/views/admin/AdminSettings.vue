@@ -1,7 +1,13 @@
 <template>
   <div class="mx-auto max-w-2xl space-y-4">
     <div class="card p-5">
-      <h3 class="mb-3 text-[14px] font-semibold">站点设置（键值对）</h3>
+      <div class="mb-3 flex items-center justify-between">
+        <h3 class="text-[14px] font-semibold">站点设置（键值对）</h3>
+        <!-- #68 一键备份 -->
+        <button class="btn-outline text-[12px]" @click="doBackup" :disabled="backingUp">
+          {{ backingUp ? '备份中…' : '💾 一键备份数据' }}
+        </button>
+      </div>
       <div class="space-y-2">
         <div v-for="(item, key) in settings" :key="key" class="flex items-center gap-2">
           <span class="w-36 shrink-0 text-[12px] text-ink-500">{{ labels[key] || key }}</span>
@@ -27,12 +33,16 @@ const app = useAppStore()
 const settings = reactive({})
 const newKey = ref('')
 const newValue = ref('')
+const backingUp = ref(false)
 const labels = {
   site_name: '站点名称',
   site_description: '站点描述',
   register_enabled: '开放注册(true/false)',
+  register_invite_required: '注册需邀请码(true/false)',
   contact_email: '联系邮箱',
   footer_text: '页脚文案',
+  logo_url: '站点 Logo URL',
+  primary_color: '主题色（HEX）',
 }
 
 async function load() {
@@ -51,6 +61,18 @@ async function save() {
   await coreApi.saveAdminSettings(payload)
   app.toastMsg('已保存', 'success')
   load()
+}
+// #68 一键备份
+async function doBackup() {
+  backingUp.value = true
+  try {
+    const r = await coreApi.backup()
+    app.toastMsg(`备份完成: ${r.file} (${r.size_kb} KB)`, 'success')
+  } catch (e) {
+    app.toastMsg('备份失败', 'error')
+  } finally {
+    backingUp.value = false
+  }
 }
 onMounted(load)
 </script>

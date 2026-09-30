@@ -2,7 +2,18 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from accounts.models import DATA_SCOPE_CHOICES, Department, LoginLog, Permission, Role, Tenant
+from accounts.models import (
+    DATA_SCOPE_CHOICES,
+    ActiveSession,
+    Badge,
+    Department,
+    InviteCode,
+    LoginLog,
+    Permission,
+    Role,
+    Tenant,
+    UserBadge,
+)
 
 User = get_user_model()
 
@@ -36,16 +47,18 @@ class UserSerializer(serializers.ModelSerializer):
     department_path = serializers.SerializerMethodField()
     tenant_name = serializers.SerializerMethodField()
     data_scope = serializers.SerializerMethodField()
+    is_online = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
-            "id", "username", "nickname", "email", "phone", "bio", "avatar",
+            "id", "username", "nickname", "email", "phone", "bio", "avatar", "tags",
             "is_superuser", "is_active", "is_disabled", "storage_quota_mb",
-            "date_joined", "last_login", "last_active_at", "role_names", "role_ids",
+            "date_joined", "last_login", "last_active_at", "is_online",
+            "dnd_start", "dnd_end", "role_names", "role_ids",
             "department", "department_name", "department_path", "tenant", "tenant_name", "data_scope",
         ]
-        read_only_fields = ["is_superuser", "date_joined", "last_login", "last_active_at"]
+        read_only_fields = ["is_superuser", "date_joined", "last_login", "last_active_at", "is_online"]
         extra_kwargs = {"department": {"required": False, "allow_null": True},
                         "tenant": {"required": False, "allow_null": True}}
 
@@ -66,6 +79,13 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_data_scope(self, obj):
         return obj.data_scope()
+
+    def get_is_online(self, obj):
+        """5 分钟内有活跃记录视为在线"""
+        from django.utils import timezone
+        if not obj.last_active_at:
+            return False
+        return (timezone.now() - obj.last_active_at).total_seconds() < 300
 
 
 class TenantSerializer(serializers.ModelSerializer):
@@ -114,17 +134,24 @@ class UserDirectorySerializer(serializers.ModelSerializer):
     display_name = serializers.CharField(read_only=True)
     role_names = serializers.SerializerMethodField()
     department_name = serializers.SerializerMethodField()
+    is_online = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ["id", "username", "nickname", "display_name", "avatar", "bio", "role_names",
-                  "department_name", "last_active_at"]
+        fields = ["id", "username", "nickname", "display_name", "avatar", "bio", "tags", "role_names",
+                  "department_name", "last_active_at", "is_online"]
 
     def get_role_names(self, obj):
         return list(obj.roles.values_list("name", flat=True))
 
     def get_department_name(self, obj):
         return obj.department.path_name() if obj.department_id else ""
+
+    def get_is_online(self, obj):
+        from django.utils import timezone
+        if not obj.last_active_at:
+            return False
+        return (timezone.now() - obj.last_active_at).total_seconds() < 300
 
 
 class LoginLogSerializer(serializers.ModelSerializer):
@@ -136,7 +163,7 @@ class LoginLogSerializer(serializers.ModelSerializer):
 class ProfileUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["nickname", "email", "phone", "bio"]
+        fields = ["nickname", "email", "phone", "bio", "tags", "dnd_start", "dnd_end"]
 
     def validate_email(self, value):
         User = get_user_model()
@@ -228,3 +255,48 @@ class UserAdminCreateSerializer(serializers.ModelSerializer):
         if department_id or tenant_id:
             user.save(update_fields=["department", "tenant"])
         return user
+
+
+# ---------------------------------------------------------------------------
+# #49 徽章
+# ---------------------------------------------------------------------------
+
+class BadgeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Badge
+        fields = ["id", "key", "name", "icon", "level", "rule", "description"]
+
+
+class UserBadgeSerializer(serializers.ModelSerializer):
+    badge = BadgeSerializer(read_only=True)
+
+    class Meta:
+        model = UserBadge
+        fields = ["id", "badge", "awarded_at"]
+
+
+# ---------------------------------------------------------------------------
+# #52 邀请码
+# ---------------------------------------------------------------------------
+
+class InviteCodeSerializer(serializers.ModelSerializer):
+    owner_name = serializers.CharField(source="owner.display_name", read_only=True)
+    used_by_name = serializers.CharField(source="used_by.display_name", read_only=True, default="")
+    is_valid = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = InviteCode
+        fields = ["id", "code", "owner", "owner_name", "used_by", "used_by_name",
+                  "max_uses", "uses", "expires_at", "is_valid", "created_at"]
+        read_only_fields = ["code", "owner", "used_by", "uses", "created_at"]
+
+
+# ---------------------------------------------------------------------------
+# #56 活跃会话 / 设备管理
+# ---------------------------------------------------------------------------
+
+class ActiveSessionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ActiveSession
+        fields = ["id", "ip", "device", "user_agent", "created_at", "last_seen", "is_revoked"]
+        read_only_fields = fields

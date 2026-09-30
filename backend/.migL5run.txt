@@ -1,0 +1,5 @@
+﻿Operations to perform:
+  Apply all migrations: code
+Running migrations:
+  Applying code.0002_codeachievement_codedailychallenge_codedailyrecord_and_more... OK
+

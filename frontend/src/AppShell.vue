@@ -3,6 +3,7 @@
     <Sidebar />
     <div class="flex min-w-0 flex-1 flex-col">
       <Topbar />
+      <CommandPalette />
       <main class="flex-1 overflow-y-auto p-5">
         <router-view v-slot="{ Component }">
           <Transition name="page" mode="out-in">
@@ -17,6 +18,7 @@
 <script setup>
 import Sidebar from './components/Sidebar.vue'
 import Topbar from './components/Topbar.vue'
+import CommandPalette from './components/CommandPalette.vue'
 </script>
 
 <style scoped>

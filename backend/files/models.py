@@ -47,12 +47,19 @@ class FileMeta(models.Model):
     pdf_error = models.CharField(max_length=255, blank=True, verbose_name="PDF转换失败原因")
     pdf_updated_at = models.DateTimeField(null=True, blank=True, verbose_name="PDF生成时间")
     is_star = models.BooleanField(default=False, verbose_name="收藏")
+    favorite_group = models.CharField(max_length=50, blank=True, default="", verbose_name="收藏分组")
+    # F555 收藏夹自定义排序（默认 0，按创建时间兜底）
+    favorite_order = models.IntegerField(default=0, verbose_name="收藏排序")
+    # F553 图片分辨率（首次查询时按需计算并缓存）
+    width = models.IntegerField(null=True, blank=True, verbose_name="图片宽度(px)")
+    height = models.IntegerField(null=True, blank=True, verbose_name="图片高度(px)")
     description = models.CharField(max_length=500, blank=True, verbose_name="备注")
     is_deleted = models.BooleanField(default=False, verbose_name="已删除(回收站)")
     deleted_at = models.DateTimeField(null=True, blank=True, verbose_name="删除时间")
     origin_folder_id = models.BigIntegerField(null=True, blank=True, verbose_name="删除前所在文件夹")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+    tags = models.ManyToManyField("FileTag", related_name="files", blank=True, verbose_name="标签")
 
     class Meta:
         verbose_name = "文件元数据"
@@ -186,3 +193,81 @@ class ShareLink(models.Model):
         if self.max_downloads is not None and self.download_count >= self.max_downloads:
             return True
         return False
+
+
+class FileTag(models.Model):
+    """文件标签（多标签体系，按用户隔离）"""
+
+    name = models.CharField(max_length=50, verbose_name="标签名")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="file_tags", verbose_name="所有者")
+    color = models.CharField(max_length=16, default="default", verbose_name="颜色")
+
+    class Meta:
+        verbose_name = "文件标签"
+        verbose_name_plural = "文件标签"
+        unique_together = [("name", "owner")]
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def use_count(self):
+        return self.files.filter(is_deleted=False).count()
+
+
+class FileOperationLog(models.Model):
+    """F559 移动/复制等文件操作流水（只增不改，便于追溯）"""
+
+    ACTION_CHOICES = [
+        ("move", "移动"), ("copy", "复制"), ("rename", "重命名"),
+        ("upload", "上传"), ("trash", "移入回收站"), ("restore", "还原"),
+        ("download", "下载"), ("share", "分享"),
+    ]
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="file_ops", verbose_name="操作者")
+    file = models.ForeignKey(FileMeta, on_delete=models.SET_NULL, null=True, blank=True, related_name="ops", verbose_name="文件")
+    file_name = models.CharField(max_length=255, blank=True, verbose_name="文件名(冗余)")
+    action = models.CharField(max_length=16, choices=ACTION_CHOICES, default="move", verbose_name="操作类型")
+    detail = models.CharField(max_length=500, blank=True, verbose_name="详情")
+    from_folder = models.CharField(max_length=200, blank=True, verbose_name="来源目录")
+    to_folder = models.CharField(max_length=200, blank=True, verbose_name="目标目录")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="操作时间")
+
+    class Meta:
+        verbose_name = "文件操作记录"
+        verbose_name_plural = "文件操作记录"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["owner", "created_at"])]
+
+    def __str__(self):
+        return f"{self.action}:{self.file_name}"
+
+
+class FileVisibilitySnapshot(models.Model):
+    """F561 文件可见性快照：记录文件在某时刻的可见范围（私有/共享链接/权限）"""
+
+    VISIBILITY_CHOICES = [
+        ("private", "仅自己"), ("shared", "共享链接"), ("expired", "链接已过期"), ("revoked", "链接已撤销"),
+    ]
+
+    file = models.ForeignKey(FileMeta, on_delete=models.CASCADE, related_name="visibility_snapshots", verbose_name="文件")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="file_visibility_snapshots", verbose_name="记录人"
+    )
+    visibility = models.CharField(max_length=16, choices=VISIBILITY_CHOICES, default="private", verbose_name="可见性")
+    data_scope = models.CharField(max_length=16, default="self", verbose_name="数据范围")
+    share_token = models.CharField(max_length=32, blank=True, verbose_name="关联分享令牌")
+    permission = models.CharField(max_length=16, blank=True, verbose_name="分享权限")
+    expire_at = models.DateTimeField(null=True, blank=True, verbose_name="分享过期时间")
+    snapshot = models.JSONField(default=dict, blank=True, verbose_name="快照明细")
+    note = models.CharField(max_length=255, blank=True, verbose_name="备注")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="记录时间")
+
+    class Meta:
+        verbose_name = "文件可见性快照"
+        verbose_name_plural = "文件可见性快照"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.file_id}:{self.visibility}"

@@ -10,6 +10,7 @@
         <select v-model="scope" class="input w-32" @change="load">
           <option value="">全部</option><option value="starred">仅收藏</option><option value="archived">已归档</option>
         </select>
+        <button class="btn-outline" @click="openTemplates">从模板创建</button>
         <button class="btn-primary" @click="showCreate = true">＋ 新建项目</button>
       </div>
     </div>
@@ -54,6 +55,16 @@
         </div>
       </div>
     </Modal>
+
+    <Modal :show="showTemplates" title="从模板创建项目" @close="showTemplates = false">
+      <div class="space-y-2">
+        <div v-for="t in templates" :key="t.key" class="cursor-pointer rounded-control border border-ink-100 p-3 hover:border-brand-300" @click="createFromTemplate(t)">
+          <div class="text-[13px] font-semibold text-ink-800">{{ t.name }}</div>
+          <div class="mt-0.5 text-[12px] text-ink-500">{{ t.description }}</div>
+          <div class="mt-1 text-[11px] text-ink-400">列：{{ t.columns.join(' / ') }}</div>
+        </div>
+      </div>
+    </Modal>
   </div>
 </template>
 
@@ -68,6 +79,8 @@ const router = useRouter()
 const app = useAppStore()
 const projects = ref([])
 const showCreate = ref(false)
+const showTemplates = ref(false)
+const templates = ref([])
 const kw = ref('')
 const scope = ref('')
 const form = reactive({ name: '', description: '', color: '#0ea5e9' })
@@ -113,5 +126,18 @@ async function removeProject(p) {
   load()
 }
 function openBoard(id) { router.push(`/projects/${id}/board`) }
+async function openTemplates() {
+  templates.value = (await projectApi.templates()).list || []
+  showTemplates.value = true
+}
+async function createFromTemplate(t) {
+  const name = prompt('项目名称：', t.name)
+  if (!name) return
+  const p = await projectApi.fromTemplate({ key: t.key, name })
+  app.toastMsg('已从模板创建', 'success')
+  showTemplates.value = false
+  load()
+  router.push(`/projects/${p.id}/board`)
+}
 onMounted(load)
 </script>

@@ -1,23 +1,31 @@
 <template>
-  <div class="space-y-4">
+  <div class="space-y-4" :class="themeClass">
     <div class="card flex flex-wrap items-center gap-3 p-4">
       <div class="h-3 w-12 rounded-pill" :style="{ background: project?.color || '#0ea5e9' }"></div>
       <h2 class="text-[16px] font-bold text-ink-900">{{ project?.name }}</h2>
       <span v-if="project?.is_archived" class="tag bg-amber-50 text-amber-600">已归档</span>
-      <input v-model="cardKw" class="input w-44" placeholder="筛选卡片…" />
+      <input v-model="cardKw" class="input w-40" placeholder="筛选卡片…" />
       <select v-model="prioFilter" class="input w-28">
         <option value="">全部优先级</option><option value="urgent">紧急</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option>
       </select>
+      <select v-model="assigneeFilter" class="input w-28">
+        <option value="">全部负责人</option><option v-for="(n,i) in project?.member_names||[]" :key="n" :value="project.member_ids[i]">{{ n }}</option>
+      </select>
+      <select v-model="dueFilter" class="input w-28">
+        <option value="">全部到期</option><option value="overdue">已逾期</option><option value="today">今天</option><option value="week">本周</option><option value="nodate">无日期</option>
+      </select>
       <div class="ml-auto flex flex-wrap items-center gap-2">
-        <span v-for="m in project?.member_names || []" :key="m" class="tag">{{ m }}</span>
+        <button class="btn-ghost text-[12px]" :class="compact?'text-brand-600':''" @click="compact=!compact; saveTheme()">{{ compact?'⊟ 紧凑':'⊞ 完整' }}</button>
+        <button class="btn-ghost text-[12px]" @click="cycleTheme">🎨 {{ themeName }}</button>
+        <button class="btn-ghost text-[12px]" @click="showShare=true; loadShare()">分享</button>
         <button class="btn-ghost text-[12px]" @click="showMembers = true">成员</button>
-        <button class="btn-ghost text-[12px]" @click="showStats = true; loadStats()">统计</button>
+        <button class="btn-ghost text-[12px]" @click="showStats = true; loadStats(); loadBurndown()">统计</button>
         <button class="btn-outline" @click="showNewCard = { board: null }">＋ 新卡片</button>
       </div>
     </div>
 
     <div class="flex items-start gap-3 overflow-x-auto pb-2">
-      <div v-for="b in filteredBoards" :key="b.id" class="w-72 shrink-0 rounded-card bg-ink-100/70 p-2.5" @dragover.prevent @drop="onDrop($event, b.id)">
+      <div v-for="b in boards" :key="b.id" class="w-72 shrink-0 rounded-card bg-ink-100/70 p-2.5" @dragover.prevent @drop="onDrop($event, b.id)">
         <div class="mb-2 flex items-center justify-between px-1">
           <span class="text-[13px] font-semibold text-ink-700">{{ b.name }} <span class="text-[11px] font-normal text-ink-400">{{ matchCards(b).length }}</span></span>
           <div class="flex gap-1">
@@ -26,20 +34,24 @@
           </div>
         </div>
         <div class="space-y-2">
-          <div v-for="c in matchCards(b)" :key="c.id" class="card cursor-grab p-3 active:cursor-grabbing" draggable="true" @dragstart="onDragStart($event, c)" @click="openCard(c)">
+          <div v-for="c in matchCards(b)" :key="c.id" class="card group cursor-grab p-3 active:cursor-grabbing" :class="cardTone(c)" draggable="true" @dragstart="onDragStart($event, c)" @click="openCard(c)">
             <div class="flex items-start justify-between gap-2">
               <span class="text-[13px] font-medium leading-snug">{{ c.title }}</span>
               <span class="shrink-0 text-[12px]">{{ prioIcon(c.priority) }}</span>
             </div>
-            <div class="mt-2 flex flex-wrap items-center gap-1">
-              <span v-for="l in c.labels || []" :key="l" class="rounded-pill bg-brand-50 px-1.5 py-0.5 text-[10px] text-brand-700">{{ l }}</span>
+            <div v-if="!compact" class="mt-2 flex flex-wrap items-center gap-1">
+              <span v-for="l in c.labels || []" :key="labelName(l)" class="rounded-pill px-1.5 py-0.5 text-[10px]" :style="labelStyle(l)">{{ labelName(l) }}</span>
+            </div>
+            <div v-if="!compact && c.subtask_total" class="mt-2">
+              <div class="h-1.5 w-full overflow-hidden rounded-pill bg-ink-100"><div class="h-full rounded-pill bg-emerald-500" :style="{ width: (c.progress||0)+'%' }"></div></div>
             </div>
             <div class="mt-2 flex items-center gap-2 text-[11px] text-ink-400">
-              <span v-if="c.due_date" :class="c.is_overdue ? 'font-medium text-rose-500' : ''">{{ c.is_overdue ? '⚠' : '🗓' }} {{ c.due_date }}</span>
-              <span v-if="c.subtask_total">☑ {{ c.subtask_done }}/{{ c.subtask_total }}</span>
-              <span v-if="c.comment_count" class="ml-auto">💬 {{ c.comment_count }}</span>
-              <span v-if="c.assignee_names.length" class="ml-auto">{{ c.assignee_names.map((n) => n.slice(0, 1)).join('') }}</span>
+              <span v-if="c.due_date" :class="dueTone(c)">{{ dueIcon(c) }} {{ c.due_date }}</span>
+              <span v-if="!compact && c.subtask_total">☑ {{ c.subtask_done }}/{{ c.subtask_total }}</span>
+              <span v-if="!compact && c.comment_count" class="ml-auto">💬 {{ c.comment_count }}</span>
+              <span v-if="c.assignee_names.length" :class="compact?'':'ml-auto'">{{ c.assignee_names.map((n) => n.slice(0, 1)).join('') }}</span>
             </div>
+            <button class="absolute right-1 top-1 hidden rounded bg-white/90 px-1 text-[10px] shadow group-hover:block" title="复制卡片" @click.stop="quickCopy(c)">⧉</button>
           </div>
         </div>
         <button class="mt-2 w-full rounded-control border border-dashed border-ink-200 py-1.5 text-[12px] text-ink-400 hover:border-brand-300 hover:text-brand-600" @click="showNewCard = { board: b.id }">＋ 添加卡片</button>
@@ -95,7 +107,7 @@
         <div>
           <div class="mb-1.5 text-[12px] font-medium text-ink-600">标签</div>
           <div class="flex flex-wrap items-center gap-1.5">
-            <span v-for="l in activeCard.labels || []" :key="l" class="tag tag-brand">{{ l }} <button @click="removeLabel(l)">×</button></span>
+            <span v-for="l in activeCard.labels || []" :key="labelName(l)" class="rounded-pill px-2 py-0.5 text-[11px]" :style="labelStyle(l)">{{ labelName(l) }} <button @click="removeLabel(labelName(l))">×</button></span>
             <input v-model="labelInput" class="input w-24 py-1 text-[12px]" placeholder="+标签" @keyup.enter="addLabel" />
           </div>
         </div>
@@ -105,7 +117,8 @@
           <div class="mb-1.5 flex items-center justify-between">
             <span class="text-[12px] font-medium text-ink-600">子任务 {{ activeCard.subtask_done }}/{{ activeCard.subtask_total }}（{{ activeCard.progress }}%）</span>
           </div>
-          <div class="space-y-1">
+          <div class="h-1.5 w-full overflow-hidden rounded-pill bg-ink-100"><div class="h-full rounded-pill bg-emerald-500" :style="{ width: (activeCard.progress||0)+'%' }"></div></div>
+          <div class="mt-1.5 space-y-1">
             <div v-for="s in subtasks" :key="s.id" class="group flex items-center gap-2 text-[13px]">
               <input type="checkbox" :checked="s.is_done" @change="toggleSubtask(s)" />
               <span :class="s.is_done ? 'text-ink-300 line-through' : 'text-ink-700'">{{ s.title }}</span>
@@ -182,13 +195,21 @@
       </div>
     </Modal>
 
-    <!-- 统计 -->
-    <Modal :show="showStats" title="项目统计" width="520px" @close="showStats = false">
+    <!-- 统计 + 燃尽图 -->
+    <Modal :show="showStats" title="项目统计" width="560px" @close="showStats = false">
       <div v-if="stats" class="space-y-4">
         <div class="grid grid-cols-3 gap-2 text-center">
           <div class="rounded-control bg-ink-50 p-3"><div class="text-[20px] font-bold">{{ stats.total }}</div><div class="text-[11px] text-ink-500">总任务</div></div>
           <div class="rounded-control bg-emerald-50 p-3"><div class="text-[20px] font-bold text-emerald-600">{{ stats.done }}</div><div class="text-[11px] text-ink-500">已完成</div></div>
           <div class="rounded-control bg-rose-50 p-3"><div class="text-[20px] font-bold text-rose-600">{{ stats.overdue }}</div><div class="text-[11px] text-ink-500">已逾期</div></div>
+        </div>
+        <div>
+          <div class="mb-1.5 text-[12px] font-medium text-ink-600">燃尽图（剩余工作量）</div>
+          <svg v-if="burn.dates && burn.dates.length" :viewBox="`0 0 520 200`" class="w-full rounded-control bg-ink-50">
+            <polyline :points="linePoints(burn.remaining)" fill="none" stroke="#0ea5e9" stroke-width="2" />
+            <polyline :points="linePoints(burn.ideal)" fill="none" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3" />
+          </svg>
+          <div v-else class="grid h-24 place-items-center rounded-control bg-ink-50 text-[12px] text-ink-400">暂无数据</div>
         </div>
         <div>
           <div class="mb-1.5 text-[12px] font-medium text-ink-600">各列分布</div>
@@ -199,6 +220,21 @@
           <div class="max-h-40 space-y-1.5 overflow-y-auto">
             <div v-for="a in stats.activities" :key="a.id" class="text-[12px] text-ink-500"><span class="font-medium text-ink-700">{{ a.user_name }}</span> {{ a.action }} {{ a.target }} <span class="text-[10px] text-ink-300">{{ formatTime(a.created_at) }}</span></div>
           </div>
+        </div>
+      </div>
+    </Modal>
+
+    <!-- 分享链接 -->
+    <Modal :show="showShare" title="只读分享看板" @close="showShare = false">
+      <div class="space-y-3">
+        <p class="text-[12px] text-ink-500">生成免登录只读链接，任何人可查看当前看板（不可编辑）。</p>
+        <div v-if="shareUrl" class="flex items-center gap-2 rounded-control bg-ink-50 p-2">
+          <input :value="shareUrl" readonly class="input flex-1 py-1 text-[12px]" />
+          <button class="btn-outline text-[12px]" @click="copyShare">复制链接</button>
+          <button class="btn-ghost text-[12px] text-rose-500" @click="revokeShare">撤销</button>
+        </div>
+        <div v-else class="flex justify-end">
+          <button class="btn-primary" @click="genShare">生成分享链接</button>
         </div>
       </div>
     </Modal>
@@ -220,6 +256,10 @@ const project = ref(null)
 const boards = ref([])
 const cardKw = ref('')
 const prioFilter = ref('')
+const assigneeFilter = ref('')
+const dueFilter = ref('')
+const compact = ref(localStorage.getItem('board_compact') === '1')
+const themeIdx = ref(Number(localStorage.getItem('board_theme') || 0))
 const showNewCard = ref(null)
 const cardForm = reactive({ board: null, title: '', description: '', priority: 'medium', due_date: '' })
 const activeCard = ref(null)
@@ -236,17 +276,61 @@ const memberQ = ref('')
 const candidates = ref([])
 const showStats = ref(false)
 const stats = ref(null)
+const burn = ref({ dates: [], remaining: [], ideal: [] })
+const showShare = ref(false)
+const shareUrl = ref('')
+const shareToken = ref('')
 let dragCard = null
 
+const THEME_BGS = ['', 'bg-sky-50/40', 'bg-amber-50/40', 'bg-emerald-50/40', 'bg-slate-100/60']
+const THEME_NAMES = ['浅色', '天蓝', '暖橙', '青绿', '深灰']
+const themeClass = ref(THEME_BGS[themeIdx.value])
+const themeName = THEME_NAMES[themeIdx.value]
+function cycleTheme() { themeIdx.value = (themeIdx.value + 1) % THEME_BGS.length; themeClass.value = THEME_BGS[themeIdx.value]; localStorage.setItem('board_theme', String(themeIdx.value)) }
+function saveTheme() { localStorage.setItem('board_compact', compact.value ? '1' : '0') }
+
+const LABEL_COLORS = ['#dbeafe', '#fce7f3', '#dcfce7', '#fef9c3', '#ffedd5', '#e0e7ff', '#f3e8ff']
+const LABEL_TEXT = ['#1d4ed8', '#be185d', '#15803d', '#a16207', '#c2410c', '#4338ca', '#7e22ce']
+function labelName(l) { return typeof l === 'string' ? l : (l.name || '') }
+function labelStyle(l) {
+  const name = labelName(l)
+  let h = 0
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+  const i = h % LABEL_COLORS.length
+  return { background: LABEL_COLORS[i], color: LABEL_TEXT[i] }
+}
+
 const prioIcon = (p) => ({ low: '🟢', medium: '🟡', high: '🟠', urgent: '🔴' }[p] || '⚪')
+function todayStr() { return new Date().toISOString().slice(0, 10) }
+function dueTone(c) {
+  if (c.is_overdue) return 'font-medium text-rose-500'
+  if (c.due_date === todayStr()) return 'font-medium text-orange-500'
+  return ''
+}
+function dueIcon(c) {
+  if (c.is_overdue) return '⚠'
+  if (c.due_date === todayStr()) return '📌'
+  return '🗓'
+}
+function cardTone(c) {
+  if (c.is_overdue) return 'border-l-4 border-l-rose-400'
+  if (c.due_date === todayStr()) return 'border-l-4 border-l-orange-400'
+  return ''
+}
 function matchCards(b) {
+  const today = todayStr()
   return (b.cards || []).filter((c) => {
     const okKw = !cardKw.value || c.title.includes(cardKw.value)
     const okPrio = !prioFilter.value || c.priority === prioFilter.value
-    return okKw && okPrio
+    const okAssignee = !assigneeFilter.value || (c.assignee_ids || []).map(String).includes(String(assigneeFilter.value))
+    let okDue = true
+    if (dueFilter.value === 'overdue') okDue = c.is_overdue
+    else if (dueFilter.value === 'today') okDue = c.due_date === today
+    else if (dueFilter.value === 'week') { const diff = (new Date(c.due_date) - new Date(today)) / 86400000; okDue = c.due_date && diff >= 0 && diff <= 7 }
+    else if (dueFilter.value === 'nodate') okDue = !c.due_date
+    return okKw && okPrio && okAssignee && okDue
   })
 }
-const filteredBoards = boards
 
 async function load() {
   const r = await projectApi.board(projectId)
@@ -273,10 +357,7 @@ async function createCard() {
   showNewCard.value = null
   load()
 }
-function onDragStart(e, card) {
-  dragCard = card
-  e.dataTransfer.effectAllowed = 'move'
-}
+function onDragStart(e, card) { dragCard = card; e.dataTransfer.effectAllowed = 'move' }
 async function onDrop(e, targetBoardId) {
   if (!dragCard) return
   const target = boards.value.find((b) => b.id === targetBoardId)
@@ -308,6 +389,11 @@ async function copyCard() {
   activeCard.value = null
   load()
 }
+async function quickCopy(c) {
+  await projectApi.copyCard(c.id)
+  app.toastMsg('已复制卡片', 'success')
+  load()
+}
 async function addComment() {
   const content = commentInput.value.trim()
   if (!content) return
@@ -332,7 +418,7 @@ async function addLabel() {
   await updateCard({ labels })
 }
 async function removeLabel(l) {
-  await updateCard({ labels: (activeCard.value.labels || []).filter((x) => x !== l) })
+  await updateCard({ labels: (activeCard.value.labels || []).filter((x) => labelName(x) !== l) })
 }
 async function toggleAssignee(uid) {
   let ids = [...activeCard.value.assignee_ids]
@@ -389,5 +475,28 @@ async function removeMember(uid) {
   load()
 }
 async function loadStats() { stats.value = await projectApi.stats(projectId) }
+async function loadBurndown() { burn.value = await projectApi.burndown(projectId) }
+function linePoints(arr) {
+  if (!arr || arr.length < 2) return ''
+  const max = Math.max(...arr, 1)
+  const w = 520, h = 180, pad = 10
+  return arr.map((v, i) => `${(i / (arr.length - 1)) * (w - 2 * pad) + pad},${h - pad - (v / max) * (h - 2 * pad)}`).join(' ')
+}
+async function loadShare() {
+  shareUrl.value = ''; shareToken.value = ''
+}
+async function genShare() {
+  const r = await projectApi.createShare(projectId)
+  shareToken.value = r.token
+  shareUrl.value = (location.origin) + r.url
+  app.toastMsg('已生成分享链接', 'success')
+}
+function copyShare() { navigator.clipboard?.writeText(shareUrl.value); app.toastMsg('已复制', 'success') }
+async function revokeShare() {
+  if (!shareToken.value) return
+  await projectApi.revokeShare(projectId, shareToken.value)
+  shareUrl.value = ''; shareToken.value = ''
+  app.toastMsg('已撤销', 'success')
+}
 onMounted(load)
 </script>

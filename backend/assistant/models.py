@@ -9,13 +9,25 @@ from django.db import models
 
 
 class AIConversation(models.Model):
-    """AI 对话（LLM 聊天助手）"""
+    """AI 对话（LLM 聊天助手）
+
+    分支（F645）：一条回复可以「从这条分支新对话」——新会话记录父会话与父消息，
+    两个字段都可空，老数据不受影响。
+    """
 
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ai_conversations", verbose_name="用户"
     )
     title = models.CharField(max_length=120, blank=True, verbose_name="标题")
     scene = models.CharField(max_length=32, default="chat", verbose_name="场景")
+    parent_conversation = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="branches", verbose_name="父会话",
+    )
+    parent_message = models.ForeignKey(
+        "AIMessage", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="branches", verbose_name="父消息",
+    )
     model = models.CharField(max_length=64, blank=True, verbose_name="使用的模型")
     message_count = models.IntegerField(default=0, verbose_name="消息数")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
@@ -103,3 +115,31 @@ class AIUsageLog(models.Model):
 
     def __str__(self):
         return f"{self.feature} {self.provider} {'ok' if self.success else 'fail'}"
+
+
+class AIPrompt(models.Model):
+    """提示词库（F644）：收藏常用提示词，一键插入输入框
+
+    内置提示词（is_builtin=True）在用户首次打开提示词库时按 owner 幂等补种，
+    用户可自由修改/收藏/删除自己的副本。
+    """
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ai_prompts", verbose_name="用户"
+    )
+    title = models.CharField(max_length=120, verbose_name="标题")
+    content = models.TextField(verbose_name="提示词内容")
+    category = models.CharField(max_length=32, default="自定义", verbose_name="分类")
+    is_favorite = models.BooleanField(default=False, verbose_name="是否收藏")
+    is_builtin = models.BooleanField(default=False, verbose_name="是否内置")
+    usage_count = models.PositiveIntegerField(default=0, verbose_name="使用次数")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        verbose_name = "AI 提示词"
+        verbose_name_plural = "AI 提示词"
+        ordering = ["-is_favorite", "-updated_at"]
+
+    def __str__(self):
+        return f"{self.title} ({self.category})"

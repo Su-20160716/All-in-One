@@ -1,6 +1,33 @@
-"""IM 模型：会话、消息、会话成员偏好（免打扰/置顶/草稿）"""
+"""IM 模型：会话、消息、会话成员偏好（免打扰/置顶/草稿/归档）"""
 from django.conf import settings
 from django.db import models
+
+
+class QuickReply(models.Model):
+    """个人快捷回复模板"""
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="quick_replies", verbose_name="所有者")
+    title = models.CharField(max_length=120, blank=True, verbose_name="标题")
+    content = models.TextField(verbose_name="内容")
+    sort_order = models.IntegerField(default=0, verbose_name="排序")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "快捷回复"
+        verbose_name_plural = "快捷回复"
+        ordering = ["sort_order", "id"]
+
+
+class KeywordAlert(models.Model):
+    """关键词提醒：消息内容命中关键词时推送通知"""
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="keyword_alerts", verbose_name="所有者")
+    keywords = models.JSONField(default=list, verbose_name="关键词列表")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "关键词提醒"
+        verbose_name_plural = "关键词提醒"
 
 
 class ChatSession(models.Model):
@@ -34,6 +61,7 @@ class SessionMemberSetting(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="session_settings", verbose_name="成员")
     is_muted = models.BooleanField(default=False, verbose_name="免打扰")
     is_pinned = models.BooleanField(default=False, verbose_name="置顶")
+    is_archived = models.BooleanField(default=False, verbose_name="已归档")
     draft = models.TextField(blank=True, verbose_name="草稿")
     last_read_at = models.DateTimeField(null=True, blank=True, verbose_name="最后已读时间")
 
@@ -56,6 +84,8 @@ class ChatMessage(models.Model):
     content = models.TextField(verbose_name="内容")
     attachments = models.JSONField(default=list, blank=True, verbose_name="附件")
     forward_from = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True, related_name="forwards", verbose_name="转发自")
+    reply_to = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True, related_name="replies", verbose_name="回复")
+    is_pinned = models.BooleanField(default=False, verbose_name="会话内置顶")
     is_recalled = models.BooleanField(default=False, verbose_name="已撤回")
     deleted_for = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name="deleted_messages", blank=True, verbose_name="对谁删除")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="时间")

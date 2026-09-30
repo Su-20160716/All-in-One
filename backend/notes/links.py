@@ -187,7 +187,12 @@ def suggest_titles(owner_id: int, keyword: str, exclude_id: int = None, limit: i
     if exclude_id:
         qs = qs.exclude(id=exclude_id)
     qs = qs.order_by("-updated_at")[:limit]
-    return [{"id": n.id, "title": n.title, "words": n.words} for n in qs]
+    out = []
+    for n in qs:
+        excerpt = re.sub(r"[#>*`\-\[\]]", " ", n.content or "")
+        excerpt = " ".join(excerpt.split())[:80]
+        out.append({"id": n.id, "title": n.title, "words": n.words, "excerpt": excerpt})
+    return out
 
 
 def dangling_notes(owner_id: int, limit: int = 50):

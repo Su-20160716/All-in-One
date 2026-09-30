@@ -1,18 +1,37 @@
 """IM 序列化"""
 from rest_framework import serializers
 
-from im.models import ChatMessage, ChatSession, SessionMemberSetting
+from im.models import ChatMessage, ChatSession, QuickReply, SessionMemberSetting
+
+
+class QuickReplySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuickReply
+        fields = ["id", "title", "content", "sort_order", "created_at"]
+        read_only_fields = ["owner"]
+
+
+class ReplyToSerializer(serializers.ModelSerializer):
+    sender_name = serializers.CharField(source="sender.display_name", read_only=True, default="系统")
+
+    class Meta:
+        model = ChatMessage
+        fields = ["id", "sender", "sender_name", "msg_type", "content", "is_recalled"]
 
 
 class ChatMessageSerializer(serializers.ModelSerializer):
     sender_name = serializers.CharField(source="sender.display_name", read_only=True, default="系统")
     sender_avatar = serializers.SerializerMethodField()
+    reply_to_info = serializers.SerializerMethodField()
+    read_by_count = serializers.SerializerMethodField()
+    read_by_me = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatMessage
         fields = [
             "id", "session", "sender", "sender_name", "sender_avatar", "msg_type",
-            "content", "attachments", "forward_from", "is_recalled", "created_at",
+            "content", "attachments", "forward_from", "reply_to", "reply_to_info",
+            "is_pinned", "is_recalled", "read_by_count", "read_by_me", "created_at",
         ]
         read_only_fields = ["sender"]
 
@@ -21,6 +40,38 @@ class ChatMessageSerializer(serializers.ModelSerializer):
             return obj.sender.avatar.url
         return ""
 
+    def get_reply_to_info(self, obj):
+        r = obj.reply_to
+        if not r:
+            return None
+        return {"id": r.id, "sender_name": r.sender.display_name if r.sender else "系统",
+                "content": r.content[:120], "is_recalled": r.is_recalled}
+
+    def _read_count(self, obj):
+        members = list(obj.session.members.values("id", "username"))
+        settings = {
+            s.user_id: s.last_read_at
+            for s in SessionMemberSetting.objects.filter(session=obj.session)
+        }
+        total = 0
+        for m in members:
+            if m["id"] == obj.sender_id:
+                continue
+            lr = settings.get(m["id"])
+            if lr and lr >= obj.created_at:
+                total += 1
+        return total
+
+    def get_read_by_count(self, obj):
+        return self._read_count(obj)
+
+    def get_read_by_me(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return False
+        s = SessionMemberSetting.objects.filter(session=obj.session, user=request.user).first()
+        return bool(s and s.last_read_at and s.last_read_at >= obj.created_at)
+
 
 class SessionSerializer(serializers.ModelSerializer):
     members_info = serializers.SerializerMethodField()
@@ -28,6 +79,7 @@ class SessionSerializer(serializers.ModelSerializer):
     unread = serializers.SerializerMethodField()
     is_muted = serializers.SerializerMethodField()
     is_pinned = serializers.SerializerMethodField()
+    is_archived = serializers.SerializerMethodField()
     draft = serializers.SerializerMethodField()
     member_count = serializers.SerializerMethodField()
 
@@ -35,7 +87,8 @@ class SessionSerializer(serializers.ModelSerializer):
         model = ChatSession
         fields = [
             "id", "name", "type", "members", "members_info", "owner", "announcement",
-            "avatar", "member_count", "last_message", "unread", "is_muted", "is_pinned", "draft", "created_at",
+            "avatar", "member_count", "last_message", "unread", "is_muted", "is_pinned",
+            "is_archived", "draft", "created_at",
         ]
 
     def _setting(self, obj):
@@ -80,6 +133,10 @@ class SessionSerializer(serializers.ModelSerializer):
     def get_is_pinned(self, obj):
         s = self._setting(obj)
         return s.is_pinned if s else False
+
+    def get_is_archived(self, obj):
+        s = self._setting(obj)
+        return s.is_archived if s else False
 
     def get_draft(self, obj):
         s = self._setting(obj)

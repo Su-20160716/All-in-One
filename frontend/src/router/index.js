@@ -3,6 +3,20 @@ import { useUserStore } from '../stores/user'
 
 const routes = [
   { path: '/login', name: 'login', component: () => import('../views/Login.vue'), meta: { public: true } },
+  // 代码分享页（免登录，独立布局，不套 AppShell）
+  // 路径与后端 share_create 返回的 url 保持一致：/share/code/<token>/
+  {
+    path: '/share/code/:token',
+    name: 'code-share',
+    component: () => import('../views/code/SharedCode.vue'),
+    meta: { public: true, title: '共享代码' },
+  },
+  {
+    path: '/share/board/:token',
+    name: 'board-share',
+    component: () => import('../views/projects/SharedBoard.vue'),
+    meta: { public: true, title: '只读看板' },
+  },
   {
     path: '/',
     component: () => import('../AppShell.vue'),
@@ -21,6 +35,12 @@ const routes = [
       { path: 'projects/:id/board', name: 'board', component: () => import('../views/projects/Board.vue'), meta: { title: '看板' } },
       { path: 'im', name: 'im', component: () => import('../views/im/Chat.vue'), meta: { title: '站内消息' } },
       { path: 'tools', name: 'tools', component: () => import('../views/tools/Tools.vue'), meta: { title: '小工具' } },
+      { path: 'toolbox/devtools', name: 'toolbox-devtools', component: () => import('../views/toolbox/DomainExplorer.vue'), props: { domain: 'devtools' }, meta: { title: '开发工具箱' } },
+      { path: 'toolbox/minitools', name: 'toolbox-minitools', component: () => import('../views/toolbox/DomainExplorer.vue'), props: { domain: 'minitools' }, meta: { title: '迷你工具箱' } },
+      { path: 'toolbox/dataintel', name: 'toolbox-dataintel', component: () => import('../views/toolbox/DomainExplorer.vue'), props: { domain: 'dataintel' }, meta: { title: '数据智能中心' } },
+      { path: 'toolbox/office', name: 'toolbox-office', component: () => import('../views/toolbox/DomainExplorer.vue'), props: { domain: 'officesuite' }, meta: { title: '办公套件' } },
+      { path: 'office/helpdesk', name: 'office-helpdesk', component: () => import('../views/office/Helpdesk.vue'), meta: { title: '工单台' } },
+      { path: 'office/duty', name: 'office-duty', component: () => import('../views/office/DutyWeek.vue'), meta: { title: '值班排班' } },
       { path: 'learning', name: 'learning-home', component: () => import('../views/learning/LearningHome.vue'), meta: { title: '学习中心' } },
       { path: 'learning/programming', name: 'learning-programming', component: () => import('../views/learning/programming/Programming.vue'), meta: { title: '编程语言广场' } },
       { path: 'learning/drill', name: 'learning-drill', component: () => import('../views/learning/programming/CodeDrill.vue'), meta: { title: '编程刷题训练' } },
@@ -30,6 +50,9 @@ const routes = [
       { path: 'learning/questions', name: 'learning-questions', component: () => import('../views/learning/school/QuestionBank.vue'), meta: { title: '题库与组卷' } },
       { path: 'learning/tools', name: 'learning-tools', component: () => import('../views/learning/LearnTools.vue'), meta: { title: '学习工具箱' } },
       { path: 'learning/study', name: 'learning-study', component: () => import('../views/learning/StudyCenter.vue'), meta: { title: '我的学习' } },
+      // ── 代码工坊（v6）────────────────────────────────────────────
+      { path: 'code', name: 'code-forge', component: () => import('../views/code/CodeForge.vue'), meta: { title: '代码工坊' } },
+      { path: 'code/learn', name: 'code-learn', component: () => import('../views/code/LearnCenter.vue'), meta: { title: '代码学习中心' } },
       { path: 'announcements', name: 'announcements', component: () => import('../views/Announcements.vue'), meta: { title: '系统公告' } },
       { path: 'admin/stats', name: 'admin-stats', component: () => import('../views/admin/AdminStats.vue'), meta: { title: '统计面板' } },
       { path: 'admin/users', name: 'admin-users', component: () => import('../views/admin/AdminUsers.vue'), meta: { title: '用户管理' } },
@@ -41,6 +64,8 @@ const routes = [
       { path: 'profile', name: 'profile', component: () => import('../views/Profile.vue'), meta: { title: '个人设置' } },
     ],
   },
+  // F617 个人公开主页（本次唯一获准的共享文件改动：仅追加这一条路由）
+  { path: '/u/:username', name: 'public-profile', component: () => import('../views/Profile.vue'), meta: { public: true, title: '个人主页' } },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
 ]
 

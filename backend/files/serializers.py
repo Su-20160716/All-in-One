@@ -2,7 +2,7 @@
 from django.db.models import Sum as ModelsSum
 from rest_framework import serializers
 
-from files.models import FileMeta, Folder, ShareLink
+from files.models import FileMeta, FileTag, Folder, ShareLink
 
 
 class FolderSerializer(serializers.ModelSerializer):
@@ -34,14 +34,19 @@ class FileMetaSerializer(serializers.ModelSerializer):
     previewable = serializers.SerializerMethodField()
     raw_url = serializers.SerializerMethodField()
     pdf_url = serializers.SerializerMethodField()
+    tag_names = serializers.SerializerMethodField()
+    tag_ids = serializers.SerializerMethodField()
 
     class Meta:
         model = FileMeta
         fields = [
             "id", "name", "folder", "folder_name", "size", "size_text", "sha1", "kind", "ext",
-            "url", "thumbnail_url", "is_star", "description",
+            "url", "thumbnail_url", "is_star", "favorite_group", "description",
             "preview_type", "previewable", "raw_url", "pdf_url", "pdf_status",
             "is_deleted", "deleted_at", "origin_folder_id", "created_at", "updated_at",
+            "tag_names", "tag_ids",
+            # F553 图片分辨率徽章 / F555 收藏排序
+            "width", "height", "favorite_order",
         ]
 
     def get_url(self, obj):
@@ -68,6 +73,23 @@ class FileMetaSerializer(serializers.ModelSerializer):
 
     def get_pdf_url(self, obj):
         return obj.pdf_url
+
+    def get_tag_names(self, obj):
+        return list(obj.tags.values_list("name", flat=True))
+
+    def get_tag_ids(self, obj):
+        return list(obj.tags.values_list("id", flat=True))
+
+
+class FileTagSerializer(serializers.ModelSerializer):
+    use_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FileTag
+        fields = ["id", "name", "color", "use_count"]
+
+    def get_use_count(self, obj):
+        return obj.use_count
 
 
 class ChunkInitSerializer(serializers.Serializer):

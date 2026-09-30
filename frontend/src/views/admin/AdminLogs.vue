@@ -10,6 +10,13 @@
         <option value="">全部动作</option>
         <option v-for="a in actions" :key="a" :value="a">{{ a }}</option>
       </select>
+      <!-- #69 对象类型筛选 -->
+      <input v-model="filters.target" class="input w-36" placeholder="操作对象关键词" @keyup.enter="load" />
+      <!-- #69 结果筛选 -->
+      <select v-model="filters.result" class="input w-28" @change="load">
+        <option value="">全部结果</option>
+        <option value="fail">仅失败</option>
+      </select>
       <input v-model="filters.start" type="date" class="input w-36" @change="load" />
       <span class="text-ink-300">~</span>
       <input v-model="filters.end" type="date" class="input w-36" @change="load" />
@@ -54,7 +61,7 @@ import { coreApi } from '../../api'
 import { formatTime } from '../../utils/format'
 
 const logs = ref([])
-const filters = reactive({ username: '', module: '', action: '', ip: '', start: '', end: '' })
+const filters = reactive({ username: '', module: '', action: '', ip: '', start: '', end: '', target: '', result: '' })
 const logStats = ref({})
 const modules = ['accounts', 'files', 'notes', 'projects', 'im', 'tools', 'dashboard', 'core']
 const actions = ['create', 'update', 'delete', 'read', 'login', 'logout', 'upload', 'download', 'share', 'move', 'restore', 'other']

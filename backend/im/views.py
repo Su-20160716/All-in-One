@@ -6,8 +6,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
-from im.models import ChatMessage, ChatSession, SessionMemberSetting
-from im.serializers import ChatMessageSerializer, SessionSerializer
+from im.models import ChatMessage, ChatSession, KeywordAlert, QuickReply, SessionMemberSetting
+from im.serializers import ChatMessageSerializer, QuickReplySerializer, SessionSerializer
 from ws_app.events import broadcast_session, send_to_session
 
 
@@ -24,8 +24,20 @@ class SessionListView(APIView):
     """会话列表（置顶优先）/ 创建单聊或群聊"""
 
     def get(self, request):
+        archived = request.query_params.get("archived")
         sessions = list(_member_sessions(request.user))
         data = SessionSerializer(sessions, many=True, context={"request": request}).data
+        # 归档过滤：archived=1 仅归档；默认仅未归档
+        if archived == "1":
+            data = [d for d in data if d["is_archived"]]
+        elif archived == "all":
+            pass
+        else:
+            data = [d for d in data if not d["is_archived"]]
+        # 关键字过滤（会话名 / 对方名）
+        kw = (request.query_params.get("search") or "").strip()
+        if kw:
+            data = [d for d in data if kw in d.get("name", "") or kw in (d.get("last_message", {}) or {}).get("content", "")]
         # 置顶在前，再按最后消息时间
         def sort_key(item):
             last = item["last_message"]["created_at"] if item["last_message"] else item["created_at"]
@@ -166,7 +178,7 @@ class SessionSettingView(APIView):
             return Response({"message": "会话不存在"}, status=404)
         setting = _get_setting(s, request.user)
         changed = []
-        for f in ("is_muted", "is_pinned"):
+        for f in ("is_muted", "is_pinned", "is_archived"):
             if f in request.data:
                 setattr(setting, f, bool(request.data[f]))
                 changed.append(f)
@@ -178,16 +190,18 @@ class SessionSettingView(APIView):
             changed.append("last_read_at")
         setting.save()
         return Response({"message": "设置已更新", "is_muted": setting.is_muted, "is_pinned": setting.is_pinned,
-                         "draft": setting.draft})
+                         "is_archived": setting.is_archived, "draft": setting.draft})
 
 
 class MessageListView(APIView):
-    """消息历史（对自己删除的不返回），支持会话内搜索"""
+    """消息历史（对自己删除的不返回），支持会话内搜索 / 按发送者 / 时间范围过滤"""
 
     def get(self, request, pk):
         s = ChatSession.objects.filter(pk=pk, members=request.user).first()
         if not s:
             return Response({"message": "会话不存在"}, status=404)
+        # 置顶消息区（与历史分开返回）
+        pinned = list(s.messages.filter(is_pinned=True).exclude(deleted_for=request.user).exclude(is_recalled=True).order_by("-created_at"))
         qs = s.messages.exclude(deleted_for=request.user)
         kw = request.query_params.get("q")
         if kw:
@@ -195,12 +209,22 @@ class MessageListView(APIView):
         msg_type = request.query_params.get("msg_type")
         if msg_type:
             qs = qs.filter(msg_type=msg_type)
+        sender = request.query_params.get("sender")
+        if sender:
+            qs = qs.filter(sender_id=sender)
+        date_from = request.query_params.get("date_from")
+        if date_from:
+            qs = qs.filter(created_at__date__gte=date_from)
+        date_to = request.query_params.get("date_to")
+        if date_to:
+            qs = qs.filter(created_at__date__lte=date_to)
         before = request.query_params.get("before")
         if before:
             qs = qs.filter(id__lt=before)
         qs = qs.order_by("-id")[:50]
-        data = ChatMessageSerializer(list(qs)[::-1], many=True).data
-        return Response({"list": data, "total": len(data)})
+        data = ChatMessageSerializer(list(qs)[::-1], many=True, context={"request": request}).data
+        pinned_data = ChatMessageSerializer(pinned, many=True, context={"request": request}).data
+        return Response({"list": data, "total": len(data), "pinned": pinned_data})
 
 
 class MessageCreateView(APIView):
@@ -214,20 +238,45 @@ class MessageCreateView(APIView):
         msg_type = request.data.get("msg_type", "text")
         forward_id = request.data.get("forward_from")
         forward = ChatMessage.objects.filter(id=forward_id, session__members=request.user).first() if forward_id else None
+        reply_id = request.data.get("reply_to")
+        reply = ChatMessage.objects.filter(id=reply_id, session=s).first() if reply_id else None
         if not content and msg_type == "text" and not forward:
             return Response({"message": "消息内容不能为空"}, status=400)
         msg = ChatMessage.objects.create(
             session=s, sender=request.user, content=content, msg_type=msg_type,
-            attachments=request.data.get("attachments", []) or [], forward_from=forward,
+            attachments=request.data.get("attachments", []) or [], forward_from=forward, reply_to=reply,
         )
-        send_to_session(s.id, {"type": "chat.message", "data": ChatMessageSerializer(msg).data})
+        send_to_session(s.id, {"type": "chat.message", "data": ChatMessageSerializer(msg, context={"request": request}).data})
         # 非免打扰成员推送通知
         muted_ids = set(SessionMemberSetting.objects.filter(session=s, is_muted=True).values_list("user_id", flat=True))
         for u in s.members.exclude(id=request.user.id):
             if u.id not in muted_ids:
                 from core.models import notify
                 notify(u, f"新消息：{request.user.display_name}", content[:80], category="message", link=f"/im/{s.id}")
-        return Response(ChatMessageSerializer(msg).data, status=201)
+        # 关键词提醒：对命中关键词的成员额外推送一条醒目通知
+        if msg_type == "text" and content:
+            _fire_keyword_alerts(s, msg)
+        return Response(ChatMessageSerializer(msg, context={"request": request}).data, status=201)
+
+
+def _fire_keyword_alerts(session, msg):
+    """对会话内配置了关键词提醒的成员，若消息内容命中其关键词则推送通知中心"""
+    from core.models import notify
+
+    content_lower = msg.content.lower()
+    for setting in KeywordAlert.objects.filter(owner__in=session.members.all()):
+        if setting.owner_id == msg.sender_id:
+            continue
+        hits = [kw for kw in (setting.keywords or []) if kw and kw.lower() in content_lower]
+        if hits:
+            notify(
+                setting.owner,
+                f"关键词提醒：{', '.join(hits[:3])}",
+                f"来自 {msg.sender.display_name if msg.sender else '某人'}：{msg.content[:100]}",
+                category="message",
+                level="warning",
+                link=f"/im/{session.id}",
+            )
 
 
 class MessageRecallView(APIView):
@@ -281,18 +330,28 @@ class MessageForwardView(APIView):
 
 
 class GlobalMessageSearchView(APIView):
-    """跨全部会话搜索消息"""
+    """跨全部会话搜索消息，支持按发送者 / 时间范围过滤"""
 
     def get(self, request):
         kw = (request.query_params.get("q") or "").strip()
-        if not kw:
+        qs = ChatMessage.objects.filter(session__members=request.user).exclude(deleted_for=request.user)
+        if kw:
+            qs = qs.filter(content__icontains=kw)
+        sender = request.query_params.get("sender")
+        if sender:
+            qs = qs.filter(sender_id=sender)
+        date_from = request.query_params.get("date_from")
+        if date_from:
+            qs = qs.filter(created_at__date__gte=date_from)
+        date_to = request.query_params.get("date_to")
+        if date_to:
+            qs = qs.filter(created_at__date__lte=date_to)
+        if not kw and not sender and not date_from and not date_to:
             return Response({"list": [], "total": 0})
-        qs = ChatMessage.objects.filter(session__members=request.user, content__icontains=kw).exclude(
-            deleted_for=request.user
-        ).order_by("-id")[:100]
+        qs = qs.order_by("-id")[:100]
         data = []
         for m in qs:
-            d = ChatMessageSerializer(m).data
+            d = ChatMessageSerializer(m, context={"request": request}).data
             d["session_name"] = m.session.name or "单聊"
             data.append(d)
         return Response({"list": data, "total": len(data)})
@@ -316,3 +375,78 @@ class UnreadSummaryView(APIView):
             else:
                 total += n
         return Response({"unread": total, "muted_unread": muted_total, "per_session": per_session})
+
+
+# ============ 消息置顶 ============
+
+class MessagePinView(APIView):
+    """置顶 / 取消置顶一条消息（会话成员均可操作）"""
+
+    def post(self, request, pk):
+        msg = ChatMessage.objects.filter(id=pk, session__members=request.user).first()
+        if not msg:
+            return Response({"message": "消息不存在"}, status=404)
+        msg.is_pinned = not msg.is_pinned
+        msg.save(update_fields=["is_pinned"])
+        send_to_session(msg.session_id, {
+            "type": "message.pinned",
+            "data": {"id": msg.id, "session_id": msg.session_id, "is_pinned": msg.is_pinned},
+        })
+        return Response({"message": "已置顶" if msg.is_pinned else "已取消置顶", "is_pinned": msg.is_pinned})
+
+
+# ============ 快捷回复模板 ============
+
+class QuickReplyListView(APIView):
+    def get(self, request):
+        qs = QuickReply.objects.filter(owner=request.user)
+        return Response({"list": QuickReplySerializer(qs, many=True).data, "total": qs.count()})
+
+    def post(self, request):
+        content = (request.data.get("content") or "").strip()
+        if not content:
+            return Response({"message": "内容不能为空"}, status=400)
+        qr = QuickReply.objects.create(
+            owner=request.user, title=request.data.get("title", "")[:120], content=content
+        )
+        return Response(QuickReplySerializer(qr).data, status=201)
+
+
+class QuickReplyDetailView(APIView):
+    def _get(self, request, pk):
+        return QuickReply.objects.filter(pk=pk, owner=request.user).first()
+
+    def patch(self, request, pk):
+        qr = self._get(request, pk)
+        if not qr:
+            return Response({"message": "模板不存在"}, status=404)
+        for f in ("title", "content"):
+            if f in request.data:
+                setattr(qr, f, request.data[f])
+        qr.save()
+        return Response(QuickReplySerializer(qr).data)
+
+    def delete(self, request, pk):
+        qr = self._get(request, pk)
+        if not qr:
+            return Response({"message": "模板不存在"}, status=404)
+        qr.delete()
+        return Response({"message": "已删除"})
+
+
+# ============ 关键词提醒 ============
+
+class KeywordAlertView(APIView):
+    """读取 / 保存我的关键词提醒列表（整体覆盖）"""
+
+    def get(self, request):
+        obj = KeywordAlert.objects.filter(owner=request.user).first()
+        return Response({"keywords": obj.keywords if obj else []})
+
+    def post(self, request):
+        keywords = request.data.get("keywords")
+        if not isinstance(keywords, list):
+            return Response({"message": "keywords 必须是数组"}, status=400)
+        cleaned = [str(k).strip()[:32] for k in keywords if str(k).strip()][:50]
+        obj, _ = KeywordAlert.objects.update_or_create(owner=request.user, defaults={"keywords": cleaned})
+        return Response({"keywords": obj.keywords})

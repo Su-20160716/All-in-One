@@ -38,7 +38,16 @@ class Note(models.Model):
     version = models.IntegerField(default=1, verbose_name="版本号")
     is_deleted = models.BooleanField(default=False, verbose_name="已删除(回收站)")
     deleted_at = models.DateTimeField(null=True, blank=True, verbose_name="删除时间")
+    is_archived = models.BooleanField(default=False, verbose_name="已归档")
     words = models.IntegerField(default=0, verbose_name="字数缓存")
+    # F572 颜色标记（6 色，空=无标记）
+    color = models.CharField(max_length=16, blank=True, default="", verbose_name="颜色标记")
+    # F573 笔记来源（manual/template/import/copy/link/split/merge）
+    source = models.CharField(max_length=16, default="manual", verbose_name="来源")
+    # F582 分组文件夹
+    folder = models.ForeignKey(
+        "NoteFolder", on_delete=models.SET_NULL, null=True, blank=True, related_name="notes", verbose_name="所属文件夹"
+    )
     # AI 摘要（assistant 模块写入，避免重复调用大模型）
     ai_summary = models.TextField(blank=True, verbose_name="AI 摘要")
     ai_summary_at = models.DateTimeField(null=True, blank=True, verbose_name="摘要生成时间")
@@ -141,3 +150,78 @@ class NoteCollabState(models.Model):
 
     def __str__(self):
         return f"collab#{self.note_id} rev{self.revision}"
+
+
+class NoteFolder(models.Model):
+    """F582 笔记分组文件夹（按用户隔离，支持一层嵌套）"""
+
+    name = models.CharField(max_length=100, verbose_name="名称")
+    parent = models.ForeignKey("self", on_delete=models.CASCADE, null=True, blank=True, related_name="children", verbose_name="父文件夹")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="note_folders", verbose_name="所有者")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "笔记文件夹"
+        verbose_name_plural = "笔记文件夹"
+        ordering = ["name"]
+        unique_together = [("name", "owner")]
+
+    def __str__(self):
+        return self.name
+
+
+class NoteSnippet(models.Model):
+    """F574 个人片段库：可反复插入笔记的常用文本片段"""
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="note_snippets", verbose_name="所有者")
+    title = models.CharField(max_length=100, verbose_name="标题")
+    content = models.TextField(blank=True, verbose_name="片段内容")
+    tag = models.CharField(max_length=50, blank=True, default="", verbose_name="分类")
+    use_count = models.IntegerField(default=0, verbose_name="插入次数")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        verbose_name = "笔记片段"
+        verbose_name_plural = "笔记片段"
+        ordering = ["-use_count", "-updated_at"]
+
+    def __str__(self):
+        return self.title
+
+
+class WritingGoal(models.Model):
+    """F565 写作字数目标（按天/周/月 或 指定笔记）"""
+
+    PERIOD_CHOICES = [("day", "每天"), ("week", "每周"), ("month", "每月"), ("note", "单篇笔记")]
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="writing_goals", verbose_name="所有者")
+    target = models.PositiveIntegerField(default=500, verbose_name="目标字数")
+    period = models.CharField(max_length=8, choices=PERIOD_CHOICES, default="day", verbose_name="周期")
+    note = models.ForeignKey(Note, on_delete=models.CASCADE, null=True, blank=True, related_name="goals", verbose_name="关联笔记")
+    active = models.BooleanField(default=True, verbose_name="进行中")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "写作目标"
+        verbose_name_plural = "写作目标"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.period}:{self.target}"
+
+
+class WordActivity(models.Model):
+    """F565 每日写作增量（笔记正文变化时累计，供目标完成度/周回顾使用）"""
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="word_activity", verbose_name="用户")
+    date = models.DateField(verbose_name="日期")
+    delta = models.IntegerField(default=0, verbose_name="当日新增字数")
+
+    class Meta:
+        verbose_name = "写作活跃"
+        verbose_name_plural = "写作活跃"
+        unique_together = [("owner", "date")]
+
+    def __str__(self):
+        return f"{self.owner_id}:{self.date}:{self.delta}"

@@ -78,6 +78,15 @@ school = [
 personal = [
     path("study/sessions/", v.StudySessionView.as_view(), name="learn-sessions"),
     path("study/plans/", v.StudyPlanView.as_view(), name="learn-plans"),
+    # ---- v8 学习闭环增强（dsh 2026-09-30，只增不改）----
+    path("study/streak/", v.StudyStreakView.as_view(), name="learn-streak"),                 # F522
+    path("study/report/", v.StudyReportView.as_view(), name="learn-report"),                 # F519
+    path("study/review-queue/", v.StudyReviewQueueView.as_view(), name="learn-review-queue"),  # F521
+    path("study/re-drill/", v.StudyReDrillView.as_view(), name="learn-re-drill"),            # F520
+    path("study/weakness/", v.StudyWeaknessView.as_view(), name="learn-weakness"),           # F541
+    path("study/backup/", v.StudyBackupView.as_view(), name="learn-backup"),                 # F533
+    path("search/", v.LearningGlobalSearchView.as_view(), name="learn-search"),              # F542
+    path("prog/radar/", v.ProgRadarView.as_view(), name="learn-prog-radar"),                 # F535
 ]
 
 tools = [

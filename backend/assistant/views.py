@@ -1,21 +1,25 @@
-"""AI 助手接口：状态 / 笔记摘要 / 笔记问答 / 聊天助手 / 出题 / 批改
+"""AI 助手接口：状态 / 笔记摘要 / 笔记问答 / 聊天助手 / 出题 / 批改 / 创作工具
 
 约定
 ----
 - 所有能力在「未配置 LLM_API_KEY」时自动降级为本地实现，接口结构与返回字段完全一致，
   仅 `provider` 从 `llm` 变为 `local`，因此前端无需分叉。
 - 每次调用都会写 AIUsageLog，便于观察降级比例与失败原因。
+- 计算类接口统一兜底：ValueError → 400，其余异常 → 422，绝不 500。
 """
 from __future__ import annotations
 
 import random
+from functools import wraps
+from urllib.parse import quote
 
+from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from assistant import llm, retrieval
-from assistant.models import AIConversation, AIGeneratedQuestion, AIMessage
+from assistant import generators, llm, retrieval
+from assistant.models import AIConversation, AIGeneratedQuestion, AIMessage, AIPrompt
 from core.scoping import scope_queryset
 
 SYSTEM_TUTOR = (
@@ -25,6 +29,24 @@ SYSTEM_TUTOR = (
 )
 
 MAX_INPUT_CHARS = 12000
+
+
+def endpoint(methods=("POST",)):
+    """视图方法兜底装饰器：ValueError → 400，其余异常 → 422（结构化 {ok:false,error}）"""
+
+    def deco(fn):
+        @wraps(fn)
+        def impl(self, request, *args, **kwargs):
+            try:
+                return fn(self, request, *args, **kwargs)
+            except ValueError as exc:
+                return Response({"ok": False, "error": str(exc)}, status=400)
+            except Exception as exc:  # noqa: BLE001 —— 结构化降级，绝不 500
+                return Response({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, status=422)
+
+        return impl
+
+    return deco
 
 
 def _note_or_404(user, pk):
@@ -63,9 +85,15 @@ class AIStatusView(APIView):
 class NoteSummarizeView(APIView):
     """笔记 AI 摘要。
 
-    POST /api/assistant/notes/<pk>/summarize/   {"force": false, "length": "short|medium|detail"}
+    POST /api/assistant/notes/<pk>/summarize/
+        {"force": false, "length": "short|medium|detail", "mode": "one_line|bullets|paragraph"}
     结果会缓存到 Note.ai_summary，除非 force=true 否则不重复调用大模型。
+
+    F652 摘要三档切换：`mode` 参数化既有 summarize 接口，返回体同时给出
+    `modes`（一句话 / 要点列表 / 段落 三种口径）与按 mode 选出的 `result`。
     """
+
+    MODES = ("one_line", "bullets", "paragraph")
 
     def post(self, request, pk):
         note = _note_or_404(request.user, pk)
@@ -76,13 +104,21 @@ class NoteSummarizeView(APIView):
         if not content.strip():
             return Response({"message": "笔记内容为空，无法生成摘要"}, status=400)
 
+        mode = (request.data.get("mode") or "").strip()
+        if mode and mode not in self.MODES:
+            return Response({"message": f"mode 只能是 {' / '.join(self.MODES)}"}, status=400)
+
         force = bool(request.data.get("force"))
         if note.ai_summary and not force:
+            points = llm.bullet_points(content, 5)
+            modes = _summary_modes(note.ai_summary, points, content)
             return Response({
                 "summary": note.ai_summary, "note_id": note.id, "title": note.title,
                 "provider": "cache", "model": "", "cached": True,
-                "key_points": llm.bullet_points(content, 5),
+                "key_points": points,
                 "generated_at": note.ai_summary_at,
+                "mode": mode or "paragraph", "modes": modes,
+                "result": modes.get(mode, note.ai_summary) if mode else note.ai_summary,
             })
 
         length = request.data.get("length") or "medium"
@@ -118,22 +154,46 @@ class NoteSummarizeView(APIView):
         note.ai_summary_at = timezone.now()
         note.save(update_fields=["ai_summary", "ai_summary_at"])
 
+        modes = _summary_modes(summary, points, content)
         return Response({
             "summary": summary, "key_points": points, "note_id": note.id, "title": note.title,
             "provider": result["provider"], "model": result.get("model", ""), "cached": False,
             "fallback_reason": "" if result["ok"] else result.get("error", ""),
             "generated_at": note.ai_summary_at,
+            "mode": mode or "paragraph", "modes": modes,
+            "result": modes.get(mode, summary) if mode else summary,
         })
 
     def get(self, request, pk):
         note = _note_or_404(request.user, pk)
         if not note:
             return Response({"message": "笔记不存在"}, status=404)
+        points = llm.bullet_points(note.content, 5) if note.content else []
+        modes = _summary_modes(note.ai_summary or "", points, note.content or "")
         return Response({
             "summary": note.ai_summary, "note_id": note.id, "title": note.title,
             "cached": bool(note.ai_summary), "generated_at": note.ai_summary_at,
-            "key_points": llm.bullet_points(note.content, 5) if note.content else [],
+            "key_points": points, "modes": modes,
         })
+
+
+def _summary_modes(summary: str, points, content: str) -> dict:
+    """F652：把一份摘要切成三档口径（一句话 / 要点列表 / 段落），纯本地可算"""
+    para = (summary or "").strip()
+    sents = llm.split_sentences(para, min_len=4)
+    one = sents[0] if sents else ""
+    if not one:
+        one = llm.extractive_summary(content or "", 1)
+    bullets = [str(p).strip() for p in (points or []) if str(p).strip()]
+    if not bullets:
+        bullets = llm.bullet_points(content or "", 5)
+    if not bullets:
+        bullets = [s for s in sents if s.strip()][:5]
+    return {
+        "one_line": one[:300],
+        "bullets": bullets[:6],
+        "paragraph": para or ("".join(sents[:3])),
+    }
 
 
 def _extract_points(text: str):
@@ -257,16 +317,28 @@ def _answer_question(user, question, notes):
 # ---------------------------------------------------------------------------
 
 class ConversationListView(APIView):
-    """我的 AI 会话列表 / 新建会话"""
+    """我的 AI 会话列表 / 新建会话
 
+    F643 对话按日分组：列表返回 created_at / updated_at / date（YYYY-MM-DD），
+    前端据此把会话按日分组并在左侧日期轴上跳转。
+    """
+
+    @endpoint(("GET",))
     def get(self, request):
         qs = AIConversation.objects.filter(owner=request.user)
-        return Response({"list": [
-            {"id": c.id, "title": c.title, "model": c.model, "message_count": c.message_count,
-             "updated_at": c.updated_at}
-            for c in qs[:50]
-        ], "total": qs.count()})
+        items = []
+        for c in qs[:80]:
+            items.append({
+                "id": c.id, "title": c.title, "model": c.model, "message_count": c.message_count,
+                "scene": c.scene, "created_at": c.created_at, "updated_at": c.updated_at,
+                "date": c.updated_at.date().isoformat(),
+                "created_date": c.created_at.date().isoformat(),
+                "parent_conversation_id": c.parent_conversation_id,
+                "parent_message_id": c.parent_message_id,
+            })
+        return Response({"list": items, "total": qs.count()})
 
+    @endpoint(("POST",))
     def post(self, request):
         c = AIConversation.objects.create(
             owner=request.user,
@@ -283,12 +355,16 @@ class ConversationDetailView(APIView):
     def _get(self, request, pk):
         return AIConversation.objects.filter(pk=pk, owner=request.user).first()
 
+    @endpoint(("GET",))
     def get(self, request, pk):
         c = self._get(request, pk)
         if not c:
             return Response({"message": "会话不存在"}, status=404)
         return Response({
             "id": c.id, "title": c.title, "model": c.model, "updated_at": c.updated_at,
+            "created_at": c.created_at, "date": c.updated_at.date().isoformat(),
+            "parent_conversation_id": c.parent_conversation_id,
+            "parent_message_id": c.parent_message_id,
             "messages": [
                 {"id": m.id, "role": m.role, "content": m.content,
                  "provider": m.provider, "references": m.references, "created_at": m.created_at}
@@ -321,6 +397,7 @@ class ChatView(APIView):
 
     HISTORY_LIMIT = 12
 
+    @endpoint(("POST",))
     def post(self, request):
         message = (request.data.get("message") or "").strip()
         if not message:
@@ -694,3 +771,572 @@ class GradeView(APIView):
             )
             created += 1
         return created
+
+
+# ---------------------------------------------------------------------------
+# AI 自动标签（#59 / #66）
+# ---------------------------------------------------------------------------
+
+class AutoTagView(APIView):
+    """根据文本内容推荐标签。
+
+    POST /api/assistant/auto-tag/  {"text": "...", "title": "...", "count": 6}
+    有 Key 时由大模型给出结构化标签；无 Key 时用本地关键词提取降级。
+    前端拿到 tags 后由用户勾选确认再应用（配合 #66 标签建议浮层）。
+    """
+
+    def post(self, request):
+        text = (request.data.get("text") or "")[:8000]
+        title = (request.data.get("title") or "")[:200]
+        try:
+            count = max(2, min(int(request.data.get("count") or 6), 12))
+        except (TypeError, ValueError):
+            count = 6
+        combined = f"{title}\n{text}".strip()
+        if not combined.strip():
+            return Response({"message": "文本为空，无法打标签"}, status=400)
+
+        tags, provider, model, fallback = [], "local", "local-keywords", ""
+
+        if llm.is_configured():
+            prompt = (
+                f"为下面这段内容生成 {count} 个简短标签（每个 2~6 个字，中文优先），"
+                "用于笔记/文件分类。只输出 JSON 数组，例如 [\"标签1\",\"标签2\"]，不要解释。\n\n"
+                f"标题：{title}\n内容：\n{combined[:3000]}"
+            )
+            parsed, result = llm.chat_json(
+                [{"role": "system", "content": "你是内容标签助手。"},
+                 {"role": "user", "content": prompt}],
+                fallback=None,
+            )
+            llm.log_usage(request.user.id, "auto_tag", result, len(combined), 0)
+            if isinstance(parsed, list):
+                tags = [str(t)[:20] for t in parsed if str(t).strip()][:count]
+                provider, model = result.get("provider", "llm"), result.get("model", "")
+            else:
+                fallback = result.get("error", "")
+
+        if not tags:
+            tags = llm.keywords(combined, top=count)
+            for w in llm.keywords(title, top=max(0, count - len(tags))):
+                if w not in tags:
+                    tags.append(w)
+            provider = "local"
+
+        return Response({
+            "tags": tags, "provider": provider, "model": model,
+            "fallback_reason": fallback, "confirmed": False,
+        })
+
+
+# ---------------------------------------------------------------------------
+# 写作助手内嵌（#61）：润色 / 扩写 / 缩写 / 纠错
+# ---------------------------------------------------------------------------
+
+class PolishView(APIView):
+    """写作润色：复用 assistant chat，无 Key 时本地降级。
+
+    POST /api/assistant/polish/  {"text": "...", "mode": "polish|expand|shorten|fix"}
+    """
+
+    MODES = {
+        "polish": "润色：让表达更流畅、专业、得体，保持原意。",
+        "expand": "扩写：在原意基础上补充细节与例子，使内容更充实。",
+        "shorten": "缩写：精简冗余，保留核心意思，缩短篇幅。",
+        "fix": "纠错：修正错别字、语病与标点，不通顺处改写。",
+    }
+
+    def post(self, request):
+        text = (request.data.get("text") or "").strip()
+        if not text:
+            return Response({"message": "请输入要润色的文本"}, status=400)
+        mode = request.data.get("mode") or "polish"
+        if mode not in self.MODES:
+            mode = "polish"
+
+        prompt = (f"{self.MODES[mode]}\n\n原文：\n{text[:MAX_INPUT_CHARS]}"
+                   "\n\n直接输出处理后的文本，不要解释。")
+        result = llm.chat(
+            [{"role": "system", "content": "你是中文写作助手。"},
+             {"role": "user", "content": prompt}],
+            temperature=0.5,
+        )
+        llm.log_usage(request.user.id, "polish", result, len(text), len(result.get("content") or ""))
+
+        if result["ok"]:
+            out = result["content"]
+        else:
+            out = _local_polish(text, mode)
+
+        return Response({
+            "original": text, "result": out, "mode": mode,
+            "provider": result["provider"] if result["ok"] else "local",
+            "model": result.get("model", "") if result["ok"] else "local-heuristic",
+            "fallback_reason": "" if result["ok"] else result.get("error", ""),
+        })
+
+
+_POLISH_REPL = [
+    ("非常非常", "非常"),
+    ("十分非常", "十分"),
+    ("然后然后", "然后"),
+    ("的的", "的"),
+    ("了了", "了"),
+    ("我觉得我认为", "我认为"),
+    ("这个东西", "该对象"),
+    ("那个东西", "该对象"),
+]
+
+
+def _local_polish(text: str, mode: str) -> str:
+    """无 Key 时的本地降级：冗余清理 + 句式微调，不改变原意"""
+    out = text
+    for a, b in _POLISH_REPL:
+        out = out.replace(a, b)
+    lines = [ln.rstrip() for ln in out.replace("\r\n", "\n").split("\n")]
+    cleaned, blank = [], 0
+    for ln in lines:
+        if not ln:
+            blank += 1
+            if blank <= 1:
+                cleaned.append("")
+        else:
+            blank = 0
+            cleaned.append(ln)
+    out = "\n".join(cleaned).strip()
+    if mode == "shorten":
+        sents = llm.split_sentences(out, min_len=6)
+        out = "".join(sents[: max(1, len(sents) // 2)])
+    elif mode == "expand":
+        out = out + "\n\n（本地降级模式：未配置大模型，扩写请配置 LLM_API_KEY 后使用。）"
+    elif mode == "fix":
+        out = _auto_punct(out)
+    return out
+
+
+def _auto_punct(text: str) -> str:
+    lines = []
+    for ln in text.split("\n"):
+        s = ln.strip()
+        if s and not s.endswith(("。", "！", "？", "；", ".", "!", "?", ";", ":", "：")):
+            if any("\u4e00" <= ch <= "\u9fff" for ch in s):
+                s += "。"
+        lines.append(s)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# AI 每日摘要日报（#60）
+# ---------------------------------------------------------------------------
+
+class DailyDigestView(APIView):
+    """汇总当日新增笔记/文件，生成摘要并写入通知中心。
+
+    POST /api/assistant/daily-digest/  {"date": "2026-09-25"}  (date 缺省=今天)
+    """
+
+    def post(self, request):
+        from django.utils import timezone
+        from notes.models import Note
+        from files.models import FileMeta
+
+        day_str = request.data.get("date") or ""
+        if day_str:
+            try:
+                target = timezone.datetime.strptime(day_str, "%Y-%m-%d").date()
+            except ValueError:
+                return Response({"message": "date 需为 YYYY-MM-DD"}, status=400)
+        else:
+            target = timezone.localdate()
+
+        notes = scope_queryset(
+            Note.objects.filter(is_deleted=False, created_at__date=target), request.user
+        ).order_by("-created_at")
+        files = scope_queryset(
+            FileMeta.objects.filter(is_deleted=False, created_at__date=target), request.user
+        ).order_by("-created_at")
+
+        note_items = [n.title for n in notes[:20]]
+        file_items = [f.name for f in files[:20]]
+        note_bodies = "\n".join((n.content or "")[:500] for n in notes[:5])
+        summary = llm.extractive_summary(note_bodies, max_sentences=5) if note_bodies else ""
+
+        digest = {
+            "date": target.isoformat(),
+            "note_count": notes.count(),
+            "file_count": files.count(),
+            "notes": note_items,
+            "files": file_items,
+            "summary": summary or "今日暂无新增笔记正文可摘要。",
+        }
+
+        from core.models import notify
+        notify(
+            request.user,
+            title=f"每日摘要 · {target.isoformat()}",
+            content=f"新增笔记 {digest['note_count']} 篇，文件 {digest['file_count']} 个。"
+                    + (("\n要点：" + summary[:120]) if summary else ""),
+            category="note", level="info",
+        )
+        return Response({"digest": digest, "provider": "local", "notified": True})
+
+
+# ---------------------------------------------------------------------------
+# F644 提示词库（收藏常用提示词 CRUD + 一键插入输入框）
+# ---------------------------------------------------------------------------
+
+BUILTIN_PROMPTS = [
+    ("总结要点", "请把下面的内容总结成 5 条要点，每条不超过 30 字：\n\n", "总结"),
+    ("写作润色", "请润色下面的文字，使其更流畅、专业，保持原意，只输出润色结果：\n\n", "写作"),
+    ("翻译成英文", "请把下面的内容翻译成英文，只输出译文：\n\n", "翻译"),
+    ("解释概念", "请用通俗易懂的方式解释这个概念，并举一个生活中的例子：", "学习"),
+    ("代码评审", "请评审下面的代码，指出问题并给出 3 条改进建议：\n\n", "编程"),
+    ("会议纪要", "请把下面的会议记录整理成纪要，包含议题、结论与行动项：\n\n", "办公"),
+    ("写周报", "请根据下面的要点生成一份工作周报，包含本周进展、风险与下周计划：\n\n", "办公"),
+    ("起名建议", "请为我起 8 个候选名，说明寓意与风格：", "创作"),
+]
+
+
+def _seed_builtin_prompts(user):
+    """首次进入提示词库时补内置提示词（幂等，不覆盖用户改动）"""
+    for title, content, category in BUILTIN_PROMPTS:
+        AIPrompt.objects.get_or_create(
+            owner=user, title=title,
+            defaults={"content": content, "category": category, "is_builtin": True},
+        )
+
+
+def _prompt_json(p: AIPrompt) -> dict:
+    return {
+        "id": p.id, "title": p.title, "content": p.content, "category": p.category,
+        "is_favorite": p.is_favorite, "is_builtin": p.is_builtin,
+        "usage_count": p.usage_count, "created_at": p.created_at, "updated_at": p.updated_at,
+    }
+
+
+class PromptLibraryView(APIView):
+    """提示词库：GET 列表（收藏/分类/关键词过滤）· POST 新建"""
+
+    @endpoint(("GET",))
+    def get(self, request):
+        from django.db.models import Q
+
+        _seed_builtin_prompts(request.user)
+        base = AIPrompt.objects.filter(owner=request.user)
+        qs = base
+        if request.query_params.get("favorite") == "1":
+            qs = qs.filter(is_favorite=True)
+        category = request.query_params.get("category")
+        if category:
+            qs = qs.filter(category=category)
+        q = (request.query_params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(Q(title__icontains=q) | Q(content__icontains=q))
+        return Response({
+            "list": [_prompt_json(p) for p in qs.order_by("-is_favorite", "-updated_at")[:200]],
+            "total": qs.count(),
+            "favorite_count": base.filter(is_favorite=True).count(),
+            "categories": sorted({c for c in base.values_list("category", flat=True) if c}),
+        })
+
+    @endpoint(("POST",))
+    def post(self, request):
+        title = (request.data.get("title") or "").strip()
+        content = (request.data.get("content") or "").strip()
+        if not title:
+            raise ValueError("请填写提示词标题")
+        if not content:
+            raise ValueError("请填写提示词内容")
+        p = AIPrompt.objects.create(
+            owner=request.user, title=title[:120], content=content[:4000],
+            category=(request.data.get("category") or "自定义")[:32],
+            is_favorite=bool(request.data.get("is_favorite")),
+        )
+        return Response(_prompt_json(p), status=201)
+
+
+class PromptDetailView(APIView):
+    """单条提示词：PATCH 更新（含收藏切换）· DELETE 删除 · POST 记一次使用"""
+
+    def _get(self, request, pk):
+        return AIPrompt.objects.filter(pk=pk, owner=request.user).first()
+
+    @endpoint(("PATCH",))
+    def patch(self, request, pk):
+        p = self._get(request, pk)
+        if not p:
+            return Response({"message": "提示词不存在"}, status=404)
+        for field, cap in (("title", 120), ("content", 4000), ("category", 32)):
+            if field in request.data and request.data[field]:
+                setattr(p, field, str(request.data[field])[:cap])
+        if "is_favorite" in request.data:
+            p.is_favorite = bool(request.data["is_favorite"])
+        p.save()
+        return Response(_prompt_json(p))
+
+    @endpoint(("POST",))
+    def post(self, request, pk):
+        """一键插入输入框：记一次使用次数（前端插入后调用）"""
+        p = self._get(request, pk)
+        if not p:
+            return Response({"message": "提示词不存在"}, status=404)
+        AIPrompt.objects.filter(pk=p.pk).update(usage_count=p.usage_count + 1)
+        p.refresh_from_db()
+        return Response(_prompt_json(p))
+
+    @endpoint(("DELETE",))
+    def delete(self, request, pk):
+        p = self._get(request, pk)
+        if not p:
+            return Response({"message": "提示词不存在"}, status=404)
+        p.delete()
+        return Response({"message": "已删除"})
+
+
+# ---------------------------------------------------------------------------
+# F645 复制/重试/分支 —— 分支：以该条消息为父创建新会话
+# ---------------------------------------------------------------------------
+
+class ConversationBranchView(APIView):
+    """POST /api/assistant/conversations/<pk>/branch/  {"message_id": 12}
+
+    以指定消息为父，创建新会话，并把该消息（含）之前的上下文复制过去。
+    """
+
+    @endpoint(("POST",))
+    def post(self, request, pk):
+        parent = AIConversation.objects.filter(pk=pk, owner=request.user).first()
+        if not parent:
+            return Response({"message": "会话不存在"}, status=404)
+        mid = request.data.get("message_id")
+        msg = None
+        if mid:
+            try:
+                msg = parent.messages.filter(pk=int(mid)).first()
+            except (TypeError, ValueError):
+                msg = None
+        if msg is None:
+            msg = parent.messages.order_by("-id").first()
+        if msg is None:
+            raise ValueError("该会话还没有可分支的消息")
+
+        conv = AIConversation.objects.create(
+            owner=request.user,
+            title=f"{parent.title or '新对话'} · 分支",
+            scene=parent.scene,
+            model=parent.model,
+            parent_conversation=parent,
+            parent_message=msg,
+        )
+        copied = 0
+        for m in parent.messages.filter(id__lte=msg.id).order_by("id"):
+            AIMessage.objects.create(
+                conversation=conv, role=m.role, content=m.content,
+                provider=m.provider, references=m.references,
+            )
+            copied += 1
+        conv.message_count = copied
+        conv.save(update_fields=["message_count", "updated_at"])
+        return Response({
+            "id": conv.id, "title": conv.title, "copied_messages": copied,
+            "parent_conversation_id": parent.id, "parent_message_id": msg.id,
+        }, status=201)
+
+
+class ConversationExportView(APIView):
+    """F655 对话导出 Markdown：GET /api/assistant/conversations/<pk>/export/"""
+
+    @endpoint(("GET",))
+    def get(self, request, pk):
+        conv = AIConversation.objects.filter(pk=pk, owner=request.user).first()
+        if not conv:
+            return Response({"message": "会话不存在"}, status=404)
+        from django.utils import timezone
+
+        lines = [
+            f"# {conv.title or 'AI 对话'}", "",
+            f"> 导出时间：{timezone.localtime().strftime('%Y-%m-%d %H:%M')} ｜ "
+            f"消息数：{conv.message_count} ｜ 模型：{conv.model or '-'}", "",
+        ]
+        if conv.parent_conversation_id:
+            lines += [f"> 分支自会话 #{conv.parent_conversation_id}"
+                      + (f"（消息 #{conv.parent_message_id}）" if conv.parent_message_id else ""), ""]
+        for m in conv.messages.order_by("id"):
+            who = "我" if m.role == "user" else "助手"
+            lines.append(f"### {who} · {m.created_at.strftime('%Y-%m-%d %H:%M')}")
+            lines.append("")
+            lines.append(m.content or "")
+            lines.append("")
+            if m.references:
+                titles = "、".join(str(r.get("title", "")) for r in m.references if isinstance(r, dict))
+                if titles:
+                    lines += [f"> 引用：{titles}", ""]
+        md = "\n".join(lines)
+        resp = HttpResponse(md, content_type="text/markdown; charset=utf-8")
+        fname = f"conversation_{conv.id}.md"
+        resp["Content-Disposition"] = (
+            f"attachment; filename=\"{fname}\"; filename*=UTF-8''{quote(conv.title or '对话')}.md"
+        )
+        return resp
+
+
+# ---------------------------------------------------------------------------
+# F647–F651、F653、F656 创作工具（有 Key 走模型，无 Key 本地降级）
+# ---------------------------------------------------------------------------
+
+class TranslateView(APIView):
+    """F647 多语翻译：POST /api/assistant/translate/ {"text": "...", "target": "en|zh|ja|ko"}"""
+
+    @endpoint(("POST",))
+    def post(self, request):
+        out = generators.translate(
+            request.data.get("text") or "",
+            request.data.get("target") or "en",
+            user_id=request.user.id,
+        )
+        out["languages"] = generators.SUPPORTED_LANGS
+        return Response(out)
+
+
+class NameGeneratorView(APIView):
+    """F648 起名器：POST /api/assistant/names/ {"kind": "person|project|brand", "seed": ...}"""
+
+    @endpoint(("POST",))
+    def post(self, request):
+        seed = request.data.get("seed")
+        if seed in (None, ""):
+            seed = random.randint(1, 10 ** 9)
+        try:
+            seed = int(seed)
+        except (TypeError, ValueError):
+            seed = random.randint(1, 10 ** 9)
+        out = generators.gen_names(
+            kind=request.data.get("kind") or "project",
+            count=request.data.get("count") or 8,
+            seed=seed,
+            hint=(request.data.get("hint") or "").strip()[:60],
+            user_id=request.user.id,
+        )
+        out["kinds"] = generators.KIND_LABEL
+        return Response(out)
+
+
+class WeeklyReportView(APIView):
+    """F649 周报生成器：POST /api/assistant/weekly-report/ {"points": ["...", ...]}"""
+
+    @endpoint(("POST",))
+    def post(self, request):
+        points = request.data.get("points")
+        if isinstance(points, str):
+            points = [p for p in points.replace("\r", "\n").split("\n")]
+        if not isinstance(points, list):
+            raise ValueError("points 需为字符串数组")
+        return Response(generators.weekly_report(
+            points,
+            author=(request.data.get("author") or "").strip()[:40],
+            week_label=(request.data.get("week_label") or "").strip()[:40],
+            user_id=request.user.id,
+        ))
+
+
+class AgendaView(APIView):
+    """F656 会议议程生成：POST /api/assistant/agenda/ {"topic": "...", "minutes": 60}"""
+
+    @endpoint(("POST",))
+    def post(self, request):
+        return Response(generators.agenda(
+            request.data.get("topic") or "",
+            request.data.get("minutes") or 60,
+            user_id=request.user.id,
+        ))
+
+
+class EmailDraftView(APIView):
+    """F650 邮件草稿生成：POST /api/assistant/email-draft/ {"scene": "...", "tone": "formal"}"""
+
+    @endpoint(("POST",))
+    def post(self, request):
+        points = request.data.get("key_points") or []
+        if isinstance(points, str):
+            points = [points]
+        return Response(generators.email_draft(
+            scene=request.data.get("scene") or "",
+            tone=request.data.get("tone") or "neutral",
+            to=(request.data.get("to") or "").strip()[:80],
+            key_points=points if isinstance(points, list) else [],
+            extra=(request.data.get("extra") or "").strip()[:500],
+            user_id=request.user.id,
+        ))
+
+
+class SocialCopyView(APIView):
+    """F651 社交文案生成：POST /api/assistant/social-copy/ {"topic": "...", "style": "fresh"}"""
+
+    @endpoint(("POST",))
+    def post(self, request):
+        return Response(generators.social_copy(
+            topic=request.data.get("topic") or "",
+            style=request.data.get("style") or "fresh",
+            platform=(request.data.get("platform") or "朋友圈")[:20],
+            count=request.data.get("count") or 3,
+            user_id=request.user.id,
+        ))
+
+
+class MathExplainView(APIView):
+    """F653 算式分步讲解：POST /api/assistant/math-explain/ {"expression": "(1+2)*3"}
+
+    使用 ast 白名单求值，不使用 eval；非法表达式 → 400。
+    """
+
+    @endpoint(("POST", "GET"))
+    def post(self, request):
+        return Response(generators.explain_math(
+            request.data.get("expression") or request.query_params.get("expression") or ""
+        ))
+
+    def get(self, request):
+        return self.post(request)
+
+
+# ---------------------------------------------------------------------------
+# F654 快捷指令 `/` 菜单（后端给出工具与路由建议，前端合并渲染）
+# ---------------------------------------------------------------------------
+
+COMMAND_ITEMS = [
+    {"id": "translate", "kind": "tool", "label": "翻译", "usage": "/translate 你好",
+     "desc": "中英日韩互译（本地词典降级）", "icon": "🌐"},
+    {"id": "names", "kind": "tool", "label": "起名器", "usage": "/names 项目",
+     "desc": "人名 / 项目名 / 品牌名", "icon": "✨"},
+    {"id": "weekly", "kind": "tool", "label": "周报", "usage": "/weekly",
+     "desc": "三条要点生成工作周报", "icon": "📊"},
+    {"id": "agenda", "kind": "tool", "label": "会议议程", "usage": "/agenda",
+     "desc": "主题 + 时长 → 分钟级议程", "icon": "🗓️"},
+    {"id": "email", "kind": "tool", "label": "邮件草稿", "usage": "/email",
+     "desc": "场景 + 语气生成邮件", "icon": "✉️"},
+    {"id": "social", "kind": "tool", "label": "社交文案", "usage": "/social",
+     "desc": "朋友圈 / 短文案多风格", "icon": "💬"},
+    {"id": "summary", "kind": "tool", "label": "摘要三档", "usage": "/summary",
+     "desc": "一句话 / 要点 / 段落切换", "icon": "📝"},
+    {"id": "math", "kind": "tool", "label": "算式讲解", "usage": "/math (1+2)*3",
+     "desc": "四则运算分步解释", "icon": "🧮"},
+    {"id": "clear", "kind": "action", "label": "清空当前对话", "usage": "/clear",
+     "desc": "开始一个新对话", "icon": "🧹"},
+    {"id": "route-notes", "kind": "route", "label": "打开笔记", "usage": "/notes",
+     "path": "/notes", "desc": "跳转到笔记知识库", "icon": "📝"},
+    {"id": "route-files", "kind": "route", "label": "打开文件", "usage": "/files",
+     "path": "/files", "desc": "跳转到文件管理", "icon": "📁"},
+    {"id": "route-search", "kind": "route", "label": "全文搜索", "usage": "/search",
+     "path": "/search", "desc": "跳转到搜索页", "icon": "🔍"},
+    {"id": "route-learning", "kind": "route", "label": "学习中心", "usage": "/learning",
+     "path": "/learning", "desc": "跳转到学习中心", "icon": "📚"},
+    {"id": "route-dashboard", "kind": "route", "label": "回到工作台", "usage": "/dashboard",
+     "path": "/dashboard", "desc": "跳转到工作台", "icon": "🏠"},
+]
+
+
+class CommandMenuView(APIView):
+    """F654：GET /api/assistant/commands/ —— 输入 `/` 时的工具与路由建议"""
+
+    def get(self, request):
+        return Response({"list": COMMAND_ITEMS, "total": len(COMMAND_ITEMS)})

@@ -16,6 +16,21 @@
       </div>
     </div>
 
+    <!-- #71 在线用户面板 -->
+    <div class="card p-4">
+      <div class="mb-2 flex items-center justify-between">
+        <h3 class="text-[14px] font-semibold">在线用户（5分钟内活跃）</h3>
+        <span class="tag bg-emerald-50 text-emerald-600">{{ onlineUsers.length }} 人在线</span>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <div v-for="u in onlineUsers" :key="u.id" class="flex items-center gap-1.5 rounded-control bg-emerald-50 px-2 py-1 text-[12px]">
+          <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+          {{ u.nickname || u.username }}
+        </div>
+        <div v-if="!onlineUsers.length" class="py-3 text-center text-[12px] text-ink-400">暂无在线用户</div>
+      </div>
+    </div>
+
     <div class="grid gap-4 lg:grid-cols-2">
       <div class="card p-4">
         <h3 class="mb-3 text-[13px] font-semibold">近 14 天操作量</h3>
@@ -48,12 +63,16 @@
           <div class="h-2 rounded-full bg-ink-100"><div class="h-full rounded-full bg-brand-500" :style="{ width: modulePct(m.c) + '%' }"></div></div>
         </div>
       </div>
+
+      <!-- #72 存储使用 TOP 用户 -->
       <div class="card p-4">
-        <h3 class="mb-3 text-[13px] font-semibold">活跃用户 Top 10</h3>
+        <h3 class="mb-3 text-[13px] font-semibold">存储使用 Top 10</h3>
         <div class="space-y-1.5">
-          <div v-for="(u, i) in moduleUsage.top_users || []" :key="i" class="flex justify-between text-[13px]">
-            <span>{{ u.user__username || '系统' }}</span><span class="text-ink-400">{{ u.c }} 次操作</span>
+          <div v-for="(u, i) in storageTop" :key="i" class="flex justify-between text-[13px]">
+            <span>{{ i + 1 }}. {{ u.nickname || u.username }}</span>
+            <span class="text-ink-400">{{ u.total_text }} ({{ u.file_count }} 文件)</span>
           </div>
+          <div v-if="!storageTop.length" class="py-3 text-center text-[12px] text-ink-400">暂无数据</div>
         </div>
       </div>
     </div>
@@ -62,13 +81,15 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { dashApi } from '../../api'
+import { dashApi, coreApi, authApi } from '../../api'
 import { formatSize } from '../../utils/format'
 
 const stats = ref({})
 const trend = ref({})
 const growth = ref({})
 const moduleUsage = ref({})
+const onlineUsers = ref([])
+const storageTop = ref([])
 const maxTrend = computed(() => Math.max(1, ...(trend.value.values || [])))
 const maxGrowth = computed(() => Math.max(1, ...(growth.value.new || [])))
 const maxModule = computed(() => Math.max(1, ...(moduleUsage.value.by_module || []).map((m) => m.c)))
@@ -82,12 +103,16 @@ const cards = computed(() => [
 ])
 
 onMounted(async () => {
-  const [g, t, ug, mu] = await Promise.all([
+  const [g, t, ug, mu, online, topUsers] = await Promise.all([
     dashApi.global().catch(() => ({})),
     dashApi.trend().catch(() => ({})),
     dashApi.userGrowth().catch(() => ({})),
     dashApi.moduleUsage().catch(() => ({})),
+    authApi.online({ minutes: 5 }).catch(() => ({ list: [] })),
+    coreApi.storageTopUsers().catch(() => ({ list: [] })),
   ])
   stats.value = g; trend.value = t; growth.value = ug; moduleUsage.value = mu
+  onlineUsers.value = online.list || []
+  storageTop.value = topUsers.list || []
 })
 </script>

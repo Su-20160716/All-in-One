@@ -1,0 +1,1 @@
+exec(open("_v6_entry.py", encoding="utf-8").read())

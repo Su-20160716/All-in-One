@@ -4,7 +4,7 @@
       <div class="grid h-8 w-8 place-items-center rounded-control bg-brand-600 text-[15px] font-bold text-white">A</div>
       <div>
         <div class="text-[14px] font-semibold text-white">全能协作平台</div>
-        <div class="text-[11px] text-ink-500">All-in-One v3.0</div>
+        <div class="text-[11px] text-ink-500">All-in-One v5.0</div>
       </div>
     </div>
     <nav class="flex-1 space-y-0.5 overflow-y-auto px-2 py-2">
@@ -46,6 +46,12 @@ const menus = computed(() => [
   { to: '/im', label: '站内消息', icon: '💬', badge: imUnread.value || '' },
   { to: '/announcements', label: '系统公告', icon: '📣' },
   { to: '/tools', label: '小工具', icon: '🧰' },
+  { to: '/toolbox/devtools', label: '开发工具箱', icon: '🛠' },
+  { to: '/toolbox/minitools', label: '迷你工具箱', icon: '🎁' },
+  { to: '/toolbox/dataintel', label: '数据智能中心', icon: '📈' },
+  { to: '/toolbox/office', label: '办公套件', icon: '🏢' },
+  { to: '/office/helpdesk', label: '工单台', icon: '🎫' },
+  { to: '/office/duty', label: '值班排班', icon: '🗓' },
   { to: '/learning', label: '学习中心', icon: '🎓' },
   { to: '/learning/programming', label: '编程语言广场', icon: '💻' },
   { to: '/learning/drill', label: '编程刷题训练', icon: '🧩' },
@@ -55,6 +61,8 @@ const menus = computed(() => [
   { to: '/learning/questions', label: '题库与组卷', icon: '📝' },
   { to: '/learning/tools', label: '学习工具箱', icon: '🧮' },
   { to: '/learning/study', label: '我的学习', icon: '⏱' },
+  { to: '/code', label: '代码工坊', icon: '🧑‍💻' },
+  { to: '/code/learn', label: '代码学习中心', icon: '🏅' },
   { to: '/admin/stats', label: '统计面板', icon: '📊' },
   { to: '/admin/users', label: '用户管理', icon: '👥' },
   { to: '/admin/roles', label: '角色权限', icon: '🔐' },

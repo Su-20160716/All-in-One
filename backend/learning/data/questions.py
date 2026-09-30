@@ -366,3 +366,8 @@ def public_question(q, with_answer=False):
         item["answer"] = q["answer"]
         item["analysis"] = q["analysis"]
     return item
+
+
+# ---- v8 题库扩充（与 dsh 协作第一批，2026-09-30）：合并扩展题，原题保持不动 ----
+from .questions_ext import QUESTIONS_EXT
+QUESTIONS = list(QUESTIONS) + list(QUESTIONS_EXT)

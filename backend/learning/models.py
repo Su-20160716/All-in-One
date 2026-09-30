@@ -56,6 +56,9 @@ class WordbookItem(models.Model):
     phonetic = models.CharField(max_length=48, blank=True, verbose_name="音标")
     meaning = models.CharField(max_length=255, blank=True, verbose_name="释义")
     mastered = models.BooleanField(default=False, verbose_name="已掌握")
+    source = models.CharField(max_length=20, default="manual", verbose_name="来源")  # manual/dictation（F531）
+    last_reviewed = models.DateField(null=True, blank=True, verbose_name="最近复习日")  # F521 艾宾浩斯
+    review_count = models.PositiveIntegerField(default=0, verbose_name="复习次数")  # F521
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="加入时间")
 
     class Meta:
@@ -82,6 +85,9 @@ class MistakeRecord(models.Model):
     user_answer = models.CharField(max_length=255, blank=True, verbose_name="我的答案")
     analysis = models.TextField(blank=True, verbose_name="解析")
     mastered = models.BooleanField(default=False, verbose_name="已订正掌握")
+    last_reviewed = models.DateField(null=True, blank=True, verbose_name="最近复习日")  # F520/F521
+    redrill_attempts = models.PositiveIntegerField(default=0, verbose_name="二刷次数")  # F520
+    redrill_correct = models.PositiveIntegerField(default=0, verbose_name="二刷答对次数")  # F520
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="加入时间")
 
     class Meta:

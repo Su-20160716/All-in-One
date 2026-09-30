@@ -143,3 +143,242 @@
 
 - 认证：Cookie 或 URL 携带 token（AuthMiddlewareStack）
 - 协议见 docs/02 第 3.3 节
+
+# v5 三大能力域 `/api/devtools` `/api/dataintel` `/api/officesuite`（76 子系统 · 501 接口）
+
+> v5 全部接口走统一约定：JWT 鉴权（`IsAuthenticated`）；响应 `{"ok":true,"data":...}` / `{"ok":false,"error":"..."}`；`endpoint` 装饰器兜底 ValueError→400、其余→422，**绝不 500**；除目录外默认 POST（`@endpoint()`），GET-only 接口在目录明细中标为 GET。完整子系统 × 接口清单见根 `FEATURES.md` 第 9 章。
+
+## 目录接口（GET，三域同构）
+
+| 接口 | 返回 data |
+|---|---|
+| /api/devtools/catalog/ | `{domain, domain_name, subsystems:[{key,name,endpoints,url_prefix}], subsystem_count:27, endpoint_count:154, endpoints:[{path,methods}]}` |
+| /api/dataintel/catalog/ | 同构，subsystem_count:20，endpoint_count:114 |
+| /api/officesuite/catalog/ | 同构，subsystem_count:29，endpoint_count:233 |
+
+`endpoints` 为接口明细（路径 pattern + 真实方法，从 urlpatterns 反射导出，不含目录自身），前端 `DomainExplorer.vue` 据此目录驱动渲染与调试。
+
+## devtools（27 子系统 · 154 接口）
+
+URL 形如 `/api/devtools/{子系统}/{动作}/`：text/str/md/json/log/encode/regex（文本族 34）、hash/token/code/diff/id/file/qr/web/db（代码与安全族 48）、num/color/date/cron/math/unit（数学族 32）、net/fake/fun/cheatsheet/asciiart（趣味族 39）。典型入参：`text`（文本类）、`pattern+text`（正则）、`a/b`（diff）、`value/from_base`（进制）、`expr`（CRON/表达式）。
+
+## dataintel（20 子系统 · 114 接口）
+
+URL 形如 `/api/dataintel/{子系统}/{动作}/`：dataset（create/list/detail/delete/rows-import/rows-query，数据落库 SQLite）；profile/transform/calc 吃 `rows`（对象数组）+ 参数；stats/forecast/regress/cluster/outlier 吃数值数组（`a`/`b`/`y`）；nlp/textmine/vector 吃 `text` 或数值向量；ai 8 个接口未配 `LLM_API_KEY` 时本地降级；chart 输出直喂 ECharts 的 series 结构；abtest/cohort/sampling/geo/insight 各成体系。
+
+## officesuite（29 子系统 · 233 接口，5 家族）
+
+URL 形如 `/api/officesuite/{子系统}/{动作}/`：flow 41（approval/seal/expense/travel/contract）、res 45（meeting/asset/vehicle/supplies/visitor/mailroom）、people 66（duty/timesheet/training/recognition/standup/okr/decision/todobox）、know 71（faq/policy/template/wiki/minutes/formcollect/announcement/poll/helpdesk）、calendar 9 + 目录 1。行级权限：owner 类查询走 `core/scoping.py` 数据范围；无 owner 字段的模型（报名记录/KR）用显式规则收口；已批准审批单全员可见（审批透明）。
+
+# 代码工坊 `/api/code`（19 子系统 · 104 接口 + 2 公开接口）
+
+> v6 新增独立 app `code`。全部登录接口走 `IsAuthenticated`，响应约定与 v5 三域一致：`{"ok":true,"data":...}` / `{"ok":false,"error":"..."}`，`endpoint` 装饰器兜底 ValueError→400、其余→422，**绝不 500**。
+> 路由定义在 `code/urls.py`，`SUBSYSTEMS`（前端目录渲染）+ `VIEWS`（路由串 → 视图函数显式映射）双表结构，结尾 `_EXPECTED = 104` 契约断言。
+> 目录接口 `GET /api/code/catalog/` 返回 `{domain, subsystems:[{key,name,endpoints,url_prefix}], subsystem_count, endpoint_count, endpoints:[{path,methods}]}`。
+
+## meta 元信息（4）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/catalog/ | 目录：子系统 × 接口明细（路径 + 真实方法） |
+| GET | /code/runtimes/ | 运行时探测（各语言可用性，未装返回 `RUNTIME_NOT_FOUND` 结构） |
+| GET | /code/languages/ | 支持的语言清单（含高亮/执行能力标记） |
+| GET | /code/templates/ | 新建文件的语言模板 |
+
+## workspace 工作区（7）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/workspaces/ | 工作区列表 |
+| POST | /code/workspaces/create/ | 创建工作区 |
+| GET | /code/workspaces/{id}/ | 详情 |
+| PATCH | /code/workspaces/{id}/update/ | 编辑 |
+| DELETE | /code/workspaces/{id}/delete/ | 删除 |
+| POST | /code/workspaces/{id}/star/ | 星标/取消 |
+| POST | /code/workspaces/{id}/clone/ | 克隆（含全部文件） |
+
+## file 代码文件（10）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/files/ | 文件列表（?workspace=&keyword=） |
+| POST | /code/files/create/ | 新建文件 |
+| GET | /code/files/tree/ | 工作区文件树 |
+| GET | /code/files/{id}/ | 详情（含内容） |
+| PATCH | /code/files/{id}/update/ | 保存内容（自动存版本快照） |
+| DELETE | /code/files/{id}/delete/ | 删除 |
+| POST | /code/files/{id}/favorite/ | 收藏/取消 |
+| GET | /code/files/{id}/entry/ | 读取执行入口信息 |
+| POST | /code/files/{id}/move/ | 移动/重命名 |
+| POST | /code/files/batch/ | 批量操作（删除/移动/收藏） |
+
+## version 版本历史（5）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/files/{id}/versions/ | 版本列表 |
+| POST | /code/files/{id}/versions/create/ | 手动创建快照 |
+| POST | /code/files/{id}/versions/diff/ | 版本差异对比 |
+| POST | /code/files/{id}/versions/{vid}/rollback/ | 回滚到指定版本 |
+| DELETE | /code/files/{id}/versions/{vid}/delete/ | 删除版本 |
+
+## run 安全执行（7）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | /code/run/ | 执行代码（语言/代码/stdin/args/env/timeout/allow_dangerous） |
+| POST | /code/run/repl/ | REPL 逐次执行（保持会话上下文语义） |
+| GET | /code/run/history/ | 执行历史 |
+| GET | /code/run/{id}/ | 单次执行详情（stdout/stderr/exit_code/duration） |
+| DELETE | /code/run/{id}/delete/ | 删除记录 |
+| POST | /code/run/clear/ | 清空我的执行历史 |
+| GET | /code/run/stats/ | 执行统计（次数/成功率/平均耗时） |
+
+## judge 判题（4）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | /code/judge/ | 多测试用例判定（核心 `run_judge()` 纯函数） |
+| GET | /code/judge/history/ | 判题历史 |
+| GET | /code/judge/{id}/ | 判题详情（逐用例结果） |
+| GET | /code/leaderboard/ | 排行榜 |
+
+## snippet 代码片段库（8）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/snippets/ | 片段列表（?tag=&keyword=） |
+| POST | /code/snippets/create/ | 创建片段 |
+| GET | /code/snippets/tags/ | 标签聚合 |
+| POST | /code/snippets/from-file/ | 从代码文件一键提取为片段 |
+| GET | /code/snippets/{id}/ | 详情 |
+| PATCH | /code/snippets/{id}/update/ | 编辑 |
+| DELETE | /code/snippets/{id}/delete/ | 删除 |
+| POST | /code/snippets/{id}/copy/ | 复制一份 |
+
+## analyze 静态分析（8，纯 Python 实现）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | /code/analyze/ | 综合指标（函数/类/行数/注释率）；键为 `functions` / `classes` |
+| POST | /code/outline/ | 结构大纲（函数/类/方法定义） |
+| POST | /code/complexity/ | 圈复杂度估算 |
+| POST | /code/quality/ | 代码质量评分 |
+| POST | /code/flow/ | 控制流图，返回 `{nodes, edges}`（节点用 `type` 字段） |
+| POST | /code/similarity/ | 两段代码相似度 |
+| POST | /code/secret-scan/ | 密钥/凭据模式扫描 |
+| POST | /code/refactor-hints/ | 重构与可读性建议 |
+
+## ai 智能辅助（15，无 `LLM_API_KEY` 时全部本地降级）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/ai/status/ | AI 状态（local / llm） |
+| POST | /code/ai/generate/ | 生成代码 |
+| POST | /code/ai/transform/ | 代码转换（语言/风格/范式） |
+| POST | /code/ai/error-explain/ | 报错解释与修复建议 |
+| POST | /code/ai/regex/ | 自然语言生成正则 |
+| POST | /code/ai/nl2sql/ | 自然语言转 SQL |
+| POST | /code/ai/learning-path/ | 生成学习路径建议 |
+| POST | /code/ai/chat-edit/ | 对话式改代码 |
+| POST | /code/ai/inline/ | 行内补全 |
+| POST | /code/ai/apply/{id}/ | 应用 AI 产出的补丁 |
+| POST | /code/ai/translate/ | 代码跨语言翻译 |
+| POST | /code/ai/comment/ | 自动补注释（15 种语言风格提示） |
+| POST | /code/ai/optimize/ | 性能/结构优化建议 |
+| POST | /code/ai/testgen/ | 生成单元测试骨架（含框架选择） |
+| POST | /code/ai/summary/ | 代码摘要 |
+
+## collab 协作（6）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/files/{id}/comments/ | 行级评论列表 |
+| POST | /code/files/{id}/comments/create/ | 发评论（含行号） |
+| POST | /code/files/{id}/comments/{cid}/resolve/ | 标记已解决 |
+| DELETE | /code/files/{id}/comments/{cid}/delete/ | 删除评论 |
+| GET | /code/files/{id}/collab/ | 协同状态（Yjs 快照 + 版本号） |
+| GET | /code/files/{id}/collab/ws/ | 协作 WebSocket 接入信息 |
+
+## share 分享（4）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/shares/ | 我的分享链接 |
+| POST | /code/shares/create/ | 创建（权限 / 是否可运行 / 过期） |
+| PATCH | /code/shares/{token}/ | 更新分享设置 |
+| POST | /code/shares/{token}/revoke/ | 吊销 |
+
+## export 导出（2）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | /code/export/zip/ | 工作区打包为 zip |
+| GET | /code/export/file/{id}/ | 单文件下载 |
+
+## daily 每日一题（3）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/daily/today/ | 今日题目（`date.toordinal() % N` 确定性轮换，全员同日同题） |
+| POST | /code/daily/submit/ | 提交作答 → 复用 `run_judge()`，未通过自动进错题本 |
+| GET | /code/daily/history/ | 打卡历史与连续天数 |
+
+## achievement 成就徽章（2）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/achievements/ | 全部 14 个徽章定义 |
+| GET | /code/achievements/mine/ | 我的解锁进度（访问时**惰性结算** `check_achievements()`） |
+
+## wrongbook 错题本（4）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/wrongbook/ | 错题列表 |
+| POST | /code/wrongbook/add/ | 手动收录 |
+| POST | /code/wrongbook/{id}/review/ | 标记复习（计数 + 时间） |
+| DELETE | /code/wrongbook/{id}/delete/ | 移除 |
+
+## learnpath 学习路径（5）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/paths/ | 我的学习路径列表 |
+| POST | /code/paths/generate/ | 生成路径（LLM 优先，解析失败回落内置模板） |
+| GET | /code/paths/{id}/ | 详情（阶段 + 进度 + percent） |
+| POST | /code/paths/{id}/tick/ | 勾选/取消某条目完成 |
+| DELETE | /code/paths/{id}/delete/ | 删除路径 |
+
+## arena 竞技场（3）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/arena/board/ | 战力榜 |
+| POST | /code/arena/challenge/ | 随机抽题 |
+| POST | /code/arena/submit/ | 提交（复用 `run_judge()`） |
+
+## learn 学习总览（1）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/learn/overview/ | 个人学习看板聚合（打卡/成就/错题/路径/战力） |
+
+## engineering 工程化（6，零新模型）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /code/blame/{id}/ | 代码归属（沿版本链正序 SequenceMatcher diff 累积每行 author） |
+| GET | /code/todos/ | TODO 聚合（8 类标记 × 4 级严重度，支持 by_tag / by_file） |
+| POST | /code/diff/ | diff（三模式：`{file,v1,v2}` / `{file,version}` / `{file_a,file_b}`） |
+| GET | /code/insights/ | 工程洞察（语言占比/目录分布/30 天活跃/成功率/健康度评分） |
+| GET | /code/contributors/ | 贡献者聚合 |
+| GET | /code/files/{id}/versions/{vid}/side-by-side/ | 行号对齐并排 diff |
+
+## 公开接口 `/api/share/code/<token>/`（2，无需登录）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | /share/code/{token}/ | 只读查看分享的代码 |
+| POST | /share/code/{token}/run/ | 试跑分享代码。**只跑服务端按 token 取的代码**，不接受请求体覆盖（防绕过高危扫描）；超时硬限 10s；不落 `CodeRun` 表 |
+
