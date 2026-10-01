@@ -1,3 +1,0 @@
-﻿System check identified no issues (0 silenced).
-AST OK
-

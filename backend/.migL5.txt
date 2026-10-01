@@ -1,9 +1,0 @@
-﻿Migrations for 'code':
-  code\migrations\0002_codeachievement_codedailychallenge_codedailyrecord_and_more.py
-    + Create model CodeAchievement
-    + Create model CodeDailyChallenge
-    + Create model CodeDailyRecord
-    + Create model CodeLearningPath
-    + Create model CodeUserAchievement
-    + Create model CodeWrongBook
-
