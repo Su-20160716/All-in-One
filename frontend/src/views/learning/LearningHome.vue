@@ -15,6 +15,33 @@
       </div>
     </div>
 
+    <!-- F542 全局搜索 -->
+    <div class="card p-4">
+      <div class="flex gap-2">
+        <input v-model="gq" class="input" placeholder="搜索古诗 / 单词 / 成语 / 汉字 / 公式 / 题目 / 知识点，如：李白、apple、守株待兔、勾股"
+               @keyup.enter="doGlobalSearch" />
+        <button class="btn-primary px-5" @click="doGlobalSearch">搜索</button>
+      </div>
+      <div v-if="gresult" class="mt-3 space-y-3">
+        <template v-for="g in searchGroups" :key="g.key">
+          <div v-if="g.items.length">
+            <div class="mb-1 flex items-center gap-2 text-[12px] font-medium text-ink-600">
+              <span>{{ g.label }}</span><span class="text-ink-400">{{ g.items.length }}</span>
+            </div>
+            <div class="flex flex-wrap gap-1.5">
+              <div v-for="(it,i) in g.items" :key="i" class="max-w-full rounded-control bg-ink-50 px-2.5 py-1 text-[12px] text-ink-700">
+                <span class="font-medium">{{ itemMain(it) }}</span>
+                <span v-if="itemSub(it)" class="ml-1 text-ink-400">{{ itemSub(it) }}</span>
+              </div>
+            </div>
+          </div>
+        </template>
+        <div v-if="!gresult.total" class="rounded-control bg-ink-50 p-3 text-center text-[12px] text-ink-400">
+          没有匹配「{{ gresult.q }}」的内容，换个更短或更常见的关键词试试。
+        </div>
+      </div>
+    </div>
+
     <!-- 快捷入口 -->
     <div class="grid grid-cols-2 gap-3 md:grid-cols-4">
       <RouterLink v-for="e in entries" :key="e.to" :to="e.to"
@@ -189,6 +216,22 @@ async function loadStats() {
   stats.value.tools = t.total
   stats.value.formulas = f.total
   langs.value = l.list
+}
+
+// F542 全局搜索
+const gq = ref('')
+const gresult = ref(null)
+const GROUP_LABEL = { poems: '古诗', words: '单词', idioms: '成语', hanzi: '汉字', formulas: '公式', questions: '题库题目', points: '知识点' }
+const searchGroups = computed(() => {
+  const groups = gresult.value?.groups || {}
+  return Object.keys(GROUP_LABEL).map((key) => ({ key, label: GROUP_LABEL[key], items: groups[key] || [] }))
+})
+function itemMain(it) { return it.sub || it.title || it.name || it.word || it.text || '' }
+function itemSub(it) { return it.meta || it.phonetic || it.meaning || it.author || '' }
+async function doGlobalSearch() {
+  const q = gq.value.trim()
+  if (!q) return app.toastMsg('请输入关键词', 'warn')
+  gresult.value = await learnApi.globalSearch(q)
 }
 
 onMounted(async () => {

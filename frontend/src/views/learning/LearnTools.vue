@@ -8,6 +8,11 @@
       <input v-model="kw" class="input w-56" placeholder="搜索工具…" />
     </div>
 
+    <div v-if="recentTools.length" class="mb-3 flex flex-wrap items-center gap-2 rounded-control border border-ink-100 bg-white px-3 py-2">
+      <span class="text-[12px] font-medium text-ink-600">最近用过：</span>
+      <button v-for="r in recentTools" :key="r.key" class="tag-brand cursor-pointer" @click="reopenTool(r.key)" :title="r.used_at">{{ r.name }}</button>
+    </div>
+
     <p class="mb-4 rounded-control border border-ink-100 bg-white px-4 py-3 text-[12.5px] leading-relaxed text-ink-500">
       使用流程：左侧选工具 → 右侧填 JSON 参数（每个工具预置示例入参，可点「重置示例」还原）→ 执行 → 下方查看结构化结果并复制。工具分为数理计算、化学、英语语文、成绩与学习管理、思维与基础训练五组。
     </p>
@@ -247,6 +252,7 @@ async function run() {
   running.value = true; err.value = ''
   try {
     result.value = (await learnApi.toolRun(activeKey.value, params)).result
+    try { await learnApi.saveToolUsage(activeKey.value); await loadRecent() } catch { /* 历史记录失败不影响本次结果 */ }
   } catch (e) {
     err.value = e.response?.data?.message || '执行失败'
   } finally { running.value = false }
@@ -257,9 +263,25 @@ async function copyResult() {
   app.toastMsg('结果已复制', 'success')
 }
 
+// F538 工具使用历史：最近用过的工具可一键重开
+const recentTools = ref([])
+async function loadRecent() { recentTools.value = (await learnApi.toolUsage()).list }
+function findTool(key) {
+  for (const [cat, items] of Object.entries(catalog.value)) {
+    const t = items.find((x) => x.key === key)
+    if (t) return { ...t, cat }
+  }
+  return null
+}
+function reopenTool(key) {
+  const t = findTool(key) || { key, name: recentTools.value.find((r) => r.key === key)?.name || key, cat: '', desc: '' }
+  pick(t)
+}
+
 onMounted(async () => {
   const data = await learnApi.toolCatalog()
   catalog.value = data.categories
   total.value = data.total
+  await loadRecent()
 })
 </script>

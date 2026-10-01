@@ -29,6 +29,8 @@ urlpatterns = [
     path("social-copy/", v.SocialCopyView.as_view(), name="ai-social-copy"),
     path("math-explain/", v.MathExplainView.as_view(), name="ai-math-explain"),
     path("commands/", v.CommandMenuView.as_view(), name="ai-commands"),
+    # F646 输入即时反馈
+    path("input-feedback/", v.InputFeedbackView.as_view(), name="ai-input-feedback"),
     # 出题 / 批改
     path("questions/generate/", v.QuestionGenerateView.as_view(), name="ai-generate-questions"),
     path("questions/", v.GeneratedQuestionListView.as_view(), name="ai-question-list"),

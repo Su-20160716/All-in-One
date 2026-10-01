@@ -72,6 +72,23 @@
             <div v-if="d.show" class="mt-1 text-[13px] font-medium text-brand-700">参考答案：{{ d.answer }}</div>
           </div>
         </div>
+        <div class="card p-5">
+          <h3 class="text-[15px] font-semibold text-ink-800">古诗填空 · 自动判分</h3>
+          <div v-if="fb.key" class="mt-2">
+            <div class="text-[12px] text-ink-400">《{{ fb.title }}》{{ fb.dynasty }} · {{ fb.author }}</div>
+            <div class="mt-2 text-[15px] text-ink-800">上句：{{ fb.shang }}，<span class="text-brand-600">下句是？</span></div>
+            <div class="mt-2 flex gap-2">
+              <input v-model="fbAns" class="input" placeholder="默写整句下句" @keyup.enter="submitFb" />
+              <button class="btn-primary" @click="submitFb">提交判分</button>
+              <button class="btn-outline" @click="newFb">换一题</button>
+            </div>
+            <div v-if="fbRes" class="mt-2 text-[13px]" :class="fbRes.correct ? 'font-medium text-emerald-600' : 'text-rose-500'">
+              {{ fbRes.correct ? '✓ 默写正确' : '✗ 还不对' }}
+              <span class="ml-1 text-ink-500">参考答案：{{ fbRes.right_answer }}</span>
+            </div>
+          </div>
+          <button v-else class="btn-outline mt-2" @click="newFb">开始填空练习</button>
+        </div>
         <div v-if="!poem && !drill.length" class="card grid h-40 place-items-center px-6 text-center text-[13px] leading-6 text-ink-400">
           左边点一首诗看原文赏析，或点上方「接句练习」出 6 道默写题——两边会同时打开、并排对照。
         </div>
@@ -119,20 +136,35 @@
         </div>
       </div>
       <div class="card col-span-5 p-4">
-        <h3 class="mb-3 text-[15px] font-semibold text-ink-800">成语接龙</h3>
-        <div class="flex gap-2">
-          <input v-model="chainWord" class="input" placeholder="输入一个成语，如 画蛇添足" @keyup.enter="runChain" />
-          <button class="btn-primary" @click="runChain">接龙</button>
+        <h3 class="mb-3 flex flex-wrap items-center gap-2 text-[15px] font-semibold text-ink-800">
+          成语接龙<span class="tag-brand">本局 {{ myChain.length }} 个 · 历史最佳 {{ chainStat.best || 0 }}</span>
+        </h3>
+        <div class="flex flex-wrap gap-2">
+          <input v-model="chainWord" class="input min-w-[160px] flex-1" placeholder="输入一个成语，如 画蛇添足" @keyup.enter="startChain" />
+          <select v-model="chainDiff" class="input w-24"><option value="easy">简单</option><option value="normal">普通</option><option value="hard">困难</option></select>
+          <button class="btn-primary" @click="startChain">开局</button>
+        </div>
+        <div v-if="myChain.length" class="mt-2">
+          <div class="text-[12px] text-ink-400">本局链：</div>
+          <div class="mt-1 flex flex-wrap gap-1">
+            <span v-for="(w, wi) in myChain" :key="wi" class="tag-brand">{{ w }}</span>
+          </div>
         </div>
         <div v-if="chain" class="mt-3">
           <div class="text-[13px] text-ink-600">「{{ chain.word }}」末字为 <b class="text-brand-700">{{ chain.tail }}</b>，可接：</div>
           <div v-if="chain.next.length" class="mt-2 flex flex-wrap gap-1.5">
-            <button v-for="w in chain.next" :key="w" class="tag-brand cursor-pointer" @click="chainWord = w; runChain()">{{ w }}</button>
+            <button v-for="w in chain.next" :key="w" class="tag-brand cursor-pointer" @click="continueChain(w)">{{ w }}</button>
           </div>
-          <div v-else class="mt-2 text-[13px] text-ink-400">词库中暂无以该字开头的成语——换个字收尾的词再接，或去左边搜个新成语。</div>
+          <div v-else class="mt-2 text-[13px] text-ink-400">词库中暂无以该字开头的成语——这局到此为止，可保存战绩。</div>
         </div>
-        <div v-else class="mt-3 text-[13px] leading-6 text-ink-400">
-          还没开始：输入成语点「接龙」，系统会告诉你末字，并列出词库里所有能接上的成语。
+        <div class="mt-3 flex flex-wrap items-center gap-3">
+          <button class="btn-outline px-3" :disabled="myChain.length < 2" @click="saveChainRecord">保存本局战绩</button>
+          <button class="btn-ghost px-0 text-[12px] text-ink-400" @click="resetChain">清空重开</button>
+        </div>
+        <div v-if="chainStat.total" class="mt-3 border-t border-ink-100 pt-2 text-[12px] text-ink-500">
+          <div class="font-medium text-ink-700">个人战绩（共 {{ chainStat.total }} 局）</div>
+          <div class="mt-1">最长链 {{ chainStat.best }}；简单 {{ chainStat.by_difficulty?.easy || 0 }} · 普通 {{ chainStat.by_difficulty?.normal || 0 }} · 困难 {{ chainStat.by_difficulty?.hard || 0 }}</div>
+          <div v-for="r in chainStat.list" :key="r.id" class="mt-0.5 text-[11px] text-ink-400">{{ r.difficulty }} · {{ r.length }} 个 · {{ r.created_at }}</div>
         </div>
       </div>
     </div>
@@ -182,6 +214,9 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { learnApi } from '../../../api'
+import { useAppStore } from '../../../stores/app'
+
+const app = useAppStore()
 
 const tabs = [{ v: 'poem', label: '古诗文' }, { v: 'idiom', label: '成语' }, { v: 'hanzi', label: '汉字字典' }]
 const tab = ref('poem')
@@ -196,10 +231,23 @@ async function loadPoems() { poems.value = (await learnApi.poems(pStage.value ? 
 async function openPoem(key) { poem.value = (await learnApi.poem(key)) }
 async function loadDrill() { drillAns.value = {}; drill.value = (await learnApi.poemDrill({ n: 6 })).list }
 
+// F528 古诗填空（自动挖空 + 按上句判分）
+const fb = ref({})
+const fbAns = ref('')
+const fbRes = ref(null)
+async function newFb() { fbRes.value = null; fbAns.value = ''; fb.value = await learnApi.poemFillBlank() }
+async function submitFb() {
+  if (!fbAns.value.trim()) return
+  fbRes.value = await learnApi.poemFillSubmit({ key: fb.value.key, shang: fb.value.shang, answer: fbAns.value })
+}
+
 const idioms = ref([])
 const idiomQ = ref('')
 const chainWord = ref('画蛇添足')
 const chain = ref(null)
+const myChain = ref([])
+const chainDiff = ref('normal')
+const chainStat = ref({})
 // 成语卡片可点开（S7）：典故 / 近反义 / 易错用法，字段缺失时优雅隐藏
 const openIdiom = ref('')
 function toggleIdiom(w) { openIdiom.value = openIdiom.value === w ? '' : w }
@@ -211,7 +259,25 @@ const textOf = (v) => {
   return String(v)
 }
 async function loadIdioms() { idioms.value = (await learnApi.idioms(idiomQ.value)).list }
-async function runChain() { if (!chainWord.value) return; chain.value = (await learnApi.idiomChain(chainWord.value)) }
+// F529 成语接龙：维护本局链 + 战绩记录
+async function startChain() {
+  if (!chainWord.value) return
+  chain.value = await learnApi.idiomChain(chainWord.value)
+  myChain.value = [chain.value.word]
+}
+async function continueChain(w) {
+  chainWord.value = w
+  chain.value = await learnApi.idiomChain(w)
+  if (!myChain.value.includes(w)) myChain.value.push(w)
+}
+function resetChain() { chain.value = null; myChain.value = []; chainWord.value = '' }
+async function saveChainRecord() {
+  if (myChain.value.length < 2) return
+  await learnApi.saveIdiomChain({ chain: myChain.value, difficulty: chainDiff.value })
+  await loadChainStat()
+  app.toastMsg(`本局 ${myChain.value.length} 个成语的战绩已保存`, 'success')
+}
+async function loadChainStat() { chainStat.value = await learnApi.idiomChainRecords() }
 
 const hanziList = ref([])
 const radicals = ref([])
@@ -225,6 +291,7 @@ async function resetHanzi() { hanziRadical.value = ''; hanziChar.value = ''; han
 onMounted(async () => {
   await loadPoems()
   await loadIdioms()
+  await loadChainStat()
   const h = await learnApi.hanzi({})
   hanziList.value = h.list
   radicals.value = h.radicals

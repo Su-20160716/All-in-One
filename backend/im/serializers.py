@@ -1,7 +1,7 @@
 """IM 序列化"""
 from rest_framework import serializers
 
-from im.models import ChatMessage, ChatSession, QuickReply, SessionMemberSetting
+from im.models import ChatMessage, ChatSession, MessageFavorite, QuickReply, SessionMemberSetting, TodoItem
 
 
 class QuickReplySerializer(serializers.ModelSerializer):
@@ -9,6 +9,37 @@ class QuickReplySerializer(serializers.ModelSerializer):
         model = QuickReply
         fields = ["id", "title", "content", "sort_order", "created_at"]
         read_only_fields = ["owner"]
+
+
+class TodoItemSerializer(serializers.ModelSerializer):
+    session_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TodoItem
+        fields = ["id", "session", "session_name", "message", "content", "is_done", "remind_at", "created_at"]
+        read_only_fields = ["owner"]
+
+    def get_session_name(self, obj):
+        return obj.session.name if obj.session else ""
+
+
+class MessageFavoriteSerializer(serializers.ModelSerializer):
+    message_info = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MessageFavorite
+        fields = ["id", "message", "message_info", "note", "created_at"]
+        read_only_fields = ["owner"]
+
+    def get_message_info(self, obj):
+        m = obj.message
+        if not m:
+            return None
+        return {
+            "id": m.id, "session_id": m.session_id, "msg_type": m.msg_type,
+            "content": m.content, "sender_name": m.sender.display_name if m.sender else "系统",
+            "created_at": m.created_at,
+        }
 
 
 class ReplyToSerializer(serializers.ModelSerializer):
@@ -31,7 +62,8 @@ class ChatMessageSerializer(serializers.ModelSerializer):
         fields = [
             "id", "session", "sender", "sender_name", "sender_avatar", "msg_type",
             "content", "attachments", "forward_from", "reply_to", "reply_to_info",
-            "is_pinned", "is_recalled", "read_by_count", "read_by_me", "created_at",
+            "is_pinned", "is_recalled", "is_deleted", "edited", "edited_at",
+            "read_by_count", "read_by_me", "created_at",
         ]
         read_only_fields = ["sender"]
 

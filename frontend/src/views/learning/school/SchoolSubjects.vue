@@ -118,6 +118,25 @@
             <div class="mb-1 text-[12px] font-semibold text-ink-600">相关公式</div>
             <div class="flex flex-wrap gap-1.5"><span v-for="f in point.related_formulas" :key="f" class="tag">{{ f }}</span></div>
           </div>
+          <!-- F526 掌握度自评 -->
+          <div class="mt-4 rounded-control border border-ink-100 p-3">
+            <div class="mb-1 flex items-center justify-between text-[12px]">
+              <span class="font-semibold text-ink-700">我对这个知识点的掌握度</span>
+              <span class="text-ink-400">{{ ['', '入门', '初学', '基本掌握', '较熟练', '能教别人'][myStars] || '点星自评' }}</span>
+            </div>
+            <div class="flex gap-1 text-[20px] leading-none">
+              <button v-for="n in 5" :key="n" @click="ratePoint(n)" :class="n <= myStars ? 'text-amber-400' : 'text-ink-200'">★</button>
+            </div>
+          </div>
+
+          <!-- F539 关联知识点推荐 -->
+          <div v-if="relatedPoints.length" class="mt-3">
+            <div class="mb-1 text-[12px] font-semibold text-ink-700">学完这个，接着看（关联推荐）</div>
+            <div class="flex flex-wrap gap-1.5">
+              <button v-for="rp in relatedPoints" :key="rp.id" class="tag-brand cursor-pointer" @click="openPoint(rp.id)" :title="rp.chapter">{{ rp.name }}</button>
+            </div>
+          </div>
+
           <button class="btn-outline mt-4" @click="savePointProgress">标记为学习中</button>
         </div>
       </div>
@@ -149,7 +168,10 @@
           左边点一条公式（如勾股定理、欧姆定律），这里会给出黑底公式、按变量生成的输入框和「代入计算」按钮
         </div>
         <div v-else class="space-y-3">
-          <h3 class="text-[16px] font-semibold text-ink-900">{{ activeFormula.name }}</h3>
+          <div class="flex items-center gap-2">
+            <h3 class="text-[16px] font-semibold text-ink-900">{{ activeFormula.name }}</h3>
+            <button class="btn-outline px-2 py-0.5 text-[12px]" @click="favFormula">{{ favKeys.includes(activeFormula.key) ? '★ 已收藏' : '☆ 收藏' }}</button>
+          </div>
           <div class="rounded-control bg-ink-900 p-3 text-center font-mono text-[15px] text-ink-100">{{ activeFormula.formula }}</div>
           <div v-if="usageObj" class="space-y-1 rounded-control bg-ink-50 p-3 text-[12px] leading-6 text-ink-600">
             <div v-if="usageObj.scenario"><span class="font-semibold text-ink-700">适用场景：</span>{{ usageObj.scenario }}</div>
@@ -235,6 +257,37 @@
           </div>
         </div>
       </div>
+
+      <!-- F530 化学方程式配平练习 -->
+      <div class="card p-4">
+        <h3 class="mb-3 flex items-center gap-2 text-[15px] font-semibold text-ink-800">方程式配平练习
+          <span class="tag-brand">{{ epRes ? '已判分' : '填系数' }}</span>
+          <button class="btn-outline ml-auto px-2 py-0.5" @click="newEquation">下一题</button>
+        </h3>
+        <div v-if="ep.key">
+          <div class="text-[12px] text-ink-400">{{ ep.type }}<span v-if="ep.condition"> · 条件：{{ ep.condition }}</span></div>
+          <div class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-2 font-mono text-[14px] text-ink-800">
+            <template v-for="(f, i) in ep.left_forms" :key="'l' + i">
+              <input v-model.number="epLeft[i]" type="number" min="1" class="input h-8 w-14 px-1 text-center" />
+              <span>{{ f }}</span><span v-if="i < ep.left_forms.length - 1"> + </span>
+            </template>
+            <span class="px-1">→</span>
+            <template v-for="(f, i) in ep.right_forms" :key="'r' + i">
+              <input v-model.number="epRight[i]" type="number" min="1" class="input h-8 w-14 px-1 text-center" />
+              <span>{{ f }}</span><span v-if="i < ep.right_forms.length - 1"> + </span>
+            </template>
+          </div>
+          <button class="btn-primary mt-3" @click="submitEquation">提交配平</button>
+          <div v-if="epRes" class="mt-3 rounded-control p-3 text-[13px] leading-6" :class="epRes.correct ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-600'">
+            <div class="font-semibold">{{ epRes.correct ? '✓ 配平正确' : '✗ 配平不对' }}</div>
+            <div class="mt-1 font-mono text-ink-700">{{ epRes.equation }}</div>
+            <div v-if="!epRes.correct" class="mt-1 font-mono text-ink-500">正确系数：左 [{{ epRes.left_answer.join(', ') }}] · 右 [{{ epRes.right_answer.join(', ') }}]</div>
+            <div v-if="epRes.balance_tip" class="mt-1 text-[12px] text-ink-500">配平思路：{{ epRes.balance_tip }}</div>
+          </div>
+        </div>
+        <div v-else class="text-[13px] leading-6 text-ink-400">点「下一题」抽一条方程式，给每种物质填系数。</div>
+      </div>
+
       <div class="card p-4">
         <h3 class="mb-3 text-[15px] font-semibold text-ink-800">化学方程式（{{ equations.length }}）· 点卡片看配平思路与考点</h3>
         <div class="grid gap-2 md:grid-cols-2">
@@ -290,7 +343,20 @@ async function loadTree() {
   pointResults.value = []
   chapters.value = (await learnApi.knowledgeTree({ stage: stage.value, subject: subject.value })).chapters
 }
-async function openPoint(id) { point.value = (await learnApi.knowledge(id)) }
+// F526 掌握度自评 + F539 关联推荐
+const myStars = ref(0)
+const relatedPoints = ref([])
+async function openPoint(id) {
+  point.value = await learnApi.knowledge(id)
+  myStars.value = 0
+  try { relatedPoints.value = (await learnApi.knowledgeRelated(id)).list } catch { relatedPoints.value = [] }
+}
+async function ratePoint(n) {
+  myStars.value = n
+  const sk = `${point.value.stage}.${point.value.subject}`
+  await learnApi.saveMasteryRating({ stage_subject: sk, point: point.value.name, stars: n })
+  app.toastMsg(`已按 ${n} 星记录掌握度`, 'success')
+}
 async function searchPoint() {
   if (!pointQ.value) { pointResults.value = []; return loadTree() }
   pointResults.value = (await learnApi.knowledgeSearch(pointQ.value)).list
@@ -325,6 +391,14 @@ async function calc() {
   const data = await learnApi.formulaCalc(activeFormula.value.key, calcVals.value)
   calcResult.value = data.result
 }
+// F532 公式收藏夹
+const favKeys = ref([])
+async function loadFavKeys() { favKeys.value = (await learnApi.formulaFavorites()).keys }
+async function favFormula() {
+  const r = await learnApi.toggleFormulaFavorite(activeFormula.value.key)
+  await loadFavKeys()
+  app.toastMsg(r.favorited ? '已加入公式收藏夹' : '已取消收藏', r.favorited ? 'success' : 'warn')
+}
 
 // 语法
 const grammarList = ref([])
@@ -344,6 +418,24 @@ const openEq = ref('')
 function toggleEq(k) { openEq.value = openEq.value === k ? '' : k }
 const filteredElements = computed(() => elements.value.filter((e) => !elemCat.value || e.category === elemCat.value))
 async function openElement(n) { element.value = (await learnApi.element(n)) }
+// F530 方程式配平练习
+const ep = ref({})
+const epLeft = ref([])
+const epRight = ref([])
+const epRes = ref(null)
+async function newEquation() {
+  epRes.value = null
+  ep.value = await learnApi.equationPractice()
+  epLeft.value = ep.value.left_forms.map(() => 1)
+  epRight.value = ep.value.right_forms.map(() => 1)
+}
+async function submitEquation() {
+  epRes.value = await learnApi.equationPracticeSubmit({
+    key: ep.value.key,
+    left: epLeft.value.map((x) => Number(x) || 0),
+    right: epRight.value.map((x) => Number(x) || 0),
+  })
+}
 
 onMounted(async () => {
   stages.value = (await learnApi.stages()).list
@@ -354,5 +446,7 @@ onMounted(async () => {
   elements.value = el.list
   elemCats.value = el.categories
   equations.value = eq.list
+  await loadFavKeys()
+  await newEquation()
 })
 </script>

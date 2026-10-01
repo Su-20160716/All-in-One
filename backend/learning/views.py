@@ -25,7 +25,9 @@ from learning.data.programming import (
 )
 from learning.learn_tools import LEARN_TOOL_REGISTRY
 from learning.models import (
-    LearningProgress, MistakeRecord, SnippetBookmark, StudyPlan, StudySession, WordbookItem,
+    DailyGoal, FormulaFavorite, IdiomChainRecord, LearningBadge, LearningProgress,
+    MasteryRating, MistakeRecord, PaperArchive, QuestionFavorite, QuestionSet,
+    SnippetBookmark, StudyPlan, StudySession, ToolUsageLog, WordbookItem,
 )
 from learning.serializers import (
     LearningProgressSerializer, MistakeRecordSerializer, SnippetBookmarkSerializer,
@@ -496,7 +498,7 @@ class KnowledgeDetailView(APIView):
         if not pt:
             from rest_framework.exceptions import NotFound
             raise NotFound("知识点不存在")
-        related = [f for f in cu.FORMULAS if f["stage"] == pt["stage"] and f["subject"] == pt["subject"]]
+        related = _related_formulas(pt)
         # 生成完整知识点详情（语数英支持完整教学内容）
         stage_subject = f"{pt['stage']}.{pt['subject']}"
         detail = knowledge_detail(stage_subject, pt["chapter"], pt["name"])
@@ -1028,6 +1030,58 @@ def _norm_answer(v):
     return re.sub(r"\s+", "", s)
 
 
+def _subject_cn_map():
+    """学科 key → 中文名（取自 curriculum.STAGES，口径与学科中心一致）。"""
+    m = {}
+    for st in getattr(cu, "STAGES", []):
+        for sub in st.get("subjects", []):
+            key = sub.get("key")
+            if key:
+                m.setdefault(key, sub.get("name") or key)
+    return m
+
+
+def _related_formulas(pt):
+    """F500（S2）：按名称相关性挑出与知识点**真正相关**的公式。
+
+    原实现返回「该学段 + 该学科」的全部公式（60 条公式里随便挑），与所点知识点无关。
+    这里改两级匹配打分：
+      · 知识点名与公式名互为包含  +6（强相关，如「浮力」↔「阿基米德浮力」）
+      · 章节名与公式名互为包含    +4（章节级相关，如「数列」↔「等差数列前 n 项和」）
+      · 知识点二元组重合          +3 × 重合比例
+      · 章节二元组重合            +1 × 重合比例
+    阈值 4.0（即至少要有一处「包含」关系），按分数取前 5；确实没有相关公式就返回空列表，
+    前端会自动隐藏该区块——比塞一堆无关公式更诚实。
+    """
+    point = (pt.get("name") or "").strip()
+    chapter = (pt.get("chapter") or "").strip()
+    pool = [f for f in cu.FORMULAS
+            if f.get("stage") == pt.get("stage") and f.get("subject") == pt.get("subject")]
+    if not pool or not point:
+        return []
+
+    def grams(s):
+        s = re.sub(r"\s+", "", s or "")
+        return {s[i:i + 2] for i in range(len(s) - 1)} or ({s} if s else set())
+
+    pg, cg = grams(point), grams(chapter)
+    scored = []
+    for f in pool:
+        name = f.get("name", "")
+        ng = grams(name)
+        score = 0.0
+        if name and (point in name or name in point):
+            score += 6.0
+        if name and chapter and (chapter in name or name in chapter):
+            score += 4.0
+        score += 3.0 * len(pg & ng) / max(len(pg), 1)
+        score += 1.0 * len(cg & ng) / max(len(cg), 1)
+        if score >= 4.0:
+            scored.append((score, f))
+    scored.sort(key=lambda x: -x[0])
+    return [f for _, f in scored[:5]]
+
+
 class StudyStreakView(APIView):
     """F522 连续打卡：当前连续 / 历史最长 / 今日时长 / 全部有记录的日期。"""
 
@@ -1147,6 +1201,23 @@ class StudyReviewQueueView(APIView):
         return Response({"ok": True, "kind": kind, "id": obj.id, "last_reviewed": today.isoformat()})
 
 
+_Q_OPTIONS_INDEX = None
+
+
+def _question_options_index():
+    """题干 → 选项。错题本没存 options，重练单选题时按题干回题库取（取不到返回 None）。"""
+    global _Q_OPTIONS_INDEX
+    if _Q_OPTIONS_INDEX is None:
+        idx = {}
+        for q in getattr(qb, "QUESTIONS", []):
+            stem = (q.get("stem") or "").strip()
+            opts = q.get("options")
+            if stem and opts:
+                idx.setdefault(stem, opts)
+        _Q_OPTIONS_INDEX = idx
+    return _Q_OPTIONS_INDEX
+
+
 class StudyReDrillView(APIView):
     """F520 错题重练：GET 抽未掌握错题成卷（不含答案）；POST 交卷记二次正确率。"""
 
@@ -1160,11 +1231,20 @@ class StudyReDrillView(APIView):
         if subject:
             qs = qs.filter(subject=subject)
         items = list(qs[:n])
-        return Response({"total": len(items), "list": [{
-            "id": m.id, "stage": m.stage, "subject": m.subject,
-            "question_type": m.question_type, "difficulty": m.difficulty,
-            "stem": m.stem, "attempts": m.redrill_attempts, "redrill_correct": m.redrill_correct,
-        } for m in items]})
+        idx = _question_options_index()
+        rows = []
+        for m in items:
+            row = {
+                "id": m.id, "stage": m.stage, "subject": m.subject,
+                "question_type": m.question_type, "difficulty": m.difficulty,
+                "stem": m.stem, "attempts": m.redrill_attempts,
+                "redrill_correct": m.redrill_correct,
+            }
+            # 豆包 2026-10-01 反馈：单选题只回题干会让用户盲填序号，这里回填选项
+            if m.question_type == "single":
+                row["options"] = idx.get((m.stem or "").strip())
+            rows.append(row)
+        return Response({"total": len(rows), "list": rows})
 
     def post(self, request):
         m = get_object_or_404(MistakeRecord, id=request.data.get("id"), owner=request.user)
@@ -1186,11 +1266,13 @@ class StudyWeaknessView(APIView):
 
     def get(self, request):
         recs = list(MistakeRecord.objects.filter(owner=request.user))
+        sub_cn = _subject_cn_map()
+        type_cn = dict(MistakeRecord.TYPES)
 
-        def agg(key_fn):
+        def agg(key_fn, label_fn=None):
             buckets = {}
             for m in recs:
-                k = key_fn(m) or "未分类"
+                k = key_fn(m) or ""
                 b = buckets.setdefault(k, {"total": 0, "mastered": 0})
                 b["total"] += 1
                 if m.mastered:
@@ -1198,13 +1280,19 @@ class StudyWeaknessView(APIView):
             rows = []
             for k, v in buckets.items():
                 rate = round(v["mastered"] / v["total"] * 100) if v["total"] else 0
-                rows.append({"name": k, "total": v["total"], "mastered": v["mastered"],
-                             "fixed_rate": rate, "weak": rate < 60})
+                rows.append({
+                    "key": k or "unknown",
+                    "name": (label_fn(k) if label_fn else k) or "未分类",
+                    "total": v["total"], "mastered": v["mastered"],
+                    "fixed_rate": rate, "weak": rate < 60,
+                })
             rows.sort(key=lambda r: (r["fixed_rate"], -r["total"]))
             return rows
 
-        by_subject = agg(lambda m: m.subject)
-        by_type = agg(lambda m: dict(MistakeRecord.TYPES).get(m.question_type, m.question_type))
+        # 口径统一：name 一律回中文名，另附 key 供前端做稳定映射（豆包 2026-09-30 反馈②）
+        by_subject = agg(lambda m: m.subject, lambda k: sub_cn.get(k, k))
+        by_type = agg(lambda m: m.question_type, lambda k: type_cn.get(k, k))
+        # order = 学科维度（与 by_subject.name 同口径），按订正率升序取前 5（反馈①）
         order = [r["name"] for r in by_subject if r["weak"]] or [r["name"] for r in by_subject]
         return Response({"total": len(recs), "by_subject": by_subject, "by_type": by_type,
                          "order": order[:5]})
@@ -1366,3 +1454,604 @@ class LearningGlobalSearchView(APIView):
         groups = {"poems": poems, "words": words, "idioms": idioms, "hanzi": hanzi,
                   "formulas": formulas, "questions": questions, "points": points}
         return Response({"q": q, "total": sum(len(v) for v in groups.values()), "groups": groups})
+
+
+# ============================================================
+# 六、v8 学习区新增能力（dsh 2026-10-01）
+#   F523 每日目标 / F524 番茄钟 / F525 自定义题单 / F526 掌握度自评 / F528 古诗填空
+#   F529 成语接龙战绩 / F530 方程式配平练习 / F531 听写错词入生词本 / F532 公式收藏
+#   F536 题目收藏 / F537 试卷存档 / F538 工具使用历史 / F539 知识点关联推荐
+#   F540 学习徽章 / F543 听写逐词反馈 / F544 进度详情 / F545 错因归类 / F546 计划排程解释
+# 只增不改：全部为新增接口与新增模型，不动既有接口契约。
+# ============================================================
+
+
+def _questions_by_ids(ids):
+    """按题目 ID 回题目（默认不带答案）。"""
+    idx = {q.get("id"): q for q in getattr(qb, "QUESTIONS", [])}
+    out = []
+    for i in (ids or []):
+        q = idx.get(i)
+        if q:
+            out.append(qb.public_question(q, with_answer=False))
+    return out
+
+
+class DailyGoalView(APIView):
+    """F523 每日学习目标与达成率。"""
+
+    def get(self, request):
+        goal, _ = DailyGoal.objects.get_or_create(owner=request.user)
+        today = dt.date.today()
+        minutes = sum(s.minutes for s in StudySession.objects.filter(owner=request.user, study_date=today))
+        target = goal.target_minutes or 0
+        return Response({
+            "target_minutes": target, "today_minutes": minutes,
+            "rate": round(minutes / target * 100) if target else 0,
+            "achieved": bool(target) and minutes >= target,
+            "note": goal.note,
+        })
+
+    def post(self, request):
+        goal, _ = DailyGoal.objects.get_or_create(owner=request.user)
+        if "target_minutes" in request.data:
+            try:
+                goal.target_minutes = max(0, min(1440, int(request.data["target_minutes"])))
+            except (TypeError, ValueError):
+                return Response({"ok": False, "error": "target_minutes 需为整数"}, status=400)
+        if "note" in request.data:
+            goal.note = str(request.data["note"])[:255]
+        goal.save()
+        return self.get(request)
+
+
+class PomodoroView(APIView):
+    """F524 番茄钟专注闭环：25 分钟一轮，记录完成 / 打断。"""
+
+    ROUND = 25
+
+    def get(self, request):
+        today = dt.date.today()
+        qs = StudySession.objects.filter(owner=request.user, study_date=today, subject="番茄钟")
+        rows = list(qs)
+        broken = [s for s in rows if "打断" in (s.note or "")]
+        return Response({
+            "round_minutes": self.ROUND,
+            "total_rounds": len(rows),
+            "finished": len(rows) - len(broken),
+            "interrupted": len(broken),
+            "focus_minutes": sum(s.minutes for s in rows),
+            "list": [{"id": s.id, "minutes": s.minutes, "note": s.note,
+                      "at": s.created_at.isoformat(timespec="seconds")} for s in rows],
+        })
+
+    def post(self, request):
+        try:
+            minutes = int(request.data.get("minutes") or self.ROUND)
+        except (TypeError, ValueError):
+            minutes = self.ROUND
+        interrupted = bool(request.data.get("interrupted"))
+        s = StudySession.objects.create(
+            owner=request.user, subject="番茄钟", minutes=max(1, min(240, minutes)),
+            study_date=dt.date.today(), note="打断" if interrupted else "完成")
+        return Response({"ok": True, "id": s.id, "interrupted": interrupted}, status=201)
+
+
+class QuestionSetView(APIView):
+    """F525 自定义题单：列表 / 详情取题 / 新建 / 改名 / 删除。"""
+
+    def get(self, request):
+        sid = request.query_params.get("id")
+        if sid:
+            obj = get_object_or_404(QuestionSet, id=sid, owner=request.user)
+            return Response({"id": obj.id, "name": obj.name, "note": obj.note,
+                             "question_ids": obj.question_ids or [],
+                             "list": _questions_by_ids(obj.question_ids)})
+        qs = QuestionSet.objects.filter(owner=request.user)
+        return Response({"total": qs.count(), "list": [
+            {"id": o.id, "name": o.name, "note": o.note, "count": len(o.question_ids or []),
+             "created_at": o.created_at.isoformat(timespec="seconds")} for o in qs]})
+
+    def post(self, request):
+        name = (request.data.get("name") or "").strip()
+        if not name:
+            return Response({"ok": False, "error": "请填写题单名称"}, status=400)
+        ids = request.data.get("question_ids") or []
+        if not isinstance(ids, list):
+            return Response({"ok": False, "error": "question_ids 需为数组"}, status=400)
+        obj = QuestionSet.objects.create(owner=request.user, name=name[:128],
+                                         question_ids=ids[:200],
+                                         note=str(request.data.get("note", ""))[:255])
+        return Response({"ok": True, "id": obj.id, "count": len(obj.question_ids)}, status=201)
+
+    def patch(self, request):
+        obj = get_object_or_404(QuestionSet, id=request.data.get("id"), owner=request.user)
+        if request.data.get("name"):
+            obj.name = str(request.data["name"])[:128]
+        if "note" in request.data:
+            obj.note = str(request.data["note"])[:255]
+        if isinstance(request.data.get("question_ids"), list):
+            obj.question_ids = request.data["question_ids"][:200]
+        obj.save()
+        return Response({"ok": True, "id": obj.id, "count": len(obj.question_ids or [])})
+
+    def delete(self, request):
+        obj = get_object_or_404(QuestionSet, id=request.query_params.get("id"), owner=request.user)
+        obj.delete()
+        return Response({"deleted": True})
+
+
+class MasteryRatingView(APIView):
+    """F526 知识点掌握度自评（1–5 星）。"""
+
+    def get(self, request):
+        qs = MasteryRating.objects.filter(owner=request.user)
+        sk = request.query_params.get("stage_subject")
+        if sk:
+            qs = qs.filter(stage_subject=sk)
+        rows = [{"id": o.id, "stage_subject": o.stage_subject, "point": o.point, "stars": o.stars,
+                 "updated_at": o.updated_at.isoformat(timespec="seconds")} for o in qs]
+        return Response({"total": len(rows),
+                         "avg_stars": round(sum(r["stars"] for r in rows) / len(rows), 2) if rows else 0,
+                         "list": rows})
+
+    def post(self, request):
+        sk = (request.data.get("stage_subject") or "").strip()
+        point = (request.data.get("point") or "").strip()
+        if not sk or not point:
+            return Response({"ok": False, "error": "stage_subject 与 point 必填"}, status=400)
+        try:
+            stars = max(1, min(5, int(request.data.get("stars") or 3)))
+        except (TypeError, ValueError):
+            stars = 3
+        obj, _ = MasteryRating.objects.update_or_create(
+            owner=request.user, stage_subject=sk[:64], point=point[:128],
+            defaults={"stars": stars})
+        return Response({"ok": True, "id": obj.id, "stars": obj.stars}, status=201)
+
+    def delete(self, request):
+        obj = get_object_or_404(MasteryRating, id=request.query_params.get("id"), owner=request.user)
+        obj.delete()
+        return Response({"deleted": True})
+
+
+class PoemFillBlankView(APIView):
+    """F528 古诗填空练习：自动挖空 + 按上句判分。"""
+
+    @staticmethod
+    def _lines(poem):
+        return [x for x in re.split(r"[，。；！？\n]", poem.get("text", "")) if x.strip()]
+
+    def get(self, request):
+        key = request.query_params.get("key")
+        pool = [p for p in cn.POEMS if not key or p.get("key") == key]
+        if not pool:
+            return Response({"ok": False, "error": "未收录该篇目"}, status=404)
+        p = random.choice(pool)
+        pairs = p.get("pairs") or []
+        if pairs:
+            shang, xia = random.choice(pairs)
+        else:
+            lines = self._lines(p)
+            if len(lines) < 2:
+                return Response({"ok": False, "error": "该篇目暂不支持挖空"}, status=400)
+            i = random.randrange(len(lines) - 1)
+            shang, xia = lines[i], lines[i + 1]
+        return Response({"key": p["key"], "title": p["title"], "author": p.get("author", ""),
+                         "dynasty": p.get("dynasty", ""), "shang": shang, "answer": xia})
+
+    def post(self, request):
+        key = request.data.get("key")
+        shang = (request.data.get("shang") or "").strip()
+        p = next((x for x in cn.POEMS if x.get("key") == key), None)
+        if not p:
+            return Response({"ok": False, "error": "未收录该篇目"}, status=404)
+        expected = None
+        for a, b in (p.get("pairs") or []):
+            if a == shang:
+                expected = b
+                break
+        if expected is None:
+            lines = self._lines(p)
+            for i, ln in enumerate(lines[:-1]):
+                if ln == shang:
+                    expected = lines[i + 1]
+                    break
+        if expected is None:
+            return Response({"ok": False, "error": "找不到对应的上句"}, status=400)
+        return Response({"correct": _norm_answer(request.data.get("answer")) == _norm_answer(expected),
+                         "right_answer": expected})
+
+
+class IdiomChainRecordView(APIView):
+    """F529 成语接龙战绩：记录链长与难度，返回个人最佳。"""
+
+    def get(self, request):
+        qs = list(IdiomChainRecord.objects.filter(owner=request.user)[:20])
+        return Response({
+            "total": IdiomChainRecord.objects.filter(owner=request.user).count(),
+            "best": qs[0].length if qs else 0,
+            "by_difficulty": {lv: max([o.length for o in qs if o.difficulty == lv] or [0])
+                              for lv, _ in IdiomChainRecord.LEVELS},
+            "list": [{"id": o.id, "length": o.length, "difficulty": o.difficulty, "chain": o.chain,
+                      "created_at": o.created_at.isoformat(timespec="seconds")} for o in qs],
+        })
+
+    def post(self, request):
+        chain = request.data.get("chain") or []
+        if not isinstance(chain, list):
+            return Response({"ok": False, "error": "chain 需为数组"}, status=400)
+        diff = request.data.get("difficulty") or "normal"
+        if diff not in dict(IdiomChainRecord.LEVELS):
+            diff = "normal"
+        obj = IdiomChainRecord.objects.create(owner=request.user, length=len(chain),
+                                              difficulty=diff, chain=chain[:100])
+        return Response({"ok": True, "id": obj.id, "length": obj.length}, status=201)
+
+
+class EquationPracticeView(APIView):
+    """F530 化学方程式配平练习：出题（不含系数）+ 判分。"""
+
+    def get(self, request):
+        pool = [e for e in ch.EQUATIONS if e.get("reactants") and e.get("products")]
+        if not pool:
+            return Response({"ok": False, "error": "方程式库为空"}, status=400)
+        e = random.choice(pool)
+        return Response({"key": e["key"], "type": e.get("type"), "condition": e.get("condition"),
+                         "left_forms": [f for f, _ in e["reactants"]],
+                         "right_forms": [f for f, _ in e["products"]]})
+
+    def post(self, request):
+        e = next((x for x in ch.EQUATIONS if x.get("key") == request.data.get("key")), None)
+        if not e:
+            return Response({"ok": False, "error": "找不到该方程式"}, status=404)
+
+        def to_ints(v):
+            if not isinstance(v, list):
+                return None
+            try:
+                return [int(x) for x in v]
+            except (TypeError, ValueError):
+                return None
+
+        gl, gr = to_ints(request.data.get("left")), to_ints(request.data.get("right"))
+        if gl is None or gr is None:
+            return Response({"ok": False, "error": "left / right 需为整数数组"}, status=400)
+        el = [n for _, n in e["reactants"]]
+        er = [n for _, n in e["products"]]
+        return Response({"correct": gl == el and gr == er,
+                         "left_answer": el, "right_answer": er,
+                         "equation": e.get("equation"), "balance_tip": e.get("balance_tip")})
+
+
+class DictationCollectView(APIView):
+    """F531 听写错词自动入生词本（带来源标记）。"""
+
+    def post(self, request):
+        words = request.data.get("words") or []
+        if not isinstance(words, list):
+            return Response({"ok": False, "error": "words 需为数组"}, status=400)
+        idx = {w.get("word"): w for w in en.WORDS}
+        added, skipped = [], []
+        for raw in words[:100]:
+            w = str(raw or "").strip().lower()
+            if not w:
+                continue
+            src = idx.get(w, {})
+            obj, created = WordbookItem.objects.get_or_create(
+                owner=request.user, word=w,
+                defaults={"phonetic": src.get("phonetic", ""), "meaning": src.get("meaning", ""),
+                          "source": "dictation"})
+            (added if created else skipped).append(w)
+        return Response({"ok": True, "added": added, "skipped": skipped,
+                         "added_count": len(added)})
+
+
+class DictationGradeView(APIView):
+    """F543 听写逐词反馈：对/错 + 正确拼写。"""
+
+    def post(self, request):
+        items = request.data.get("items")
+        if not isinstance(items, list):
+            return Response({"ok": False, "error": "items 需为数组，元素形如 {answer, expected}"}, status=400)
+        idx = {w.get("word"): w for w in en.WORDS}
+        rows = []
+        for it in items[:200]:
+            expected = str((it or {}).get("expected") or "").strip().lower()
+            answer = str((it or {}).get("answer") or "").strip().lower()
+            src = idx.get(expected, {})
+            rows.append({
+                "expected": expected, "answer": answer, "correct": answer == expected,
+                "phonetic": src.get("phonetic", ""), "meaning": src.get("meaning", ""),
+                "example": src.get("example", ""),
+            })
+        right = sum(1 for r in rows if r["correct"])
+        return Response({"total": len(rows), "right": right,
+                         "score": round(right / len(rows) * 100) if rows else 0, "list": rows})
+
+
+class FormulaFavoriteView(APIView):
+    """F532 公式收藏夹。"""
+
+    def get(self, request):
+        qs = FormulaFavorite.objects.filter(owner=request.user)
+        keys = [o.formula_key for o in qs]
+        idx = {f.get("key"): f for f in cu.FORMULAS}
+        return Response({"total": len(keys), "keys": keys, "list": [
+            {"key": k, "name": idx.get(k, {}).get("name", k), "formula": idx.get(k, {}).get("formula", ""),
+             "stage": idx.get(k, {}).get("stage", ""), "subject": idx.get(k, {}).get("subject", "")}
+            for k in keys if k in idx]})
+
+    def post(self, request):
+        key = (request.data.get("key") or "").strip()
+        if not key:
+            return Response({"ok": False, "error": "缺少 key"}, status=400)
+        obj, created = FormulaFavorite.objects.get_or_create(owner=request.user, formula_key=key[:64])
+        if not created and request.data.get("toggle", True):
+            obj.delete()
+            return Response({"ok": True, "favorited": False})
+        return Response({"ok": True, "favorited": True})
+
+    def delete(self, request):
+        FormulaFavorite.objects.filter(owner=request.user,
+                                       formula_key=request.query_params.get("key")).delete()
+        return Response({"deleted": True})
+
+
+class QuestionFavoriteView(APIView):
+    """F536 题目收藏（加星筛选）。"""
+
+    def get(self, request):
+        qs = QuestionFavorite.objects.filter(owner=request.user)
+        ids = [o.question_id for o in qs]
+        return Response({"total": len(ids), "ids": ids, "list": _questions_by_ids(ids)})
+
+    def post(self, request):
+        qid = (request.data.get("id") or "").strip()
+        if not qid:
+            return Response({"ok": False, "error": "缺少 id"}, status=400)
+        obj, created = QuestionFavorite.objects.get_or_create(owner=request.user, question_id=qid[:64])
+        if not created and request.data.get("toggle", True):
+            obj.delete()
+            return Response({"ok": True, "favorited": False})
+        return Response({"ok": True, "favorited": True})
+
+    def delete(self, request):
+        QuestionFavorite.objects.filter(owner=request.user,
+                                        question_id=request.query_params.get("id")).delete()
+        return Response({"deleted": True})
+
+
+class PaperArchiveView(APIView):
+    """F537 组卷结果存档与重做。"""
+
+    def get(self, request):
+        aid = request.query_params.get("id")
+        if aid:
+            obj = get_object_or_404(PaperArchive, id=aid, owner=request.user)
+            return Response({"id": obj.id, "title": obj.title, "stage": obj.stage,
+                             "subject": obj.subject, "total": obj.total,
+                             "last_score": obj.last_score, "payload": obj.payload})
+        qs = PaperArchive.objects.filter(owner=request.user)
+        return Response({"total": qs.count(), "list": [
+            {"id": o.id, "title": o.title, "stage": o.stage, "subject": o.subject,
+             "total": o.total, "last_score": o.last_score,
+             "created_at": o.created_at.isoformat(timespec="seconds")} for o in qs]})
+
+    def post(self, request):
+        title = (request.data.get("title") or "").strip()
+        if not title:
+            return Response({"ok": False, "error": "请填写试卷名称"}, status=400)
+        payload = request.data.get("payload") or {}
+        if not isinstance(payload, dict):
+            return Response({"ok": False, "error": "payload 需为对象"}, status=400)
+        obj = PaperArchive.objects.create(
+            owner=request.user, title=title[:128],
+            stage=str(request.data.get("stage", ""))[:20],
+            subject=str(request.data.get("subject", ""))[:20],
+            payload=payload, total=int(request.data.get("total") or 0))
+        return Response({"ok": True, "id": obj.id}, status=201)
+
+    def patch(self, request):
+        """交卷后回写得分。"""
+        obj = get_object_or_404(PaperArchive, id=request.data.get("id"), owner=request.user)
+        if "last_score" in request.data:
+            try:
+                obj.last_score = max(0, min(100, int(request.data["last_score"])))
+            except (TypeError, ValueError):
+                pass
+        obj.save()
+        return Response({"ok": True, "id": obj.id, "last_score": obj.last_score})
+
+    def delete(self, request):
+        obj = get_object_or_404(PaperArchive, id=request.query_params.get("id"), owner=request.user)
+        obj.delete()
+        return Response({"deleted": True})
+
+
+class ToolUsageView(APIView):
+    """F538 学习工具使用历史（最近用过可快速重开）。"""
+
+    def get(self, request):
+        qs = ToolUsageLog.objects.filter(owner=request.user)
+        seen, rows = set(), []
+        for o in qs:
+            if o.tool_key in seen:
+                continue
+            seen.add(o.tool_key)
+            entry = LEARN_TOOL_REGISTRY.get(o.tool_key)
+            rows.append({"key": o.tool_key, "name": (entry[1] if entry else o.tool_key),
+                         "used_at": o.used_at.isoformat(timespec="seconds")})
+            if len(rows) >= 12:
+                break
+        return Response({"total": qs.count(), "list": rows})
+
+    def post(self, request):
+        key = (request.data.get("key") or "").strip()
+        if not key:
+            return Response({"ok": False, "error": "缺少 key"}, status=400)
+        if key not in LEARN_TOOL_REGISTRY:
+            return Response({"ok": False, "error": f"未知学习工具: {key}"}, status=404)
+        ToolUsageLog.objects.create(owner=request.user, tool_key=key[:64])
+        return Response({"ok": True}, status=201)
+
+
+class KnowledgeRelatedView(APIView):
+    """F539 知识点关联推荐：同章节兄弟点 + 同学科相似名。"""
+
+    LIMIT = 6
+
+    def get(self, request):
+        kid = request.query_params.get("kid")
+        pt = next((x for x in _ALL_POINTS if x["id"] == kid), None)
+        if not pt:
+            return Response({"ok": False, "error": "知识点不存在"}, status=404)
+        name, chapter = pt["name"], pt["chapter"]
+        pool = [x for x in _ALL_POINTS
+                if x["stage"] == pt["stage"] and x["subject"] == pt["subject"] and x["id"] != pt["id"]]
+
+        def grams(s):
+            s = re.sub(r"\s+", "", s or "")
+            return {s[i:i + 2] for i in range(len(s) - 1)} or ({s} if s else set())
+
+        ng = grams(name)
+        scored = []
+        for x in pool:
+            score = 0.0
+            if x["chapter"] == chapter:
+                score += 3.0
+            xg = grams(x["name"])
+            score += 3.0 * len(ng & xg) / max(len(ng), 1)
+            if score > 0:
+                scored.append((score, x))
+        scored.sort(key=lambda t: -t[0])
+        return Response({"kid": kid, "name": name, "chapter": chapter, "list": [
+            {"id": x["id"], "name": x["name"], "chapter": x["chapter"],
+             "stage": x["stage"], "subject": x["subject"]} for _, x in scored[:self.LIMIT]]})
+
+
+# 学习徽章定义：code → (名称, 说明, 判定函数)
+def _badge_defs():
+    def _streak(user):
+        days = sorted({s.study_date for s in StudySession.objects.filter(owner=user)})
+        best = run = 0
+        prev = None
+        for d in days:
+            run = run + 1 if prev and (d - prev).days == 1 else 1
+            best = max(best, run)
+            prev = d
+        return best
+
+    return [
+        ("first_step", "启程", "完成第一次专注记录", lambda u: StudySession.objects.filter(owner=u).exists()),
+        ("streak3", "三日不辍", "连续打卡 3 天", lambda u: _streak(u) >= 3),
+        ("streak7", "七日成习", "连续打卡 7 天", lambda u: _streak(u) >= 7),
+        ("fix10", "订正达人", "订正掌握 10 道错题", lambda u: MistakeRecord.objects.filter(owner=u, mastered=True).count() >= 10),
+        ("word50", "词库初成", "生词本累计 50 词", lambda u: WordbookItem.objects.filter(owner=u).count() >= 50),
+        ("focus600", "专注十时", "累计专注 600 分钟", lambda u: sum(s.minutes for s in StudySession.objects.filter(owner=u)) >= 600),
+        ("polymath", "博闻", "自评过 5 个知识点", lambda u: MasteryRating.objects.filter(owner=u).count() >= 5),
+    ]
+
+
+class LearningBadgeView(APIView):
+    """F540 学习中心徽章：惰性结算并返回全部徽章状态。"""
+
+    def get(self, request):
+        owned = {b.code: b for b in LearningBadge.objects.filter(owner=request.user)}
+        new = []
+        for code, title, desc, test in _badge_defs():
+            if code in owned:
+                continue
+            try:
+                hit = bool(test(request.user))
+            except Exception:
+                hit = False
+            if hit:
+                owned[code] = LearningBadge.objects.create(owner=request.user, code=code)
+                new.append(code)
+        return Response({
+            "unlocked": len(owned),
+            "total": len(_badge_defs()),
+            "new": new,
+            "list": [{"code": code, "title": title, "desc": desc,
+                      "unlocked": code in owned,
+                      "unlocked_at": owned[code].unlocked_at.isoformat(timespec="seconds") if code in owned else None}
+                     for code, title, desc, _ in _badge_defs()],
+        })
+
+
+class ProgressDetailView(APIView):
+    """F544 进度条目详情：该项信息 + 相关收藏/错题/专注历史。"""
+
+    def get(self, request):
+        pid = request.query_params.get("id")
+        obj = get_object_or_404(LearningProgress, id=pid, owner=request.user)
+        target = obj.target_key
+        related = []
+        if obj.domain == "programming":
+            related = [{"kind": "收藏片段", "title": b.title, "at": b.created_at.isoformat(timespec="seconds")}
+                       for b in SnippetBookmark.objects.filter(owner=request.user, language=target)[:10]]
+        elif obj.domain == "school":
+            subj = target.split(".")[-1] if "." in target else target
+            related = [{"kind": "错题", "title": m.stem[:40], "at": m.created_at.isoformat(timespec="seconds")}
+                       for m in MistakeRecord.objects.filter(owner=request.user, subject=subj)[:10]]
+        return Response({
+            "id": obj.id, "domain": obj.domain, "target_key": target,
+            "target_name": obj.target_name, "status": obj.status, "percent": obj.percent,
+            "note": obj.note,
+            "created_at": obj.created_at.isoformat(timespec="seconds"),
+            "updated_at": obj.updated_at.isoformat(timespec="seconds"),
+            "related": related,
+        })
+
+
+class MistakeCauseView(APIView):
+    """F545 错题错因归类：设置错因 + 汇总分布。"""
+
+    def get(self, request):
+        recs = list(MistakeRecord.objects.filter(owner=request.user))
+        buckets = {k: 0 for k, _ in MistakeRecord.CAUSES}
+        unset = 0
+        for m in recs:
+            if m.cause and m.cause in buckets:
+                buckets[m.cause] += 1
+            else:
+                unset += 1
+        return Response({
+            "total": len(recs), "unset": unset,
+            "causes": [{"key": k, "name": v, "count": buckets[k]} for k, v in MistakeRecord.CAUSES],
+            "by_subject": {},
+        })
+
+    def post(self, request):
+        m = get_object_or_404(MistakeRecord, id=request.data.get("id"), owner=request.user)
+        cause = (request.data.get("cause") or "").strip()
+        if cause and cause not in dict(MistakeRecord.CAUSES):
+            return Response({"ok": False, "error": "cause 取值非法"}, status=400)
+        m.cause = cause
+        m.save(update_fields=["cause"])
+        return Response({"ok": True, "id": m.id, "cause": m.cause})
+
+
+class StudyPlanDetailView(APIView):
+    """F546 学习计划详情：解释排程逻辑。"""
+
+    def get(self, request):
+        pid = request.query_params.get("id")
+        obj = get_object_or_404(StudyPlan, id=pid, owner=request.user)
+        plan = obj.plan or []
+        total = obj.total or 0
+        per_day = round(total / obj.days, 1) if obj.days else 0
+        return Response({
+            "id": obj.id, "title": obj.title, "subject": obj.subject,
+            "total": obj.total, "days": obj.days, "finished": obj.finished,
+            "start_date": obj.start_date.isoformat(),
+            "plan": plan,
+            "explain": {
+                "per_day_avg": per_day,
+                "rule": f"总任务 {total} 项 ÷ {obj.days} 天 ≈ 每天 {per_day} 项，最后一天补足余数；"
+                        "任务量按天数均分，避免前期过载。",
+                "remain": max(0, total - obj.finished),
+                "progress_rate": round(obj.finished / total * 100) if total else 0,
+            },
+        })

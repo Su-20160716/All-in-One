@@ -29,10 +29,11 @@
           <select v-model="f.type" class="input w-32"><option value="">全部</option><option value="single">单选</option><option value="judge">判断</option><option value="fill">填空</option></select>
         </label>
         <button class="btn-primary" @click="loadBank">筛选</button>
-        <span class="text-[12px] text-ink-400">共 {{ bank.length }} 题</span>
+        <button class="btn-outline" :class="onlyFav ? 'text-amber-500' : ''" @click="onlyFav = !onlyFav">{{ onlyFav ? '★ 只看收藏' : '只看收藏' }}</button>
+        <span class="text-[12px] text-ink-400">共 {{ displayBank.length }} 题</span>
       </div>
       <div class="space-y-2">
-        <div v-for="(q, i) in bank" :key="q.id" class="card p-4">
+        <div v-for="(q, i) in displayBank" :key="q.id" class="card p-4">
           <div class="flex flex-wrap items-center gap-2">
             <span class="tag-brand">{{ i + 1 }}</span><span class="tag">{{ typeName(q.type) }}</span>
             <span class="tag">难度 {{ q.difficulty }}</span><span class="tag">{{ q.kp }}</span>
@@ -41,9 +42,15 @@
           <div v-if="q.options" class="mt-1.5 grid gap-1 md:grid-cols-2">
             <div v-for="(o, oi) in q.options" :key="oi" class="text-[13px] text-ink-600">{{ String.fromCharCode(65 + oi) }}. {{ o }}</div>
           </div>
-          <div class="mt-2 flex gap-2">
+          <div class="mt-2 flex flex-wrap items-center gap-2">
             <button class="btn-outline" @click="showDetail(q)">查看答案解析</button>
             <button class="btn-ghost" @click="toMistake(q)">收进错题本</button>
+            <button class="btn-ghost" :class="favIds.includes(q.id) ? 'text-amber-500' : ''" @click="favQuestion(q)">{{ favIds.includes(q.id) ? '★ 已收藏' : '☆ 收藏' }}</button>
+            <button class="btn-ghost text-brand-600" @click="setPickerFor = setPickerFor === q.id ? null : q.id">{{ setPickerFor === q.id ? '收起题单' : '加入题单' }}</button>
+          </div>
+          <div v-if="setPickerFor === q.id" class="mt-1 flex flex-wrap items-center gap-1.5 rounded-control bg-ink-50 p-2">
+            <button v-for="s in qsets" :key="s.id" class="tag-brand cursor-pointer" @click="addToSet(s.id, q.id)">{{ s.name }}</button>
+            <span v-if="!qsets.length" class="text-[11px] text-ink-400">还没有题单，先到「我的题单」新建。</span>
           </div>
           <div v-if="detailId === q.id" class="mt-2 rounded-control bg-ink-50 p-2.5 text-[12px] leading-6 text-ink-600">
             答案：<b class="text-brand-700">{{ answerText(q, qDetail.answer) }}</b><br />解析：{{ qDetail.analysis }}
@@ -74,6 +81,7 @@
         </label>
         <button class="btn-primary" @click="compose">智能组卷</button>
         <button v-if="paper.length" class="btn-outline" @click="gradePaper">交卷判分</button>
+        <button v-if="paper.length" class="btn-outline" @click="archivePaper">存档这张卷</button>
         <button v-if="paper.length" class="btn-ghost" @click="showAnswer = !showAnswer">{{ showAnswer ? '隐藏答案卷' : '查看答案卷' }}</button>
         <span v-if="paperResult" class="text-[14px] font-semibold" :class="paperResult.score >= 60 ? 'text-emerald-600' : 'text-rose-500'">
           得分 {{ paperResult.score }}（对 {{ paperResult.correct }} / 错 {{ paperResult.wrong }}）
@@ -117,6 +125,59 @@
           <span class="font-semibold">{{ graded[q.id].correct ? '✓ 答对了，看讲解：' : '解析：' }}</span>{{ graded[q.id].analysis || '本题暂无解析' }}
         </div>
       </div>
+
+      <div class="card p-4">
+        <h3 class="mb-2 flex items-center gap-2 text-[13px] font-semibold text-ink-700">已存档试卷（{{ archives.length }}）
+          <button class="btn-outline px-2 py-0.5 text-[11px]" @click="loadArchives">刷新</button>
+        </h3>
+        <div v-if="!archives.length" class="text-[12px] leading-6 text-ink-400">还没存档：组卷交卷后点「存档这张卷」，以后可在这里重做。</div>
+        <div v-for="a in archives" :key="a.id" class="flex flex-wrap items-center gap-2 border-b border-ink-100 py-1.5 last:border-0">
+          <span class="text-[13px] font-medium text-ink-800">{{ a.title }}</span>
+          <span class="tag">{{ a.stage }} · {{ a.subject }} · {{ a.total }}题</span>
+          <span class="text-[11px]" :class="a.last_score === null ? 'text-ink-300' : a.last_score >= 60 ? 'text-emerald-600' : 'text-rose-500'">{{ a.last_score === null ? '未交卷' : a.last_score + '分' }}</span>
+          <button class="btn-outline ml-auto px-2 py-0.5 text-[11px]" @click="redoArchive(a.id)">重做</button>
+          <button class="btn-danger px-2 py-0.5 text-[11px]" @click="removeArchive(a.id)">删除</button>
+        </div>
+      </div>
+    </template>
+
+    <!-- 我的题单（F525） -->
+    <template v-else-if="tab === 'sets'">
+      <p class="rounded-lg bg-ink-50 px-3 py-2 text-[12px] leading-5 text-ink-500">
+        把常错、常考的题攒成自己的题单：下面新建一个题单（如「期中冲刺」），
+        到「题库浏览」每张题卡点「加入题单」选它；点开题单即可逐题练习、查看答案解析，不要的题单可删除。
+      </p>
+      <div class="card flex flex-wrap items-center gap-2 p-4">
+        <input v-model="newSetName" class="input w-56" placeholder="新题单名称，如 期中冲刺" @keyup.enter="createSet" />
+        <button class="btn-primary" @click="createSet">新建题单</button>
+        <span class="text-[12px] text-ink-400">共 {{ qsets.length }} 个题单</span>
+      </div>
+      <div v-if="!qsets.length" class="card grid h-32 place-items-center px-6 text-center text-[13px] leading-6 text-ink-400">
+        还没有题单：上面填个名称点「新建题单」，然后去题库浏览把题加进来。
+      </div>
+      <div v-for="s in qsets" :key="s.id" class="card p-4">
+        <div class="flex flex-wrap items-center gap-2">
+          <h3 class="text-[14px] font-semibold text-ink-800">{{ s.name }}</h3>
+          <span class="tag-brand">{{ s.count }} 题</span>
+          <span class="text-[11px] text-ink-400">{{ s.created_at }}</span>
+          <button class="btn-outline ml-auto px-2 py-0.5 text-[11px]" @click="openSet(s)">{{ openSetId === s.id ? '收起' : '打开练习' }}</button>
+          <button class="btn-danger px-2 py-0.5 text-[11px]" @click="removeSet(s.id)">删除</button>
+        </div>
+        <div v-if="openSetId === s.id" class="mt-3 space-y-2">
+          <div v-if="!setDetail.list.length" class="text-[12px] text-ink-400">题单还是空的：去题库浏览点「加入题单」。</div>
+          <div v-for="(q, qi) in setDetail.list" :key="q.id" class="rounded-control border border-ink-100 p-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="tag-brand">{{ qi + 1 }}</span><span class="tag">{{ typeName(q.type) }}</span><span class="tag">难度 {{ q.difficulty }}</span>
+            </div>
+            <p class="mt-1 text-[13px] leading-6 text-ink-800">{{ q.stem }}</p>
+            <div v-if="q.options" class="mt-1 grid gap-0.5 md:grid-cols-2">
+              <div v-for="(o, oi) in q.options" :key="oi" class="text-[12px] text-ink-600">{{ String.fromCharCode(65 + oi) }}. {{ o }}</div>
+            </div>
+            <div class="mt-1 text-[12px] text-ink-600">答案：<b class="text-brand-700">{{ answerText(q, q.answer) }}</b></div>
+            <div v-if="q.analysis" class="text-[11px] text-ink-400">解析：{{ q.analysis }}</div>
+          </div>
+        </div>
+      </div>
     </template>
 
     <!-- 错题本 -->
@@ -139,6 +200,12 @@
         <button class="btn-outline" @click="onlyUnmastered = !onlyUnmastered">{{ onlyUnmastered ? '显示全部' : '只看未掌握' }}</button>
         <button class="btn-outline" @click="loadMistakes">刷新</button>
       </div>
+      <div v-if="causeSummary.causes.length" class="card p-3">
+        <div class="mb-1 text-[12px] font-semibold text-ink-700">错因分布（{{ causeSummary.total }} 道已归类 · {{ causeSummary.unset }} 道未归类）</div>
+        <div class="flex flex-wrap gap-2">
+          <span v-for="c in causeSummary.causes" :key="c.key" class="tag">{{ c.name }} {{ c.count }}</span>
+        </div>
+      </div>
       <div v-for="m in filteredMistakes" :key="m.id" class="card p-4" :class="m.mastered ? 'opacity-60' : ''">
         <div class="flex flex-wrap items-center gap-2">
           <span class="tag-brand">{{ m.subject }}</span><span class="tag">{{ typeName(m.question_type) }}</span>
@@ -147,6 +214,13 @@
         <p class="mt-2 text-[13px] text-ink-800">{{ m.stem }}</p>
         <div class="mt-1 text-[12px] text-ink-500">正确答案：{{ m.answer }}　我的答案：{{ m.user_answer }}</div>
         <div v-if="m.analysis" class="text-[12px] text-ink-400">解析：{{ m.analysis }}</div>
+        <div class="mt-2 flex flex-wrap items-center gap-2 text-[12px]">
+          <span class="text-ink-500">错因归类：</span>
+          <select :value="causeMap[m.id] || ''" @change="setCause(m.id, $event.target.value)" class="input h-8 w-36">
+            <option value="">未归类</option>
+            <option v-for="c in CAUSE_OPTS" :key="c.key" :value="c.key">{{ c.name }}</option>
+          </select>
+        </div>
         <div class="mt-2 flex gap-2">
           <button class="btn-outline" @click="toggleMistake(m.id)">{{ m.mastered ? '标为未掌握' : '订正掌握' }}</button>
           <button class="btn-danger" @click="removeMistake(m.id)">删除</button>
@@ -167,7 +241,7 @@ import { learnApi } from '../../../api'
 import { useAppStore } from '../../../stores/app'
 
 const app = useAppStore()
-const tabs = [{ v: 'bank', label: '题库浏览' }, { v: 'paper', label: '智能组卷' }, { v: 'mistake', label: '错题本' }]
+const tabs = [{ v: 'bank', label: '题库浏览' }, { v: 'paper', label: '智能组卷' }, { v: 'sets', label: '我的题单' }, { v: 'mistake', label: '错题本' }]
 const tab = ref('bank')
 const subjectOpts = [
   { v: 'chinese', label: '语文' }, { v: 'math', label: '数学' }, { v: 'english', label: '英语' },
@@ -205,6 +279,49 @@ async function toMistake(q) {
   app.toastMsg('已收进错题本（含答案与解析）', 'success')
 }
 
+// F536 题目收藏
+const favIds = ref([])
+const onlyFav = ref(false)
+const displayBank = computed(() => onlyFav.value ? bank.value.filter((q) => favIds.value.includes(q.id)) : bank.value)
+async function loadFavIds() { favIds.value = (await learnApi.questionFavorites()).ids }
+async function favQuestion(q) {
+  await learnApi.toggleQuestionFavorite(q.id)
+  await loadFavIds()
+}
+
+// F525 自定义题单
+const qsets = ref([])
+const newSetName = ref('')
+const openSetId = ref(null)
+const setDetail = ref({ list: [] })
+const setPickerFor = ref(null)
+async function loadSets() { qsets.value = (await learnApi.questionSets()).list }
+async function createSet() {
+  if (!newSetName.value.trim()) return
+  await learnApi.saveQuestionSet({ name: newSetName.value, question_ids: [] })
+  newSetName.value = ''
+  await loadSets()
+  app.toastMsg('题单已新建', 'success')
+}
+async function openSet(s) {
+  if (openSetId.value === s.id) { openSetId.value = null; return }
+  openSetId.value = s.id
+  setDetail.value = await learnApi.questionSet(s.id)
+}
+async function removeSet(id) {
+  await learnApi.delQuestionSet(id)
+  await loadSets()
+}
+async function addToSet(sid, qid) {
+  const detail = await learnApi.questionSet(sid)
+  const ids = detail.question_ids.includes(qid) ? detail.question_ids : [...detail.question_ids, qid]
+  await learnApi.updateQuestionSet({ id: sid, question_ids: ids })
+  await loadSets()
+  setPickerFor.value = null
+  if (openSetId.value === sid) setDetail.value = await learnApi.questionSet(sid)
+  app.toastMsg('已加入题单', 'success')
+}
+
 const p = reactive({ stage: 'junior', subject: 'math', count: 5 })
 const paper = ref([])
 const answerSheet = ref([])
@@ -215,7 +332,7 @@ const showAnswer = ref(false)
 async function compose() {
   Object.keys(ans).forEach((k) => delete ans[k])
   Object.keys(graded).forEach((k) => delete graded[k])
-  paperResult.value = null; showAnswer.value = false
+  paperResult.value = null; showAnswer.value = false; currentArchiveId.value = null
   const data = await learnApi.paperCompose(p)
   paper.value = data.paper
   answerSheet.value = data.answer_sheet
@@ -225,7 +342,40 @@ async function gradePaper() {
   const data = await learnApi.paperGrade(answers)
   data.details.forEach((d) => (graded[d.id] = d))
   paperResult.value = data
+  if (currentArchiveId.value) {
+    await learnApi.updatePaperArchive({ id: currentArchiveId.value, last_score: data.score })
+    await loadArchives()
+  }
   app.toastMsg(`判分完成：${data.score} 分`, data.score >= 60 ? 'success' : 'warn')
+}
+// F537 试卷存档与重做
+const archives = ref([])
+const currentArchiveId = ref(null)
+async function loadArchives() { archives.value = (await learnApi.paperArchives()).list }
+async function archivePaper() {
+  const subjCN = subjectOpts.find((s) => s.v === p.subject)?.label || p.subject
+  const title = `${p.stage}·${subjCN} ${paper.value.length}题 ${new Date().toLocaleDateString()}`
+  const r = await learnApi.savePaperArchive({
+    title, stage: p.stage, subject: p.subject, total: paper.value.length,
+    payload: { paper: paper.value, answer_sheet: answerSheet.value },
+  })
+  currentArchiveId.value = r.id
+  await loadArchives()
+  app.toastMsg('试卷已存档', 'success')
+}
+async function redoArchive(id) {
+  const d = await learnApi.paperArchive(id)
+  paper.value = d.payload.paper
+  answerSheet.value = d.payload.answer_sheet
+  Object.keys(ans).forEach((k) => delete ans[k])
+  Object.keys(graded).forEach((k) => delete graded[k])
+  paperResult.value = null; showAnswer.value = false
+  currentArchiveId.value = id
+  app.toastMsg('已载入存档卷，可重新作答', 'success')
+}
+async function removeArchive(id) {
+  await learnApi.delPaperArchive(id)
+  await loadArchives()
 }
 
 const mistakes = ref([])
@@ -235,14 +385,39 @@ const filteredMistakes = computed(() => {
   const list = onlyUnmastered.value ? mistakes.value.filter(m => !m.mastered) : mistakes.value
   return [...list].sort((a, b) => Number(a.mastered) - Number(b.mastered))
 })
-async function loadMistakes() { mistakes.value = (await learnApi.mistakes()).list }
+// F545 错因归类
+const CAUSE_OPTS = [
+  { key: 'careless', name: '粗心失误' },
+  { key: 'concept', name: '概念不清' },
+  { key: 'review', name: '审题失误' },
+  { key: 'method', name: '方法不会' },
+  { key: 'memory', name: '记忆错误' },
+]
+const causeMap = ref({})
+const causeSummary = ref({ causes: [], total: 0, unset: 0 })
+async function loadCauseSummary() { causeSummary.value = await learnApi.mistakeCause() }
+async function loadMistakes() {
+  mistakes.value = (await learnApi.mistakes()).list
+  await loadCauseSummary()
+}
+async function setCause(id, cause) {
+  await learnApi.setMistakeCause({ id, cause })
+  causeMap.value[id] = cause
+  await loadCauseSummary()
+}
 async function toggleMistake(id) { await learnApi.toggleMistake(id); await loadMistakes() }
 async function removeMistake(id) { await learnApi.delMistake(id); await loadMistakes() }
 
 async function switchTab(v) {
   tab.value = v
+  if (v === 'sets') await loadSets()
   if (v === 'mistake') await loadMistakes()
 }
 
-onMounted(loadBank)
+onMounted(async () => {
+  await loadBank()
+  await loadFavIds()
+  await loadSets()
+  await loadArchives()
+})
 </script>

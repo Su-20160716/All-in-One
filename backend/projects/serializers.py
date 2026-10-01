@@ -1,7 +1,18 @@
 """看板模块序列化"""
 from rest_framework import serializers
 
-from projects.models import Board, CardComment, Project, ProjectActivity, Subtask, TaskCard, WorkLog
+from projects.models import (
+    AcceptanceItem,
+    Board,
+    CardComment,
+    CardTemplate,
+    Milestone,
+    Project,
+    ProjectActivity,
+    Subtask,
+    TaskCard,
+    WorkLog,
+)
 
 
 class BoardSerializer(serializers.ModelSerializer):
@@ -9,10 +20,30 @@ class BoardSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Board
-        fields = ["id", "project", "name", "sort_order", "created_at", "card_count"]
+        fields = ["id", "project", "name", "sort_order", "wip_limit", "created_at", "card_count"]
 
     def get_card_count(self, obj):
         return obj.cards.count()
+
+
+class MilestoneSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Milestone
+        fields = ["id", "project", "name", "description", "due_date", "status", "created_at", "updated_at"]
+
+
+class CardTemplateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CardTemplate
+        fields = ["id", "name", "title", "description", "priority", "labels", "story_points",
+                  "estimated_minutes", "created_at"]
+        read_only_fields = ["created_at"]
+
+
+class AcceptanceItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AcceptanceItem
+        fields = ["id", "card", "content", "is_done", "sort_order", "created_at"]
 
 
 class SubtaskSerializer(serializers.ModelSerializer):
@@ -56,17 +87,34 @@ class TaskCardSerializer(serializers.ModelSerializer):
     subtask_done = serializers.SerializerMethodField()
     progress = serializers.SerializerMethodField()
     spent_minutes = serializers.SerializerMethodField()
+    code = serializers.SerializerMethodField()
+    is_blocked = serializers.SerializerMethodField()
+    dod_total = serializers.SerializerMethodField()
+    dod_done = serializers.SerializerMethodField()
 
     class Meta:
         model = TaskCard
         fields = [
-            "id", "board", "board_name", "title", "description", "priority", "status",
+            "id", "board", "board_name", "number", "code", "title", "description", "priority", "status",
             "assignees", "assignee_ids", "assignee_names", "labels", "due_date", "story_points",
+            "estimated_minutes", "is_archived", "is_blocked",
             "sort_order", "started_at", "completed_at", "created_by",
             "comment_count", "is_overdue", "subtask_total", "subtask_done", "progress",
-            "spent_minutes", "created_at", "updated_at",
+            "dod_total", "dod_done", "spent_minutes", "created_at", "updated_at",
         ]
         read_only_fields = ["created_by", "created_at", "updated_at", "started_at", "completed_at"]
+
+    def get_code(self, obj):
+        return f"C-{obj.number}" if obj.number else ""
+
+    def get_is_blocked(self, obj):
+        return obj.dependencies.filter(blocked_by__status__in=["todo", "doing"]).exists()
+
+    def get_dod_total(self, obj):
+        return obj.acceptance_items.count()
+
+    def get_dod_done(self, obj):
+        return obj.acceptance_items.filter(is_done=True).count()
 
     def get_assignee_ids(self, obj):
         return list(obj.assignees.values_list("id", flat=True))

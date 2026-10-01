@@ -33,6 +33,7 @@ class Board(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="boards", verbose_name="项目")
     name = models.CharField(max_length=60, verbose_name="列名")
     sort_order = models.IntegerField(default=0, verbose_name="排序")
+    wip_limit = models.IntegerField(default=0, verbose_name="在制品上限(0=不限)")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
 
     class Meta:
@@ -59,6 +60,9 @@ class TaskCard(models.Model):
     labels = models.JSONField(default=list, blank=True, verbose_name="标签")
     due_date = models.DateField(null=True, blank=True, verbose_name="截止日期")
     story_points = models.IntegerField(default=0, verbose_name="故事点/工作量")
+    estimated_minutes = models.IntegerField(default=0, verbose_name="预估工时(分钟)")
+    number = models.IntegerField(null=True, blank=True, db_index=True, verbose_name="项目内编号")
+    is_archived = models.BooleanField(default=False, verbose_name="已归档")
     sort_order = models.IntegerField(default=0, verbose_name="列内排序")
     started_at = models.DateTimeField(null=True, blank=True, verbose_name="开始时间")
     completed_at = models.DateTimeField(null=True, blank=True, verbose_name="完成时间")
@@ -76,6 +80,31 @@ class TaskCard(models.Model):
 
     def __str__(self):
         return self.title
+
+    @property
+    def code(self):
+        """F592 卡片编号展示：C-1 / C-2"""
+        return f"C-{self.number}" if self.number else ""
+
+    def save(self, *args, **kwargs):
+        # F592 首次保存时按项目分配自增编号（仅当为空，避免额外查询）
+        if self.number is None and self.board_id:
+            from django.db.models import Max
+
+            project_id = getattr(self.board, "project_id", None)
+            if project_id:
+                m = TaskCard.objects.filter(board__project_id=project_id).aggregate(x=Max("number"))["x"] or 0
+                self.number = m + 1
+        # 归一化 due_date：接口传入的是 YYYY-MM-DD 字符串，Django 不会在保存时转成 date，
+        # 直接留在实例上会让后续比较/序列化报错，这里统一转换。
+        if isinstance(self.due_date, str):
+            from datetime import datetime as _dt
+
+            try:
+                self.due_date = _dt.strptime(self.due_date[:10], "%Y-%m-%d").date()
+            except ValueError:
+                self.due_date = None
+        super().save(*args, **kwargs)
 
 
 class Subtask(models.Model):
@@ -178,3 +207,85 @@ class BoardShareLink(models.Model):
         if self.expire_at and self.expire_at < timezone.now():
             return True
         return False
+
+
+# ===========================================================================
+# 看板增强（F583–F598）：依赖、里程碑、卡片模板、验收清单(DoD)
+# ===========================================================================
+
+class CardDependency(models.Model):
+    """F588 卡片依赖：card 被 blocked_by 阻塞"""
+
+    card = models.ForeignKey(TaskCard, on_delete=models.CASCADE, related_name="dependencies", verbose_name="卡片")
+    blocked_by = models.ForeignKey(TaskCard, on_delete=models.CASCADE, related_name="blocks", verbose_name="被依赖卡片")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "卡片依赖"
+        verbose_name_plural = "卡片依赖"
+        unique_together = [("card", "blocked_by")]
+
+    def __str__(self):
+        return f"{self.card_id} <- {self.blocked_by_id}"
+
+
+class Milestone(models.Model):
+    """F589 里程碑"""
+
+    STATUS_CHOICES = [("planned", "计划中"), ("doing", "进行中"), ("done", "已完成")]
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="milestones", verbose_name="项目")
+    name = models.CharField(max_length=120, verbose_name="名称")
+    description = models.TextField(blank=True, verbose_name="描述")
+    due_date = models.DateField(null=True, blank=True, verbose_name="目标日期")
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="planned", verbose_name="状态")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        verbose_name = "里程碑"
+        verbose_name_plural = "里程碑"
+        ordering = ["due_date", "id"]
+
+    def __str__(self):
+        return self.name
+
+
+class CardTemplate(models.Model):
+    """F594 卡片模板（保存卡片为可复用模板）"""
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="card_templates", verbose_name="所有者")
+    name = models.CharField(max_length=200, verbose_name="模板名")
+    title = models.CharField(max_length=200, verbose_name="卡片标题")
+    description = models.TextField(blank=True, verbose_name="描述")
+    priority = models.CharField(max_length=10, default="medium", verbose_name="优先级")
+    labels = models.JSONField(default=list, blank=True, verbose_name="标签")
+    story_points = models.IntegerField(default=0, verbose_name="故事点")
+    estimated_minutes = models.IntegerField(default=0, verbose_name="预估工时(分钟)")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "卡片模板"
+        verbose_name_plural = "卡片模板"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.name
+
+
+class AcceptanceItem(models.Model):
+    """F595 验收清单（Definition of Done）条目"""
+
+    card = models.ForeignKey(TaskCard, on_delete=models.CASCADE, related_name="acceptance_items", verbose_name="卡片")
+    content = models.CharField(max_length=300, verbose_name="验收项")
+    is_done = models.BooleanField(default=False, verbose_name="已满足")
+    sort_order = models.IntegerField(default=0, verbose_name="排序")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "验收清单项"
+        verbose_name_plural = "验收清单项"
+        ordering = ["sort_order", "id"]
+
+    def __str__(self):
+        return self.content

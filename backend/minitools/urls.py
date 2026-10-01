@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""minitools 路由：19 大家族 × 320 个纯函数工具 + catalog = 321 个 URL。"""
+"""minitools 路由：26 大家族 × 374 个纯函数工具 + catalog = 375 个 URL。"""
 from django.urls import path
 
 from .common import endpoint, endpoint_index, ok
@@ -22,6 +22,14 @@ from . import tools_textx as tx
 from . import tools_business as biz
 from . import tools_fmt as fmt
 from . import tools_funx as funx
+# ---- v8 扩展家族（dsh 2026-10-01，F693–F746，只增不改）----
+from . import tools_music as music
+from . import tools_board as board
+from . import tools_wordplay as wordplay
+from . import tools_life as life
+from . import tools_trivia as trivia
+from . import tools_statsx as statsx
+from . import tools_lab as lab
 
 SUBSYSTEMS = [
     ("text", "文本处理", [
@@ -129,6 +137,34 @@ SUBSYSTEMS = [
     ("funx", "趣味扩展", [
         "acrostic", "num-homophone", "birthday-numerology", "wuge", "dream",
         "lucky-number", "mbti", "almanac",
+    ]),
+    # ---- v8 扩展家族（dsh 2026-10-01，F693–F746）----
+    ("music", "音乐乐理", [
+        "interval", "scale", "bpm-duration", "chord", "transpose",
+        "key-signature", "time-signature", "bars",
+    ]),
+    ("board", "棋牌判定", [
+        "tictactoe", "gomoku", "sudoku-check", "sudoku-gen", "twenty-four", "poker-hand",
+    ]),
+    ("wordplay", "中文文字", [
+        "stroke", "radical", "pinyin-full", "polyphone", "antonym",
+        "char-riddle", "couplet-tone", "copybook",
+    ]),
+    ("life", "生活计算", [
+        "paint-usage", "taxi-fare", "carpool-split", "red-packet",
+        "table-seating", "wedding-budget", "fuel-cost", "tile-layout",
+    ]),
+    ("trivia", "百科查询", [
+        "today-in-history", "quote", "proverb", "acronym", "holiday-countdown",
+        "dynasty-era", "postcode-area", "birthday-celeb", "term-glossary", "serial-parse",
+    ]),
+    ("statsx", "统计进阶", [
+        "correlation", "linreg", "percentile", "iqr",
+        "moving-average", "frequency-bins", "normal-sample", "effect-size",
+    ]),
+    ("lab", "实验台计算", [
+        "dilution", "titration", "concentration-convert",
+        "standard-solution", "sig-figs", "temp-table",
     ]),
 ]
 
@@ -473,6 +509,68 @@ VIEWS = {
     "funx/lucky-number/": funx.lucky_number,
     "funx/mbti/": funx.mbti,
     "funx/almanac/": funx.almanac,
+    # ---- v8 扩展家族（dsh 2026-10-01，F693–F746，54 个工具）----
+    # music (8) F693–F700
+    "music/interval/": music.interval,
+    "music/scale/": music.scale,
+    "music/bpm-duration/": music.bpm_duration,
+    "music/chord/": music.chord,
+    "music/transpose/": music.transpose,
+    "music/key-signature/": music.key_signature,
+    "music/time-signature/": music.time_signature,
+    "music/bars/": music.bars,
+    # board (6) F701–F706
+    "board/tictactoe/": board.tictactoe,
+    "board/gomoku/": board.gomoku,
+    "board/sudoku-check/": board.sudoku_check,
+    "board/sudoku-gen/": board.sudoku_gen,
+    "board/twenty-four/": board.twenty_four,
+    "board/poker-hand/": board.poker_hand,
+    # wordplay (8) F707–F714
+    "wordplay/stroke/": wordplay.stroke,
+    "wordplay/radical/": wordplay.radical,
+    "wordplay/pinyin-full/": wordplay.pinyin_full,
+    "wordplay/polyphone/": wordplay.polyphone,
+    "wordplay/antonym/": wordplay.antonym,
+    "wordplay/char-riddle/": wordplay.char_riddle,
+    "wordplay/couplet-tone/": wordplay.couplet_tone,
+    "wordplay/copybook/": wordplay.copybook,
+    # life (8) F715–F722
+    "life/paint-usage/": life.paint_usage,
+    "life/taxi-fare/": life.taxi_fare,
+    "life/carpool-split/": life.carpool_split,
+    "life/red-packet/": life.red_packet,
+    "life/table-seating/": life.table_seating,
+    "life/wedding-budget/": life.wedding_budget,
+    "life/fuel-cost/": life.fuel_cost,
+    "life/tile-layout/": life.tile_layout,
+    # trivia (10) F723–F732
+    "trivia/today-in-history/": trivia.today_in_history,
+    "trivia/quote/": trivia.quote,
+    "trivia/proverb/": trivia.proverb,
+    "trivia/acronym/": trivia.acronym,
+    "trivia/holiday-countdown/": trivia.holiday_countdown,
+    "trivia/dynasty-era/": trivia.dynasty_era,
+    "trivia/postcode-area/": trivia.postcode_area,
+    "trivia/birthday-celeb/": trivia.birthday_celeb,
+    "trivia/term-glossary/": trivia.term_glossary,
+    "trivia/serial-parse/": trivia.serial_parse,
+    # statsx (8) F733–F740
+    "statsx/correlation/": statsx.correlation,
+    "statsx/linreg/": statsx.linreg,
+    "statsx/percentile/": statsx.percentile,
+    "statsx/iqr/": statsx.iqr,
+    "statsx/moving-average/": statsx.moving_average,
+    "statsx/frequency-bins/": statsx.frequency_bins,
+    "statsx/normal-sample/": statsx.normal_sample,
+    "statsx/effect-size/": statsx.effect_size,
+    # lab (6) F741–F746
+    "lab/dilution/": lab.dilution,
+    "lab/titration/": lab.titration,
+    "lab/concentration-convert/": lab.concentration_convert,
+    "lab/standard-solution/": lab.standard_solution,
+    "lab/sig-figs/": lab.sig_figs,
+    "lab/temp-table/": lab.temp_table,
 }
 
 
@@ -493,4 +591,4 @@ urlpatterns = [path("catalog/", minitools_catalog, name="minitools-catalog")]
 for _route, _view in VIEWS.items():
     urlpatterns.append(path(_route, _view))
 
-assert len(urlpatterns) == 321, f"minitools 接口数应为 321，实际 {len(urlpatterns)}"
+assert len(urlpatterns) == 375, f"minitools 接口数应为 375，实际 {len(urlpatterns)}"

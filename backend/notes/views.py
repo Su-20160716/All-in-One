@@ -1628,3 +1628,235 @@ class NoteFolderDetailView(APIView):
         moved = folder.notes.filter(is_deleted=False).count()
         folder.delete()
         return Response({"message": f"文件夹已删除（{moved} 篇笔记回到未分组）", "notes_moved": moved})
+
+
+# =====================================================================
+# ===== 以下为 F570 / F571 / F577 / F578 的补充实现（只增不改） =========
+# 说明：既有 NoteOutlineView（无行号）/ PATCH 置顶 / 详情阅读分钟数保持不变，
+#      这里新增独立端点，避免改动任何既有接口的响应结构。
+# =====================================================================
+
+
+def _anchor_for(title: str, index: int) -> str:
+    """为标题生成稳定锚点 id（供阅读模式目录跳转）"""
+    s = re.sub(r"[^\w\u4e00-\u9fff]+", "-", (title or "").strip().lower()).strip("-")
+    return f"h{index}-{s}" if s else f"h{index}"
+
+
+def extract_outline_with_lines(text: str):
+    """F570 提取带行号的大纲（行号从 0 开始，对应正文 split('\\n') 下标）"""
+    outline = []
+    for idx, line in enumerate((text or "").split("\n")):
+        m = re.match(r"^(#{1,6})\s+(.*)$", line.strip())
+        if not m:
+            continue
+        outline.append({
+            "level": len(m.group(1)),
+            "title": m.group(2).strip(),
+            "line_no": idx,
+            "anchor": _anchor_for(m.group(2).strip(), len(outline)),
+        })
+    return outline
+
+
+class NoteOutlineLinesView(APIView):
+    """F570 大纲目录点击跳转：返回带行号的标题目录
+
+    GET /api/notes/<pk>/outline-lines/
+    前端可据 line_no 精确定位到正文对应行（旧 /outline/ 保持不变）
+    """
+
+    def get(self, request, pk):
+        note = _get_note(request.user, pk, include_deleted=True)
+        if not note:
+            return _nb("笔记不存在", 404)
+        outline = extract_outline_with_lines(note.content)
+        return Response({
+            "note_id": note.id, "title": note.title,
+            "outline": outline, "total": len(outline),
+            "line_count": len((note.content or "").split("\n")),
+        })
+
+
+class NotePinView(APIView):
+    """F571 笔记置顶：显式置顶 / 取消置顶（不改动既有 PATCH 行为）
+
+    POST /api/notes/<pk>/pin/        切换置顶
+    POST /api/notes/<pk>/pin/  {"pinned": true|false}  显式指定
+    """
+
+    def post(self, request, pk):
+        note = _get_note(request.user, pk, include_deleted=True)
+        if not note:
+            return _nb("笔记不存在", 404)
+        if "pinned" in request.data:
+            note.is_pinned = bool(request.data["pinned"])
+        else:
+            note.is_pinned = not note.is_pinned
+        note.save(update_fields=["is_pinned", "updated_at"])
+        return Response({"message": "已置顶" if note.is_pinned else "已取消置顶",
+                         "id": note.id, "is_pinned": note.is_pinned})
+
+
+def _parse_reading_blocks(text: str):
+    """F577 把 Markdown 正文解析为阅读态区块（标题/段落/列表/引用/代码/分割线）"""
+    lines = (text or "").split("\n")
+    blocks = []
+    toc = []
+    in_code = False
+    code_buf = []
+    para_buf = []
+    para_start = 0
+
+    def flush_para():
+        if para_buf:
+            blocks.append({"type": "paragraph", "line_no": para_start,
+                           "text": "\n".join(para_buf).strip()})
+            para_buf.clear()
+
+    for idx, raw in enumerate(lines):
+        line = raw.rstrip()
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            if in_code:
+                blocks.append({"type": "code", "line_no": idx - len(code_buf),
+                               "text": "\n".join(code_buf), "lang": ""})
+                code_buf = []
+                in_code = False
+            else:
+                flush_para()
+                in_code = True
+            continue
+        if in_code:
+            code_buf.append(line)
+            continue
+        if not stripped:
+            flush_para()
+            continue
+        h = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if h:
+            flush_para()
+            title = h.group(2).strip()
+            anchor = _anchor_for(title, len(toc))
+            blocks.append({"type": "heading", "level": len(h.group(1)),
+                           "text": title, "line_no": idx, "anchor": anchor})
+            toc.append({"level": len(h.group(1)), "title": title,
+                        "line_no": idx, "anchor": anchor})
+            continue
+        if re.match(r"^(-{3,}|\*{3,}|_{3,})$", stripped):
+            flush_para()
+            blocks.append({"type": "hr", "line_no": idx})
+            continue
+        if re.match(r"^([-*+]|\d+[.)])\s+", stripped):
+            flush_para()
+            ordered = bool(re.match(r"^\d+[.)]\s+", stripped))
+            body = re.sub(r"^([-*+]|\d+[.)])\s+", "", stripped)
+            blocks.append({"type": "list_item", "line_no": idx,
+                           "text": body, "ordered": ordered,
+                           "checked": None})
+            continue
+        if stripped.startswith(">"):
+            flush_para()
+            blocks.append({"type": "quote", "line_no": idx,
+                           "text": stripped.lstrip(">").strip()})
+            continue
+        if not para_buf:
+            para_start = idx
+        para_buf.append(stripped)
+    if in_code and code_buf:
+        blocks.append({"type": "code", "line_no": len(lines) - len(code_buf),
+                       "text": "\n".join(code_buf), "lang": ""})
+    flush_para()
+    return blocks, toc
+
+
+class NoteReadingView(APIView):
+    """F577 阅读模式：返回排版态所需数据（区块 + 目录 + 阅读时长）
+
+    GET /api/notes/<pk>/reading/
+    """
+
+    def get(self, request, pk):
+        note = _get_note(request.user, pk, include_deleted=True)
+        if not note:
+            return _nb("笔记不存在", 404)
+        content = note.content or ""
+        blocks, toc = _parse_reading_blocks(content)
+        words = note.words or count_words(content)
+        images = len(re.findall(r"!\[[^\]]*\]\([^)]*\)", content))
+        links = len(re.findall(r"(?<!!)\[[^\]]+\]\([^)]*\)", content))
+        return Response({
+            "note_id": note.id, "title": note.title, "content": content,
+            "words": words, "char_count": len(content),
+            "reading_minutes": max(1, round(words / 300)) if words else 0,
+            "paragraph_count": sum(1 for b in blocks if b["type"] == "paragraph"),
+            "heading_count": len(toc), "image_count": images, "link_count": links,
+            "block_count": len(blocks), "blocks": blocks, "toc": toc,
+        })
+
+
+def _word_data(item):
+    return {"id": item.id, "word": item.word, "phonetic": item.phonetic,
+            "meaning": item.meaning, "mastered": item.mastered,
+            "source": item.source, "created_at": item.created_at}
+
+
+class NoteWordbookView(APIView):
+    """F578 选词存生词：把笔记中选中的词存入学习区生词本
+
+    只读引用 learning.models.WordbookItem，不改动 learning app。
+    POST /api/notes/wordbook/  {"word": "...", "meaning": "", "phonetic": "", "note_id": 1}
+    GET  /api/notes/wordbook/?q= 列出本人已存生词
+    """
+
+    def get(self, request):
+        try:
+            from learning.models import WordbookItem
+        except Exception:
+            return _nb("学习区生词本不可用", 503)
+        qs = WordbookItem.objects.filter(owner=request.user)
+        q = (request.query_params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(Q(word__icontains=q) | Q(meaning__icontains=q))
+        try:
+            limit = _qp_int(request.query_params, "limit", 200, lo=1, hi=1000)
+        except ValueError as e:
+            return _nb(str(e))
+        rows = list(qs[:limit])
+        return Response({"list": [_word_data(w) for w in rows], "total": qs.count()})
+
+    def post(self, request):
+        try:
+            from learning.models import WordbookItem
+        except Exception:
+            return _nb("学习区生词本不可用", 503)
+        word = str(request.data.get("word") or "").strip()
+        if not word:
+            return _nb("word 不能为空")
+        if len(word) > 64:
+            return _nb("word 过长（最多 64 字符）")
+        meaning = str(request.data.get("meaning") or "")[:255]
+        phonetic = str(request.data.get("phonetic") or "")[:48]
+        note_id = request.data.get("note_id")
+        if note_id not in (None, "", "null"):
+            try:
+                note_id = int(note_id)
+            except (TypeError, ValueError):
+                return _nb("note_id 必须是整数")
+            if not _get_note(request.user, note_id, include_deleted=True):
+                return _nb("笔记不存在", 404)
+        item, created = WordbookItem.objects.get_or_create(
+            owner=request.user, word=word,
+            defaults={"meaning": meaning, "phonetic": phonetic, "source": "note"},
+        )
+        if not created and (meaning or phonetic):
+            if meaning:
+                item.meaning = meaning
+            if phonetic:
+                item.phonetic = phonetic
+            item.save(update_fields=["meaning", "phonetic"])
+        return Response({
+            "message": "已存入生词本" if created else "生词已存在",
+            "created": created, "item": _word_data(item),
+            "total": WordbookItem.objects.filter(owner=request.user).count(),
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)

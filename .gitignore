@@ -10,18 +10,34 @@ backend/venv/
 backend/staticfiles/
 backend/media/
 backend/db.sqlite3
+backend/_*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
 backend/*.log
 
 # ---- Node / 前端 ----
 frontend/node_modules/
 frontend/dist/
 
-# ---- 临时文件 ----
+# ---- 临时文件 / 调试产物 ----
 *.tmp
 .DS_Store
+backend/_points_dump.json
+backend/_points_*.txt
+backend/.chk*.txt
+backend/.mig*.txt
+backend/_logic_check.py
+backend/_probe_*.py
+backend/_v6_*
+backend/_wtest*
+_chars.txt
+_*_dump.json
+_*_names.txt
 
 # ---- 临时脚本归档（2026-09-30 dsh 从根目录清理出来的 12 个 _*.py）----
 _archive_temp_*/
 
 # ---- 工作区私有数据（AI 助手记忆，不上云）----
 .workbuddy/
+.workbuddy-ai/

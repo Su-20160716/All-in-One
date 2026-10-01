@@ -1122,7 +1122,7 @@ def _runtime_config_sections():
             {"k": "PYTHON", "v": _plat.python_version(), "sensitive": False},
         ]},
         {"title": "安全 / 认证", "items": [
-            kv("SECRET_KEY"),
+            {"k": "应用签名密钥", "v": "••••••（已脱敏，不回显）", "sensitive": True},
             {"k": "ACCESS_TOKEN_LIFETIME", "v": str(jwt.get("ACCESS_TOKEN_LIFETIME", "")), "sensitive": False},
             {"k": "REFRESH_TOKEN_LIFETIME", "v": str(jwt.get("REFRESH_TOKEN_LIFETIME", "")), "sensitive": False},
             {"k": "AUTH_HEADER_TYPES", "v": ",".join(jwt.get("AUTH_HEADER_TYPES", ())), "sensitive": False},
@@ -1137,7 +1137,7 @@ def _runtime_config_sections():
             {"k": "NAME", "v": str(db.get("NAME", "")).rsplit("/", 1)[-1].rsplit("\\", 1)[-1], "sensitive": False},
             {"k": "HOST", "v": str(db.get("HOST", "") or "(本地)"), "sensitive": False},
             {"k": "PORT", "v": str(db.get("PORT", "") or "-"), "sensitive": False},
-            {"k": "凭据", "v": "已隐藏（USER/PASSWORD 不在本视图回显）", "sensitive": True},
+            {"k": "凭据", "v": "已隐藏（数据库账号 / 口令不在本视图回显）", "sensitive": True},
         ]},
         {"title": "存储 / 限制", "items": [
             {"k": "MEDIA_URL", "v": str(getattr(settings, "MEDIA_URL", "")), "sensitive": False},
@@ -1150,10 +1150,12 @@ def _runtime_config_sections():
         {"title": "功能开关", "items": [
             {"k": "SEARCH_ENABLED", "v": str(bool(getattr(settings, "SEARCH_ENABLED", True))), "sensitive": False},
             {"k": "TENANCY_ENABLED", "v": str(bool(getattr(settings, "TENANCY_ENABLED", False))), "sensitive": False},
-            kv("LLM_API_KEY"),
+            {"k": "大模型密钥", "v": "已配置（不回显）" if getattr(settings, "LLM_API_KEY", "") else "未配置",
+             "sensitive": True},
             {"k": "LLM_BASE_URL", "v": str(getattr(settings, "LLM_BASE_URL", "")), "sensitive": False},
             {"k": "LLM_MODEL", "v": str(getattr(settings, "LLM_MODEL", "")), "sensitive": False},
-            kv("REDIS_URL"),
+            {"k": "缓存连接", "v": "已配置（不回显）" if getattr(settings, "REDIS_URL", "") else "未配置",
+             "sensitive": True},
         ]},
         {"title": "应用与中间件", "items": [
             {"k": "INSTALLED_APPS", "v": ", ".join(getattr(settings, "INSTALLED_APPS", [])), "sensitive": False},
@@ -1180,7 +1182,7 @@ class AdminRuntimeConfigView(APIView):
             "read_only": True,
             "masked": True,
             "generated_at": timezone.now().isoformat(),
-            "note": "本页为只读运行配置，敏感键（SECRET_KEY / 密码 / Token / 密钥）已脱敏，绝不回显原文。",
+            "note": "本页为只读运行配置；签名密钥 / 数据库口令 / 令牌 / API 密钥等敏感项一律不回显，仅提示是否已配置。",
         })
 
 

@@ -79,6 +79,7 @@
               <span class="font-medium text-rose-500">✗ 拼写有误</span>
               <span class="text-ink-500">正确拼写：<b class="rounded bg-emerald-100 px-1.5 py-0.5 text-emerald-700">{{ d.answer }}</b>
                 <span class="text-ink-400">（你写的是 {{ dictAns[i] }}）</span></span>
+              <button class="btn-outline px-2 py-0.5 text-[11px]" @click="collectWrong([d.answer])">＋ 生词本</button>
             </template>
             <template v-else>
               <span class="text-ink-400">○ 还没作答——先自己拼再看答案，记得回来批改</span>
@@ -87,9 +88,10 @@
         </div>
       </div>
       <div v-if="dictSummary.total" class="card p-3 text-[13px] text-ink-600">
-        本组听写：<b class="text-emerald-600">对 {{ dictSummary.right }}</b> ·
+        <div>本组听写：<b class="text-emerald-600">对 {{ dictSummary.right }}</b> ·
         <b class="text-rose-500">错 {{ dictSummary.wrong }}</b> ·
-        <span class="text-ink-400">未作答 {{ dictSummary.blank }}</span>（共 {{ dictSummary.total }} 词已批改；错的词建议顺手加进生词本）
+        <span class="text-ink-400">未作答 {{ dictSummary.blank }}</span>（共 {{ dictSummary.total }} 词已批改）</div>
+        <button v-if="dictWrongWords.length" class="btn-outline mt-2 px-2 py-1 text-[11px]" @click="collectWrong(dictWrongWords)">把错词（{{ dictWrongWords.length }}）加入生词本</button>
       </div>
     </div>
 
@@ -278,6 +280,23 @@ const dictSummary = computed(() => {
   })
   return { total, right, wrong, blank }
 })
+
+// F531 听写错词自动入生词本（后端带来源标记 dictation、自动去重）
+const collectedWrong = ref({})
+const dictWrongWords = computed(() => {
+  const out = []
+  dictation.value.forEach((d, i) => {
+    if (!d.show) return
+    const s = dictState(i)
+    if (s.answered && !s.correct && d.answer && !out.includes(d.answer) && !collectedWrong.value[d.answer]) out.push(d.answer)
+  })
+  return out
+})
+async function collectWrong(words) {
+  const r = await learnApi.dictationCollect(words)
+  words.forEach((w) => { collectedWrong.value[w] = true })
+  app.toastMsg(r.added_count ? `已加入生词本 ${r.added_count} 词（跳过已存在 ${r.skipped.length}）` : '这些词已在生词本中', r.added_count ? 'success' : 'warn')
+}
 
 const quiz = ref([])
 const quizPick = ref({})

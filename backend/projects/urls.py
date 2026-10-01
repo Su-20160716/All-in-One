@@ -37,6 +37,28 @@ urlpatterns = [
     path("cards/<int:pk>/worklogs/<int:wid>/", views.WorkLogDetailView.as_view(), name="worklog-detail"),
     path("cards/<int:pk>/comments/", views.CardCommentListView.as_view(), name="comment-list"),
     path("cards/<int:pk>/comments/<int:cid>/", views.CardCommentDetailView.as_view(), name="comment-detail"),
+    # ===== 看板增强 F583–F598（新增路由，置于末尾） =====
+    path("cards/<int:pk>/countdown/", views.CardCountdownView.as_view(), name="card-countdown"),
+    path("cards/<int:pk>/checklist/", views.CardChecklistView.as_view(), name="card-checklist"),
+    path("cards/<int:pk>/timeline/", views.CardTimelineView.as_view(), name="card-timeline"),
+    path("cards/<int:pk>/dependencies/", views.CardDependencyView.as_view(), name="card-dependencies"),
+    path("cards/<int:pk>/estimate/", views.CardEstimateView.as_view(), name="card-estimate"),
+    path("cards/<int:pk>/save-template/", views.CardSaveTemplateView.as_view(), name="card-save-template"),
+    path("cards/<int:pk>/dod/", views.CardDodView.as_view(), name="card-dod"),
+    path("cards/<int:pk>/dod/<int:item_id>/", views.CardDodDetailView.as_view(), name="card-dod-detail"),
+    path("cards/<int:pk>/archive/", views.CardArchiveView.as_view(), name="card-archive"),
+    path("cards/batch-move/", views.CardBatchMoveView.as_view(), name="card-batch-move"),
+    path("boards/<int:board_id>/wip-limit/", views.BoardWipView.as_view(), name="board-wip-limit"),
+    path("card-templates/", views.CardTemplateListView.as_view(), name="card-template-list"),
+    path("card-templates/<int:pk>/apply/", views.CardTemplateApplyView.as_view(), name="card-template-apply"),
+    path("<int:project_id>/weekly-report/", views.ProjectWeeklyReportView.as_view(), name="project-weekly-report"),
+    path("<int:project_id>/milestones/", views.ProjectMilestoneView.as_view(), name="project-milestones"),
+    path("milestones/<int:pk>/", views.MilestoneDetailView.as_view(), name="milestone-detail"),
+    path("<int:project_id>/workload/", views.ProjectWorkloadView.as_view(), name="project-workload"),
+    path("<int:project_id>/cards/by-number/<int:number>/", views.CardByNumberView.as_view(), name="card-by-number"),
+    path("<int:project_id>/resolve/", views.CardResolveView.as_view(), name="card-resolve"),
+    path("<int:project_id>/standup/", views.ProjectStandupView.as_view(), name="project-standup"),
+    path("<int:project_id>/archived-cards/", views.ProjectArchivedCardsView.as_view(), name="project-archived-cards"),
 ]
 
 # 公开只读看板分享（免登录），挂在 /share/board/<token>/

@@ -380,6 +380,54 @@ export const learnApi = {
   // —— 学习雷达（v8：弱项 / 多语言进度，手写 SVG）——
   weaknessRadar: () => request.get('/learning/study/weakness/'),
   progRadar: () => request.get('/learning/prog/radar/'),
+  // —— v8 学习闭环（打卡 / 复习队列 / 错题重练 / 报告 / 备份 / 全局搜索）——
+  studyStreak: () => request.get('/learning/study/streak/'),
+  studyReport: (month) => request.get('/learning/study/report/', { params: month ? { month } : {} }),
+  reviewQueue: () => request.get('/learning/study/review-queue/'),
+  reviewMark: (kind, id) => request.post('/learning/study/review-queue/', { kind, id }),
+  reDrill: (params) => request.get('/learning/study/re-drill/', { params }),
+  reDrillSubmit: (id, answer) => request.post('/learning/study/re-drill/', { id, answer }),
+  backupExport: () => request.get('/learning/study/backup/'),
+  backupImport: (data) => request.post('/learning/study/backup/', data),
+  globalSearch: (q) => request.get('/learning/search/', { params: { q } }),
+  // —— v8 学习区新增能力（F523–F546，dsh 接口 / Doubao 接线）——
+  dailyGoal: () => request.get('/learning/study/daily-goal/'),                                   // F523
+  saveDailyGoal: (data) => request.post('/learning/study/daily-goal/', data),
+  pomodoro: () => request.get('/learning/study/pomodoro/'),                                     // F524
+  pomodoroSave: (data) => request.post('/learning/study/pomodoro/', data),
+  questionSets: () => request.get('/learning/study/question-sets/'),                            // F525
+  questionSet: (id) => request.get('/learning/study/question-sets/', { params: { id } }),
+  saveQuestionSet: (data) => request.post('/learning/study/question-sets/', data),
+  updateQuestionSet: (data) => request.patch('/learning/study/question-sets/', data),
+  delQuestionSet: (id) => request.delete(`/learning/study/question-sets/?id=${id}`),
+  masteryRatings: (stageSubject) => request.get('/learning/study/mastery-rating/', { params: stageSubject ? { stage_subject: stageSubject } : {} }), // F526
+  saveMasteryRating: (data) => request.post('/learning/study/mastery-rating/', data),
+  delMasteryRating: (id) => request.delete(`/learning/study/mastery-rating/?id=${id}`),
+  poemFillBlank: (key) => request.get('/learning/school/poems/fill-blank/', { params: key ? { key } : {} }), // F528
+  poemFillSubmit: (data) => request.post('/learning/school/poems/fill-blank/', data),
+  idiomChainRecords: () => request.get('/learning/school/idioms/chain-records/'),               // F529
+  saveIdiomChain: (data) => request.post('/learning/school/idioms/chain-records/', data),
+  equationPractice: () => request.get('/learning/school/equations/practice/'),                  // F530
+  equationPracticeSubmit: (data) => request.post('/learning/school/equations/practice/', data),
+  dictationCollect: (words) => request.post('/learning/school/words/dictation/collect/', { words }), // F531
+  dictationGrade: (items) => request.post('/learning/school/words/dictation/grade/', { items }), // F543
+  formulaFavorites: () => request.get('/learning/school/formulas/favorites/'),                  // F532
+  toggleFormulaFavorite: (key) => request.post('/learning/school/formulas/favorites/', { key }),
+  questionFavorites: () => request.get('/learning/school/questions/favorites/'),                // F536
+  toggleQuestionFavorite: (id) => request.post('/learning/school/questions/favorites/', { id }),
+  paperArchives: () => request.get('/learning/study/paper-archive/'),                           // F537
+  paperArchive: (id) => request.get('/learning/study/paper-archive/', { params: { id } }),
+  savePaperArchive: (data) => request.post('/learning/study/paper-archive/', data),
+  updatePaperArchive: (data) => request.patch('/learning/study/paper-archive/', data),
+  delPaperArchive: (id) => request.delete(`/learning/study/paper-archive/?id=${id}`),
+  toolUsage: () => request.get('/learning/study/tool-usage/'),                                  // F538
+  saveToolUsage: (key) => request.post('/learning/study/tool-usage/', { key }),
+  knowledgeRelated: (kid) => request.get('/learning/school/knowledge/related/', { params: { kid } }), // F539
+  learningBadges: () => request.get('/learning/study/badges/'),                                 // F540
+  progressDetail: (id) => request.get('/learning/study/progress-detail/', { params: { id } }),  // F544
+  mistakeCause: () => request.get('/learning/study/mistake-cause/'),                            // F545
+  setMistakeCause: (data) => request.post('/learning/study/mistake-cause/', data),
+  planDetail: (id) => request.get('/learning/study/plan-detail/', { params: { id } }),          // F546
   // —— 40 个学习工具 ——
   toolCatalog: () => request.get('/learning/tools/catalog/'),
   toolRun: (tool, params) => request.post('/learning/tools/run/', { tool, ...params }),

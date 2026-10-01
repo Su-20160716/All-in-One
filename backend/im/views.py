@@ -6,8 +6,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
-from im.models import ChatMessage, ChatSession, KeywordAlert, QuickReply, SessionMemberSetting
-from im.serializers import ChatMessageSerializer, QuickReplySerializer, SessionSerializer
+from im.models import ChatMessage, ChatSession, KeywordAlert, MessageFavorite, QuickReply, SessionMemberSetting, TodoItem
+from im.serializers import (
+    ChatMessageSerializer,
+    MessageFavoriteSerializer,
+    QuickReplySerializer,
+    SessionSerializer,
+    TodoItemSerializer,
+)
 from ws_app.events import broadcast_session, send_to_session
 
 
@@ -201,8 +207,8 @@ class MessageListView(APIView):
         if not s:
             return Response({"message": "会话不存在"}, status=404)
         # 置顶消息区（与历史分开返回）
-        pinned = list(s.messages.filter(is_pinned=True).exclude(deleted_for=request.user).exclude(is_recalled=True).order_by("-created_at"))
-        qs = s.messages.exclude(deleted_for=request.user)
+        pinned = list(s.messages.filter(is_pinned=True).exclude(deleted_for=request.user).exclude(is_recalled=True).exclude(is_deleted=True).order_by("-created_at"))
+        qs = s.messages.exclude(deleted_for=request.user).exclude(is_deleted=True)
         kw = request.query_params.get("q")
         if kw:
             qs = qs.filter(content__icontains=kw)
@@ -256,6 +262,7 @@ class MessageCreateView(APIView):
         # 关键词提醒：对命中关键词的成员额外推送一条醒目通知
         if msg_type == "text" and content:
             _fire_keyword_alerts(s, msg)
+            _fire_mentions(s, msg)
         return Response(ChatMessageSerializer(msg, context={"request": request}).data, status=201)
 
 
@@ -277,6 +284,35 @@ def _fire_keyword_alerts(session, msg):
                 level="warning",
                 link=f"/im/{session.id}",
             )
+
+
+def _mentioned_users(session, content):
+    """F607 解析消息中的 @提及：返回被提及的会话成员列表"""
+    if not content or "@" not in content:
+        return []
+    mentioned = []
+    for u in session.members.all():
+        name = u.display_name
+        if name and f"@{name}" in content:
+            mentioned.append(u)
+    return mentioned
+
+
+def _fire_mentions(session, msg):
+    """F607 对被 @提及的成员推送通知中心消息"""
+    from core.models import notify
+
+    content = msg.content or ""
+    if "@所有人" in content or "@all" in content.lower():
+        for u in session.members.exclude(id=msg.sender_id):
+            notify(u, f"{msg.sender.display_name if msg.sender else '某人'} 在「{session.name or '会话'}」提到了所有人",
+                   content[:100], category="message", level="warning", link=f"/im/{session.id}")
+        return
+    for u in _mentioned_users(session, content):
+        if u.id == msg.sender_id:
+            continue
+        notify(u, f"{msg.sender.display_name if msg.sender else '某人'} 在「{session.name or '会话'}」提到了你",
+               content[:100], category="message", level="warning", link=f"/im/{session.id}")
 
 
 class MessageRecallView(APIView):
@@ -450,3 +486,430 @@ class KeywordAlertView(APIView):
         cleaned = [str(k).strip()[:32] for k in keywords if str(k).strip()][:50]
         obj, _ = KeywordAlert.objects.update_or_create(owner=request.user, defaults={"keywords": cleaned})
         return Response({"keywords": obj.keywords})
+
+
+# ===========================================================================
+# IM 增强 F599–F612（纯新增，不改动上方既有接口）
+# ===========================================================================
+
+class MessageEditView(APIView):
+    """F599 消息编辑：发送者 10 分钟内可编辑，标记 edited"""
+
+    def post(self, request, pk):
+        msg = ChatMessage.objects.filter(id=pk, session__members=request.user).first()
+        if not msg:
+            return Response({"message": "消息不存在"}, status=404)
+        if msg.sender_id != request.user.id:
+            return Response({"message": "只能编辑自己的消息"}, status=403)
+        if msg.is_recalled or msg.is_deleted:
+            return Response({"message": "该消息不可编辑"}, status=400)
+        if timezone.now() - msg.created_at > timezone.timedelta(minutes=10):
+            return Response({"message": "超过 10 分钟不可编辑"}, status=400)
+        content = (request.data.get("content") or "").strip()
+        if not content:
+            return Response({"message": "消息内容不能为空"}, status=400)
+        msg.content = content
+        msg.edited = True
+        msg.edited_at = timezone.now()
+        msg.save(update_fields=["content", "edited", "edited_at"])
+        data = ChatMessageSerializer(msg, context={"request": request}).data
+        send_to_session(msg.session_id, {"type": "message.edited", "data": data})
+        return Response(data)
+
+
+class MessageDeleteForAllView(APIView):
+    """F600 消息删除并双端同步（发送者或群主）"""
+
+    def post(self, request, pk):
+        msg = ChatMessage.objects.filter(id=pk, session__members=request.user).first()
+        if not msg:
+            return Response({"message": "消息不存在"}, status=404)
+        is_owner = msg.session.type == "group" and msg.session.owner_id == request.user.id
+        if msg.sender_id != request.user.id and not is_owner:
+            return Response({"message": "只能删除自己发送的消息"}, status=403)
+        msg.is_deleted = True
+        msg.save(update_fields=["is_deleted"])
+        send_to_session(msg.session_id, {
+            "type": "message.deleted",
+            "data": {"id": msg.id, "session_id": msg.session_id, "deleted_for_all": True},
+        })
+        return Response({"message": "消息已删除", "id": msg.id, "is_deleted": True})
+
+
+class SessionDraftView(APIView):
+    """F601 按会话保存草稿"""
+
+    def get(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        setting = _get_setting(s, request.user)
+        return Response({"session_id": s.id, "draft": setting.draft or "",
+                         "updated_at": setting.draft_updated_at})
+
+    def post(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        setting = _get_setting(s, request.user)
+        setting.draft = request.data.get("draft", "")
+        setting.draft_updated_at = timezone.now()
+        setting.save(update_fields=["draft", "draft_updated_at"])
+        return Response({"message": "草稿已保存", "session_id": s.id, "draft": setting.draft,
+                         "updated_at": setting.draft_updated_at})
+
+    def delete(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        setting = _get_setting(s, request.user)
+        setting.draft = ""
+        setting.draft_updated_at = None
+        setting.save(update_fields=["draft", "draft_updated_at"])
+        return Response({"message": "草稿已清空", "session_id": s.id, "draft": ""})
+
+
+class TodoListView(APIView):
+    """F602 稍后处理清单：列表 / 新增"""
+
+    def get(self, request):
+        qs = TodoItem.objects.filter(owner=request.user)
+        if request.query_params.get("status") == "open":
+            qs = qs.filter(is_done=False)
+        return Response({"list": TodoItemSerializer(qs, many=True).data,
+                         "total": qs.count(),
+                         "open": qs.filter(is_done=False).count()})
+
+    def post(self, request):
+        message_id = request.data.get("message_id")
+        msg = ChatMessage.objects.filter(id=message_id, session__members=request.user).first() if message_id else None
+        content = (request.data.get("content") or (msg.content if msg else "") or "").strip()
+        if not content:
+            return Response({"message": "内容不能为空"}, status=400)
+        item = TodoItem.objects.create(
+            owner=request.user,
+            session=msg.session if msg else None,
+            message=msg,
+            content=content[:500],
+            remind_at=request.data.get("remind_at") or None,
+        )
+        return Response(TodoItemSerializer(item).data, status=201)
+
+
+class TodoDetailView(APIView):
+    """F602 稍后处理清单：完成 / 删除"""
+
+    def _get(self, request, pk):
+        return TodoItem.objects.filter(pk=pk, owner=request.user).first()
+
+    def patch(self, request, pk):
+        item = self._get(request, pk)
+        if not item:
+            return Response({"message": "条目不存在"}, status=404)
+        if "is_done" in request.data:
+            item.is_done = bool(request.data["is_done"])
+        if "content" in request.data and (request.data["content"] or "").strip():
+            item.content = request.data["content"].strip()[:500]
+        if "remind_at" in request.data:
+            item.remind_at = request.data["remind_at"] or None
+        item.save()
+        return Response(TodoItemSerializer(item).data)
+
+    def delete(self, request, pk):
+        item = self._get(request, pk)
+        if not item:
+            return Response({"message": "条目不存在"}, status=404)
+        item.delete()
+        return Response({"message": "已删除"})
+
+
+class SessionMuteView(APIView):
+    """F603 单会话免打扰开关"""
+
+    def post(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        setting = _get_setting(s, request.user)
+        if "is_muted" in request.data:
+            setting.is_muted = bool(request.data["is_muted"])
+        else:
+            setting.is_muted = not setting.is_muted
+        setting.save(update_fields=["is_muted"])
+        return Response({"message": "已开启免打扰" if setting.is_muted else "已关闭免打扰",
+                         "session_id": s.id, "is_muted": setting.is_muted})
+
+
+class SessionTypingView(APIView):
+    """F604 正在输入状态：上报 / 查询（8 秒内有效）"""
+
+    WINDOW_SECONDS = 8
+
+    def post(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        setting = _get_setting(s, request.user)
+        setting.typing_at = timezone.now()
+        setting.save(update_fields=["typing_at"])
+        broadcast_session(s.id, {"type": "session.typing", "data": {
+            "session_id": s.id, "user_id": request.user.id,
+            "display_name": request.user.display_name,
+        }})
+        return Response({"message": "ok", "session_id": s.id})
+
+    def get(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        since = timezone.now() - timezone.timedelta(seconds=self.WINDOW_SECONDS)
+        typing = SessionMemberSetting.objects.filter(
+            session=s, typing_at__gte=since
+        ).exclude(user=request.user).select_related("user")
+        return Response({"session_id": s.id, "typing": [
+            {"user_id": t.user_id, "display_name": t.user.display_name} for t in typing
+        ]})
+
+
+class SessionPinnedView(APIView):
+    """F605 置顶消息管理：列表 / 取消置顶"""
+
+    def get(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        qs = s.messages.filter(is_pinned=True).exclude(is_deleted=True)
+        return Response({"session_id": s.id,
+                         "list": ChatMessageSerializer(qs, many=True, context={"request": request}).data,
+                         "total": qs.count()})
+
+
+class SessionPinnedDetailView(APIView):
+    """F605 取消某条消息置顶"""
+
+    def delete(self, request, pk, msg_id):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        msg = s.messages.filter(id=msg_id, is_pinned=True).first()
+        if not msg:
+            return Response({"message": "置顶消息不存在"}, status=404)
+        msg.is_pinned = False
+        msg.save(update_fields=["is_pinned"])
+        send_to_session(s.id, {"type": "message.pinned",
+                               "data": {"id": msg.id, "session_id": s.id, "is_pinned": False}})
+        return Response({"message": "已取消置顶", "id": msg.id, "is_pinned": False})
+
+
+class SessionAnnouncementView(APIView):
+    """F606 群公告：读取 / 设置（仅群主可设置）"""
+
+    def get(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        return Response({"session_id": s.id, "announcement": s.announcement or ""})
+
+    def post(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        if s.type != "group":
+            return Response({"message": "单聊没有群公告"}, status=400)
+        if s.owner_id != request.user.id:
+            return Response({"message": "仅群主可发布公告"}, status=403)
+        s.announcement = (request.data.get("announcement") or "")[:500]
+        s.save(update_fields=["announcement"])
+        broadcast_session(s.id, {"type": "session.updated", "data": {"session_id": s.id}})
+        return Response({"message": "公告已更新", "session_id": s.id, "announcement": s.announcement})
+
+
+class MentionsView(APIView):
+    """F607 我收到的 @提及消息列表"""
+
+    def get(self, request):
+        name = request.user.display_name
+        result = []
+        if name:
+            qs = ChatMessage.objects.filter(
+                session__members=request.user, content__icontains=f"@{name}"
+            ).exclude(sender=request.user).exclude(is_deleted=True).order_by("-id")[:100]
+            for m in qs:
+                d = ChatMessageSerializer(m, context={"request": request}).data
+                d["session_name"] = m.session.name or "单聊"
+                result.append(d)
+        return Response({"list": result, "total": len(result)})
+
+
+class FavoriteListView(APIView):
+    """F608 消息收藏夹：列表 / 收藏或取消收藏"""
+
+    def get(self, request):
+        qs = MessageFavorite.objects.filter(owner=request.user).select_related("message")
+        return Response({"list": MessageFavoriteSerializer(qs, many=True).data, "total": qs.count()})
+
+    def post(self, request):
+        msg = ChatMessage.objects.filter(id=request.data.get("message_id"), session__members=request.user).first()
+        if not msg:
+            return Response({"message": "消息不存在"}, status=404)
+        fav = MessageFavorite.objects.filter(owner=request.user, message=msg).first()
+        if fav:
+            fav.delete()
+            return Response({"message": "已取消收藏", "favorited": False})
+        fav = MessageFavorite.objects.create(owner=request.user, message=msg,
+                                             note=(request.data.get("note") or "")[:200])
+        return Response({"message": "已收藏", "favorited": True,
+                         "item": MessageFavoriteSerializer(fav).data}, status=201)
+
+
+class FavoriteDetailView(APIView):
+    """F608 删除收藏"""
+
+    def delete(self, request, pk):
+        fav = MessageFavorite.objects.filter(pk=pk, owner=request.user).first()
+        if not fav:
+            return Response({"message": "收藏不存在"}, status=404)
+        fav.delete()
+        return Response({"message": "已删除收藏"})
+
+
+# F609 本地词典（无外部密钥即可降级运行）
+_TRANS_DICT_ZH_EN = {
+    "你好": "hello", "谢谢": "thank you", "再见": "goodbye", "好的": "ok", "收到": "received",
+    "项目": "project", "任务": "task", "看板": "board", "卡片": "card", "会议": "meeting",
+    "今天": "today", "明天": "tomorrow", "昨天": "yesterday", "完成": "done", "进行中": "in progress",
+    "待办": "todo", "负责人": "assignee", "截止日期": "due date", "优先级": "priority",
+    "问题": "issue", "需求": "requirement", "文档": "document", "测试": "test", "上线": "release",
+    "请": "please", "尽快": "as soon as possible", "确认": "confirm", "安排": "schedule",
+}
+_TRANS_DICT_EN_ZH = {v: k for k, v in _TRANS_DICT_ZH_EN.items()}
+
+
+def _local_translate(text, target_lang):
+    """本地词典降级翻译：按词/短语替换，未命中保留原文"""
+    text = text or ""
+    if target_lang.startswith("en"):
+        table = _TRANS_DICT_ZH_EN
+    else:
+        table = _TRANS_DICT_EN_ZH
+    matched = 0
+    out = text
+    for src in sorted(table.keys(), key=len, reverse=True):
+        if src in out:
+            out = out.replace(src, table[src])
+            matched += 1
+    return out, matched
+
+
+class MessageTranslateView(APIView):
+    """F609 消息翻译（本地词典降级，无密钥也能出结果）"""
+
+    def post(self, request, pk):
+        msg = ChatMessage.objects.filter(id=pk, session__members=request.user).first()
+        if not msg:
+            return Response({"message": "消息不存在"}, status=404)
+        target = (request.data.get("target_lang") or "en").lower()
+        original = msg.content or ""
+        translated, matched = _local_translate(original, target)
+        source = "zh" if any("\u4e00" <= ch <= "\u9fff" for ch in original) else "en"
+        return Response({
+            "message_id": msg.id, "source_lang": source, "target_lang": target,
+            "original": original, "translated": translated,
+            "engine": "local-dict", "matched": matched, "fallback": matched == 0,
+        })
+
+
+class SessionStatsView(APIView):
+    """F610 会话统计：发言数 / 时段分布 / 类型分布"""
+
+    def get(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        msgs = list(s.messages.exclude(is_deleted=True))
+        total = len(msgs)
+        by_member = {}
+        hour_dist = [0] * 24
+        by_type = {}
+        days = set()
+        for m in msgs:
+            key = m.sender.display_name if m.sender else "系统"
+            by_member[key] = by_member.get(key, 0) + 1
+            local = timezone.localtime(m.created_at)
+            hour_dist[local.hour] += 1
+            by_type[m.msg_type] = by_type.get(m.msg_type, 0) + 1
+            days.add(local.date())
+        members_sorted = sorted(by_member.items(), key=lambda kv: kv[1], reverse=True)
+        first = msgs[0].created_at if msgs else None
+        last = msgs[-1].created_at if msgs else None
+        return Response({
+            "session_id": s.id, "total": total,
+            "member_count": s.members.count(),
+            "by_member": [{"name": n, "count": c} for n, c in members_sorted],
+            "by_type": by_type, "hour_distribution": hour_dist,
+            "active_days": len(days),
+            "first_message_at": first, "last_message_at": last,
+        })
+
+
+class SessionExportView(APIView):
+    """F611 会话导出 Markdown"""
+
+    def get(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        msgs = s.messages.exclude(is_deleted=True).exclude(deleted_for=request.user).order_by("created_at")
+        lines = [f"# {s.name or '单聊会话'}", ""]
+        lines.append(f"> 导出时间：{timezone.localtime(timezone.now()):%Y-%m-%d %H:%M}")
+        lines.append(f"> 成员：{'、'.join(u.display_name for u in s.members.all())}")
+        if s.announcement:
+            lines.append(f"> 群公告：{s.announcement}")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        count = 0
+        for m in msgs:
+            ts = timezone.localtime(m.created_at).strftime("%Y-%m-%d %H:%M")
+            who = m.sender.display_name if m.sender else "系统"
+            body = "[图片]" if m.msg_type == "image" else ("[文件]" if m.msg_type == "file" else m.content)
+            if m.is_recalled:
+                body = "[已撤回]"
+            suffix = "（已编辑）" if m.edited else ""
+            lines.append(f"**{who}** · {ts}{suffix}")
+            lines.append("")
+            lines.append(body or "")
+            lines.append("")
+            count += 1
+        markdown = "\n".join(lines)
+        return Response({
+            "session_id": s.id, "name": s.name or "单聊",
+            "filename": f"chat-{s.id}.md", "count": count,
+            "markdown": markdown, "length": len(markdown),
+        })
+
+
+class SessionUnreadLineView(APIView):
+    """F612 未读分隔线与跳转：返回首条未读消息及上下文"""
+
+    def get(self, request, pk):
+        s = ChatSession.objects.filter(pk=pk, members=request.user).first()
+        if not s:
+            return Response({"message": "会话不存在"}, status=404)
+        setting = SessionMemberSetting.objects.filter(session=s, user=request.user).first()
+        qs = s.messages.exclude(deleted_for=request.user).exclude(is_deleted=True).exclude(sender=request.user)
+        if setting and setting.last_read_at:
+            unread = qs.filter(created_at__gt=setting.last_read_at)
+        else:
+            unread = qs
+        first_unread = unread.order_by("id").first()
+        if not first_unread:
+            return Response({"session_id": s.id, "has_unread": False, "unread_count": 0,
+                             "first_unread_id": None, "context": []})
+        context = list(s.messages.filter(id__gte=first_unread.id).exclude(deleted_for=request.user)
+                       .exclude(is_deleted=True).order_by("id")[:20])
+        return Response({
+            "session_id": s.id, "has_unread": True, "unread_count": unread.count(),
+            "first_unread_id": first_unread.id,
+            "context": ChatMessageSerializer(context, many=True, context={"request": request}).data,
+        })

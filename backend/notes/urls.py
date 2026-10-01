@@ -54,4 +54,9 @@ urlpatterns = [
     path("<int:pk>/versions/", views.NoteVersionListView.as_view(), name="note-versions"),
     path("<int:pk>/versions/diff/", views.NoteVersionDiffView.as_view(), name="note-version-diff"),
     path("<int:pk>/rollback/<int:version>/", views.NoteRollbackView.as_view(), name="note-rollback"),
+    # ---- F570/F571/F577/F578 补充端点（只增不改） ----
+    path("<int:pk>/outline-lines/", views.NoteOutlineLinesView.as_view(), name="note-outline-lines"),
+    path("<int:pk>/pin/", views.NotePinView.as_view(), name="note-pin"),
+    path("<int:pk>/reading/", views.NoteReadingView.as_view(), name="note-reading"),
+    path("wordbook/", views.NoteWordbookView.as_view(), name="note-wordbook"),
 ]

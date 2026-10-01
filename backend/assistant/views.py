@@ -1340,3 +1340,88 @@ class CommandMenuView(APIView):
 
     def get(self, request):
         return Response({"list": COMMAND_ITEMS, "total": len(COMMAND_ITEMS)})
+
+
+# ---------------------------------------------------------------------------
+# F646 输入即时反馈（输入框边打边给提示，纯本地规则，无 LLM 依赖）
+# ---------------------------------------------------------------------------
+
+def _input_feedback(text: str) -> dict:
+    """对正在输入的内容做即时本地分析（纯规则，无 Key 也能用）"""
+    text = text or ""
+    stripped = text.strip()
+    char_count = len(text)
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    latin = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+    if cjk and latin:
+        lang = "mixed"
+    elif cjk:
+        lang = "zh"
+    elif latin:
+        lang = "en"
+    else:
+        lang = "unknown"
+    words = cjk if lang == "zh" else len([w for w in stripped.split() if w])
+    if char_count == 0:
+        level = "empty"
+    elif char_count <= 200:
+        level = "short"
+    elif char_count <= 2000:
+        level = "medium"
+    else:
+        level = "long"
+
+    has_command = stripped.startswith("/")
+    command = ""
+    if has_command:
+        token = stripped[1:].split()[0].lower() if len(stripped) > 1 else ""
+        if token in {c["id"] for c in COMMAND_ITEMS}:
+            command = token
+
+    tips = []
+    if not stripped:
+        tips.append("输入 / 可打开快捷指令菜单")
+    else:
+        if has_command and not command:
+            tips.append("未识别的指令，输入 / 可查看全部快捷指令")
+        if char_count > MAX_INPUT_CHARS:
+            tips.append(f"超过单次上限 {MAX_INPUT_CHARS} 字，发送时会自动截断")
+        elif lang in ("zh", "mixed") and char_count > 800:
+            tips.append("内容较长，可先用「摘要三档」压缩后再发送")
+        if "？" in text or text.endswith("?") or "吗" in text:
+            tips.append("看起来是一个问题，可直接发送给助手")
+
+    return {
+        "char_count": char_count,
+        "word_count": words,
+        "cjk_count": cjk,
+        "language": lang,
+        "length_level": level,
+        "is_empty": not bool(stripped),
+        "has_command": has_command,
+        "command": command,
+        "over_limit": char_count > MAX_INPUT_CHARS,
+        "max_chars": MAX_INPUT_CHARS,
+        "tips": tips,
+        "suggestions": [
+            {"id": "polish", "label": "润色", "hint": "让表达更流畅"},
+            {"id": "translate", "label": "翻译", "hint": "中英日韩互译"},
+            {"id": "summary", "label": "摘要", "hint": "一句话 / 要点 / 段落"},
+        ],
+    }
+
+
+class InputFeedbackView(APIView):
+    """F646：POST /api/assistant/input-feedback/ {"text": "..."}
+
+    输入框即时反馈：字数统计 / 语言判定 / `/` 指令识别 / 即时建议，全部本地规则计算。
+    """
+
+    @endpoint(("POST", "GET"))
+    def post(self, request):
+        return Response(_input_feedback(
+            request.data.get("text") or request.query_params.get("text") or ""
+        ))
+
+    def get(self, request):
+        return self.post(request)

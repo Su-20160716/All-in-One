@@ -154,7 +154,7 @@ LANGS = {
     },
 
     "c": {
-        "key": "c", "name": "C 语言", "en": "C", "icon": "©️",
+        "key": "c", "name": "C 语言", "en": "C", "icon": "C",
         "year": 1972, "designer": "Dennis Ritchie", "typing": "静态弱类型",
         "paradigms": ["过程式", "结构化", "命令式"],
         "domains": ["操作系统", "嵌入式", "驱动", "底层性能", "计算机基础"],
@@ -760,3 +760,25 @@ def lang_brief(key):
         "difficulty": d["difficulty"], "color": d["color"],
         "summary": d["summary"], "hello": d["hello"], "why": d["why"],
     }
+
+
+# ---- v8 唯一文本合并（dsh 2026-10-01）：F514 数据类型的「取值范围 / 转换陷阱」 ----
+# 只增不改：按「语言 key + 类型 name」往既有条目上挂 range_note / trap，缺失时静默跳过。
+try:
+    from . import languages_v8 as _l8
+except ImportError:  # 兼容脚本直连导入（无包上下文）
+    try:
+        import languages_v8 as _l8
+    except ImportError:
+        _l8 = None
+
+_TYPE_V8 = getattr(_l8, "TYPE_V8", {}) if _l8 else {}
+if isinstance(_TYPE_V8, dict):
+    for _lang_key, _type_map in _TYPE_V8.items():
+        _lang = LANGS.get(_lang_key)
+        if not isinstance(_lang, dict) or not isinstance(_type_map, dict):
+            continue
+        for _t in (_lang.get("types") or []):
+            _hit = _type_map.get(_t.get("name"))
+            if isinstance(_hit, dict):
+                _t.update(_hit)

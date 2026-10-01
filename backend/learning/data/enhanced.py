@@ -10559,6 +10559,23 @@ _ENGLISH_DETAIL = {
 }
 
 
+try:  # F499：小学科学唯一文本（dsh 2026-10-01，只增不改，缺失时静默跳过）
+    from .science_v8 import SCIENCE_DETAIL as _SCIENCE_DETAIL
+except ImportError:  # 兼容脚本直连导入（无包上下文）
+    try:
+        from science_v8 import SCIENCE_DETAIL as _SCIENCE_DETAIL
+    except ImportError:
+        _SCIENCE_DETAIL = {}
+
+try:  # F499：89 个「只有章节级话术」的知识点的点级唯一内容（dsh 2026-10-01）
+    from .knowledge_v8 import KNOWLEDGE_V8 as _KNOWLEDGE_V8
+except ImportError:  # 兼容脚本直连导入（无包上下文）
+    try:
+        from knowledge_v8 import KNOWLEDGE_V8 as _KNOWLEDGE_V8
+    except ImportError:
+        _KNOWLEDGE_V8 = {}
+
+
 def knowledge_detail(stage_subject: str, chapter: str, point: str) -> dict:
     """获取K12知识点的完整教学详情。
     stage_subject: 如 'primary.math', 'junior.chinese', 'senior.english'
@@ -10574,6 +10591,13 @@ def knowledge_detail(stage_subject: str, chapter: str, point: str) -> dict:
         return {"point": point, "chapter": chapter, "subject": subject, **_CHINESE_DETAIL[point]}
     if subject == 'english' and point in _ENGLISH_DETAIL:
         return {"point": point, "chapter": chapter, "subject": subject, **_ENGLISH_DETAIL[point]}
+    # F499：89 个「只有章节级话术」的知识点，优先返回点级唯一内容（按 学科+知识点 查表）
+    _v8_hit = _KNOWLEDGE_V8.get(subject, {}).get(point)
+    if isinstance(_v8_hit, dict):
+        return {"point": point, "chapter": chapter, "subject": subject, **_v8_hit}
+    # F499：小学科学（science）原先没有分支、49 个点全部落到 else 拼接模板，这里优先查表
+    if subject == 'science' and point in _SCIENCE_DETAIL:
+        return {"point": point, "chapter": chapter, "subject": subject, **_SCIENCE_DETAIL[point]}
 
     # 通用生成：根据学科和知识点关键词生成有实质内容的详情
     detail = _generate_generic_detail(subject, chapter, point)

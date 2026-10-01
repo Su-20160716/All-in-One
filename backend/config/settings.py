@@ -8,6 +8,8 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
@@ -21,8 +23,25 @@ try:
 except ImportError:
     pass
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-insecure-key-change-me")
+# ---------------------------------------------------------------------------
+# 密钥与运行模式
+# 修复 1.3 遗留：原默认密钥仅 26 字节（dev-insecure-key-change-me），
+# 且生产环境若忘记配置会静默沿用弱密钥 —— JWT 签名同样依赖它。
+# 现在：① 开发默认值加长到 76 字节；② 生产（DEBUG=0）未配置环境变量时直接拒绝启动。
+# ---------------------------------------------------------------------------
+_DEV_SECRET_KEY = (
+    "dev-insecure-key-change-me-"
+    "please-set-DJANGO_SECRET_KEY-in-production-"
+    "9f3a7c1e5b8d2046af17c93e6d05b28a"
+)
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", _DEV_SECRET_KEY)
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
+if not DEBUG and SECRET_KEY == _DEV_SECRET_KEY:
+    raise ImproperlyConfigured(
+        "生产环境（DJANGO_DEBUG=0）必须通过环境变量 DJANGO_SECRET_KEY 提供独立密钥，"
+        "拒绝以内置开发密钥启动。生成方式："
+        "python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+    )
 ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
 
 INSTALLED_APPS = [
