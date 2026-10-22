@@ -13,6 +13,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.validators import as_int, parse_bool
 from learning.data import chinese as cn
 from learning.data import chemistry as ch
 from learning.data import curriculum as cu
@@ -237,7 +238,7 @@ class DrillQuizView(APIView):
 
     def get(self, request):
         lang, level, n = _params(request, "lang", "level", "n")
-        return Response({"list": _sample("quiz", lang, level, int(n or 5))})
+        return Response({"list": _sample("quiz", lang, level, as_int(n, default=5, field="n", minimum=1))})
 
 
 class DrillOutputView(APIView):
@@ -245,7 +246,7 @@ class DrillOutputView(APIView):
 
     def get(self, request):
         lang, level, n = _params(request, "lang", "level", "n")
-        return Response({"list": _sample("output", lang, level, int(n or 5))})
+        return Response({"list": _sample("output", lang, level, as_int(n, default=5, field="n", minimum=1))})
 
 
 class DrillFillView(APIView):
@@ -253,7 +254,7 @@ class DrillFillView(APIView):
 
     def get(self, request):
         lang, level, n = _params(request, "lang", "level", "n")
-        return Response({"list": _sample("fill", lang, level, int(n or 5))})
+        return Response({"list": _sample("fill", lang, level, as_int(n, default=5, field="n", minimum=1))})
 
 
 class DrillBugView(APIView):
@@ -261,7 +262,7 @@ class DrillBugView(APIView):
 
     def get(self, request):
         lang, level, n = _params(request, "lang", "level", "n")
-        return Response({"list": _sample("bug", lang, level, int(n or 5))})
+        return Response({"list": _sample("bug", lang, level, as_int(n, default=5, field="n", minimum=1))})
 
 
 def _normalize(s):
@@ -415,7 +416,7 @@ class ProgressView(APIView):
         obj, _ = LearningProgress.objects.update_or_create(
             owner=request.user, domain=d.get("domain", "programming"), target_key=d.get("target_key"),
             defaults={"target_name": d.get("target_name", ""), "status": d.get("status", "learning"),
-                      "percent": max(0, min(100, int(d.get("percent", 0)))), "note": d.get("note", "")})
+                      "percent": as_int(d.get("percent"), default=0, field="percent", minimum=0, maximum=100), "note": d.get("note", "")})
         return Response(LearningProgressSerializer(obj).data)
 
 
@@ -436,7 +437,7 @@ class SnippetBookmarkView(APIView):
         return Response(ser.data, status=201)
 
     def delete(self, request):
-        obj = get_object_or_404(SnippetBookmark, id=request.query_params.get("id"), owner=request.user)
+        obj = get_object_or_404(SnippetBookmark, id=as_int(request.query_params.get("id"), default=None, field="id"), owner=request.user)
         obj.delete()
         return Response({"deleted": True})
 
@@ -598,7 +599,7 @@ class PoemDrillView(APIView):
 
     def get(self, request):
         stage = request.query_params.get("stage")
-        n = int(request.query_params.get("n", 5))
+        n = as_int(request.query_params.get("n"), default=5, field="n", minimum=1)
         bank = []
         for p in cn.POEMS:
             if stage and p["stage"] != stage:
@@ -644,7 +645,7 @@ class WordDictationView(APIView):
             items = [w for w in items if w["stage"] == stage]
         if topic:
             items = [w for w in items if w["topic"] == topic]
-        sample = random.sample(items, min(len(items), int(n or 10)))
+        sample = random.sample(items, min(len(items), as_int(n, default=10, field="n", minimum=1)))
         return Response({"list": [{"prompt": w["meaning"], "phonetic": w["phonetic"], "answer": w["word"], "example": w["example"]} for w in sample]})
 
 
@@ -653,7 +654,7 @@ class WordQuizView(APIView):
 
     def get(self, request):
         stage = request.query_params.get("stage")
-        n = int(request.query_params.get("n", 5))
+        n = as_int(request.query_params.get("n"), default=5, field="n", minimum=1)
         pool = [w for w in en.WORDS if not stage or w["stage"] == stage]
         quiz = []
         for w in random.sample(pool, min(len(pool), n)):
@@ -685,13 +686,13 @@ class WordbookView(APIView):
         return Response(WordbookItemSerializer(obj).data, status=201 if created else 200)
 
     def patch(self, request):
-        obj = get_object_or_404(WordbookItem, id=request.data.get("id"), owner=request.user)
+        obj = get_object_or_404(WordbookItem, id=as_int(request.data.get("id"), default=None, field="id"), owner=request.user)
         obj.mastered = not obj.mastered
         obj.save(update_fields=["mastered"])
         return Response(WordbookItemSerializer(obj).data)
 
     def delete(self, request):
-        obj = get_object_or_404(WordbookItem, id=request.query_params.get("id"), owner=request.user)
+        obj = get_object_or_404(WordbookItem, id=as_int(request.query_params.get("id"), default=None, field="id"), owner=request.user)
         obj.delete()
         return Response({"deleted": True})
 
@@ -728,7 +729,7 @@ class PaperComposeView(APIView):
 
     def _compose(self, params):
         stage, subject = params.get("stage"), params.get("subject")
-        count = int(params.get("count", 10))
+        count = as_int(params.get("count"), default=10, field="count", minimum=1)
         qtype = params.get("type")
         pool = qb.filter_questions(stage, subject, qtype)
         if not pool:
@@ -783,13 +784,13 @@ class MistakeView(APIView):
         return Response(ser.data, status=201)
 
     def patch(self, request):
-        obj = get_object_or_404(MistakeRecord, id=request.data.get("id"), owner=request.user)
+        obj = get_object_or_404(MistakeRecord, id=as_int(request.data.get("id"), default=None, field="id"), owner=request.user)
         obj.mastered = not obj.mastered
         obj.save(update_fields=["mastered"])
         return Response(MistakeRecordSerializer(obj).data)
 
     def delete(self, request):
-        obj = get_object_or_404(MistakeRecord, id=request.query_params.get("id"), owner=request.user)
+        obj = get_object_or_404(MistakeRecord, id=as_int(request.query_params.get("id"), default=None, field="id"), owner=request.user)
         obj.delete()
         return Response({"deleted": True})
 
@@ -927,7 +928,7 @@ class StudySessionView(APIView):
         return Response(ser.data, status=201)
 
     def delete(self, request):
-        obj = get_object_or_404(StudySession, id=request.query_params.get("id"), owner=request.user)
+        obj = get_object_or_404(StudySession, id=as_int(request.query_params.get("id"), default=None, field="id"), owner=request.user)
         obj.delete()
         return Response({"deleted": True})
 
@@ -946,16 +947,16 @@ class StudyPlanView(APIView):
         return Response(ser.data, status=201)
 
     def patch(self, request):
-        obj = get_object_or_404(StudyPlan, id=request.data.get("id"), owner=request.user)
+        obj = get_object_or_404(StudyPlan, id=as_int(request.data.get("id"), default=None, field="id"), owner=request.user)
         if "finished" in request.data:
-            obj.finished = max(0, min(obj.total, int(request.data["finished"])))
+            obj.finished = max(0, min(obj.total, as_int(request.data["finished"], field="finished", minimum=0)))
         if "title" in request.data:
             obj.title = request.data["title"]
         obj.save()
         return Response(StudyPlanSerializer(obj).data)
 
     def delete(self, request):
-        obj = get_object_or_404(StudyPlan, id=request.query_params.get("id"), owner=request.user)
+        obj = get_object_or_404(StudyPlan, id=as_int(request.query_params.get("id"), default=None, field="id"), owner=request.user)
         obj.delete()
         return Response({"deleted": True})
 
@@ -1187,7 +1188,7 @@ class StudyReviewQueueView(APIView):
         })
 
     def post(self, request):
-        kind, obj_id, today = request.data.get("kind"), request.data.get("id"), dt.date.today()
+        kind, obj_id, today = request.data.get("kind"), as_int(request.data.get("id"), default=None, field="id"), dt.date.today()
         if kind == "word":
             obj = get_object_or_404(WordbookItem, id=obj_id, owner=request.user)
             obj.review_count += 1
@@ -1340,7 +1341,7 @@ class StudyBackupView(APIView):
                 target_key=it.get("target_key", ""),
                 defaults={"target_name": it.get("target_name", ""),
                           "status": it.get("status", "learning"),
-                          "percent": int(it.get("percent") or 0), "note": it.get("note", "")})
+                          "percent": as_int(it.get("percent") or 0, field="percent"), "note": it.get("note", "")})
             created["progress"] += 1
         for it in d.get("bookmarks", []):
             SnippetBookmark.objects.create(owner=request.user, language=it.get("language", ""),
@@ -1351,26 +1352,26 @@ class StudyBackupView(APIView):
             WordbookItem.objects.get_or_create(
                 owner=request.user, word=it.get("word", ""),
                 defaults={"phonetic": it.get("phonetic", ""), "meaning": it.get("meaning", ""),
-                          "mastered": bool(it.get("mastered")), "source": it.get("source", "import")})
+                          "mastered": parse_bool(it.get("mastered"), field="mastered"), "source": it.get("source", "import")})
             created["wordbook"] += 1
         for it in d.get("mistakes", []):
             MistakeRecord.objects.create(
                 owner=request.user, stage=it.get("stage", ""), subject=it.get("subject", ""),
-                question_type=it.get("question_type", "single"), difficulty=int(it.get("difficulty") or 1),
+                question_type=it.get("question_type", "single"), difficulty=as_int(it.get("difficulty") or 1, field="difficulty"),
                 stem=it.get("stem", ""), answer=it.get("answer", ""), user_answer=it.get("user_answer", ""),
-                analysis=it.get("analysis", ""), mastered=bool(it.get("mastered")))
+                analysis=it.get("analysis", ""), mastered=parse_bool(it.get("mastered"), field="mastered"))
             created["mistakes"] += 1
         for it in d.get("sessions", []):
             StudySession.objects.create(
                 owner=request.user, subject=it.get("subject", "通用"),
-                minutes=int(it.get("minutes") or 0),
+                minutes=as_int(it.get("minutes") or 0, field="minutes"),
                 study_date=it.get("study_date") or dt.date.today(), note=it.get("note", ""))
             created["sessions"] += 1
         for it in d.get("plans", []):
             StudyPlan.objects.create(
                 owner=request.user, title=it.get("title", "导入计划"), subject=it.get("subject", ""),
-                total=int(it.get("total") or 0), days=int(it.get("days") or 7),
-                plan=it.get("plan") or [], finished=int(it.get("finished") or 0),
+                total=as_int(it.get("total") or 0, field="total"), days=as_int(it.get("days") or 7, field="days"),
+                plan=it.get("plan") or [], finished=as_int(it.get("finished") or 0, field="finished"),
                 start_date=it.get("start_date") or dt.date.today())
             created["plans"] += 1
         return Response({"ok": True, "created": created})
@@ -1495,10 +1496,7 @@ class DailyGoalView(APIView):
     def post(self, request):
         goal, _ = DailyGoal.objects.get_or_create(owner=request.user)
         if "target_minutes" in request.data:
-            try:
-                goal.target_minutes = max(0, min(1440, int(request.data["target_minutes"])))
-            except (TypeError, ValueError):
-                return Response({"ok": False, "error": "target_minutes 需为整数"}, status=400)
+            goal.target_minutes = as_int(request.data["target_minutes"], field="target_minutes", minimum=0, maximum=1440)
         if "note" in request.data:
             goal.note = str(request.data["note"])[:255]
         goal.save()
@@ -1526,11 +1524,8 @@ class PomodoroView(APIView):
         })
 
     def post(self, request):
-        try:
-            minutes = int(request.data.get("minutes") or self.ROUND)
-        except (TypeError, ValueError):
-            minutes = self.ROUND
-        interrupted = bool(request.data.get("interrupted"))
+        minutes = as_int(request.data.get("minutes") or self.ROUND, field="minutes")
+        interrupted = parse_bool(request.data.get("interrupted"), field="interrupted")
         s = StudySession.objects.create(
             owner=request.user, subject="番茄钟", minutes=max(1, min(240, minutes)),
             study_date=dt.date.today(), note="打断" if interrupted else "完成")
@@ -1543,7 +1538,7 @@ class QuestionSetView(APIView):
     def get(self, request):
         sid = request.query_params.get("id")
         if sid:
-            obj = get_object_or_404(QuestionSet, id=sid, owner=request.user)
+            obj = get_object_or_404(QuestionSet, id=as_int(sid, field="id"), owner=request.user)
             return Response({"id": obj.id, "name": obj.name, "note": obj.note,
                              "question_ids": obj.question_ids or [],
                              "list": _questions_by_ids(obj.question_ids)})
@@ -1565,7 +1560,7 @@ class QuestionSetView(APIView):
         return Response({"ok": True, "id": obj.id, "count": len(obj.question_ids)}, status=201)
 
     def patch(self, request):
-        obj = get_object_or_404(QuestionSet, id=request.data.get("id"), owner=request.user)
+        obj = get_object_or_404(QuestionSet, id=as_int(request.data.get("id"), default=None, field="id"), owner=request.user)
         if request.data.get("name"):
             obj.name = str(request.data["name"])[:128]
         if "note" in request.data:
@@ -1576,7 +1571,7 @@ class QuestionSetView(APIView):
         return Response({"ok": True, "id": obj.id, "count": len(obj.question_ids or [])})
 
     def delete(self, request):
-        obj = get_object_or_404(QuestionSet, id=request.query_params.get("id"), owner=request.user)
+        obj = get_object_or_404(QuestionSet, id=as_int(request.query_params.get("id"), default=None, field="id"), owner=request.user)
         obj.delete()
         return Response({"deleted": True})
 
@@ -1610,7 +1605,7 @@ class MasteryRatingView(APIView):
         return Response({"ok": True, "id": obj.id, "stars": obj.stars}, status=201)
 
     def delete(self, request):
-        obj = get_object_or_404(MasteryRating, id=request.query_params.get("id"), owner=request.user)
+        obj = get_object_or_404(MasteryRating, id=as_int(request.query_params.get("id"), default=None, field="id"), owner=request.user)
         obj.delete()
         return Response({"deleted": True})
 
@@ -1818,7 +1813,7 @@ class QuestionFavoriteView(APIView):
 
     def delete(self, request):
         QuestionFavorite.objects.filter(owner=request.user,
-                                        question_id=request.query_params.get("id")).delete()
+                                        question_id=as_int(request.query_params.get("id"), default=None, field="id")).delete()
         return Response({"deleted": True})
 
 
@@ -1828,7 +1823,7 @@ class PaperArchiveView(APIView):
     def get(self, request):
         aid = request.query_params.get("id")
         if aid:
-            obj = get_object_or_404(PaperArchive, id=aid, owner=request.user)
+            obj = get_object_or_404(PaperArchive, id=as_int(aid, field="id"), owner=request.user)
             return Response({"id": obj.id, "title": obj.title, "stage": obj.stage,
                              "subject": obj.subject, "total": obj.total,
                              "last_score": obj.last_score, "payload": obj.payload})
@@ -1849,12 +1844,12 @@ class PaperArchiveView(APIView):
             owner=request.user, title=title[:128],
             stage=str(request.data.get("stage", ""))[:20],
             subject=str(request.data.get("subject", ""))[:20],
-            payload=payload, total=int(request.data.get("total") or 0))
+            payload=payload, total=as_int(request.data.get("total") or 0, field="total"))
         return Response({"ok": True, "id": obj.id}, status=201)
 
     def patch(self, request):
         """交卷后回写得分。"""
-        obj = get_object_or_404(PaperArchive, id=request.data.get("id"), owner=request.user)
+        obj = get_object_or_404(PaperArchive, id=as_int(request.data.get("id"), default=None, field="id"), owner=request.user)
         if "last_score" in request.data:
             try:
                 obj.last_score = max(0, min(100, int(request.data["last_score"])))
@@ -1864,7 +1859,7 @@ class PaperArchiveView(APIView):
         return Response({"ok": True, "id": obj.id, "last_score": obj.last_score})
 
     def delete(self, request):
-        obj = get_object_or_404(PaperArchive, id=request.query_params.get("id"), owner=request.user)
+        obj = get_object_or_404(PaperArchive, id=as_int(request.query_params.get("id"), default=None, field="id"), owner=request.user)
         obj.delete()
         return Response({"deleted": True})
 
@@ -1985,7 +1980,7 @@ class ProgressDetailView(APIView):
 
     def get(self, request):
         pid = request.query_params.get("id")
-        obj = get_object_or_404(LearningProgress, id=pid, owner=request.user)
+        obj = get_object_or_404(LearningProgress, id=as_int(pid, default=None, field="id"), owner=request.user)
         target = obj.target_key
         related = []
         if obj.domain == "programming":
@@ -2024,7 +2019,7 @@ class MistakeCauseView(APIView):
         })
 
     def post(self, request):
-        m = get_object_or_404(MistakeRecord, id=request.data.get("id"), owner=request.user)
+        m = get_object_or_404(MistakeRecord, id=as_int(request.data.get("id"), default=None, field="id"), owner=request.user)
         cause = (request.data.get("cause") or "").strip()
         if cause and cause not in dict(MistakeRecord.CAUSES):
             return Response({"ok": False, "error": "cause 取值非法"}, status=400)
@@ -2038,7 +2033,7 @@ class StudyPlanDetailView(APIView):
 
     def get(self, request):
         pid = request.query_params.get("id")
-        obj = get_object_or_404(StudyPlan, id=pid, owner=request.user)
+        obj = get_object_or_404(StudyPlan, id=as_int(pid, default=None, field="id"), owner=request.user)
         plan = obj.plan or []
         total = obj.total or 0
         per_day = round(total / obj.days, 1) if obj.days else 0

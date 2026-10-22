@@ -78,7 +78,9 @@ class LastActiveMiddleware(MiddlewareMixin):
         now = timezone.now()
         last = user.last_active_at
         if last is None or (now - last).total_seconds() > ACTIVE_THROTTLE_SECONDS:
-            type(user).objects.filter(pk=user.pk).update(last_active_at=now)
+            # 注意：request.user 可能是 SimpleLazyObject，type(user) 会拿到包装类而非 User 模型，
+            # 用 __class__ 才能取到真实模型类（SimpleLazyObject 会代理该属性）
+            user.__class__.objects.filter(pk=user.pk).update(last_active_at=now)
             user.last_active_at = now
         return None
 

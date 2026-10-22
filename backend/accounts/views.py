@@ -2,17 +2,17 @@
 import json
 
 from django.contrib.auth import get_user_model
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.exceptions import APIException
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from accounts import totp as totp_lib
 from accounts.models import (
@@ -46,6 +46,8 @@ from accounts.serializers import (
     DepartmentSerializer,
     InviteCodeSerializer,
     LoginLogSerializer,
+    MyTokenObtainPairSerializer,
+    MyTokenRefreshSerializer,
     PermissionSerializer,
     ProfileUpdateSerializer,
     RegisterSerializer,
@@ -59,6 +61,7 @@ from core.models import OperationLog
 from core.pagination import StandardPagination
 from core.scoping import describe_scope
 from core.utils import get_client_ip
+from core.validators import as_int, parse_bool
 
 User = get_user_model()
 
@@ -178,6 +181,9 @@ def _totp_state(user):
 class LoginView(TokenObtainPairView):
     """登录：连续失败锁定（F626）+ TOTP 双因素（F615）+ 到期注销执行（F614）"""
 
+    # B12：签发时写入 tv claim（token_version），认证端据此判定失效
+    serializer_class = MyTokenObtainPairSerializer
+
     def post(self, request, *args, **kwargs):
         username = (request.data.get("username", "") or "").strip()
         # F614：登录入口顺带执行到期的注销冷静期
@@ -265,6 +271,13 @@ class LoginView(TokenObtainPairView):
         return resp
 
 
+class RefreshView(TokenRefreshView):
+    """B12：refresh 时校验 tv claim，改密前的旧 refresh 一律拒绝（401），
+    前端按 401 流程引导重新登录"""
+
+    serializer_class = MyTokenRefreshSerializer
+
+
 class RegisterView(APIView):
     permission_classes = [AllowAny]
 
@@ -295,6 +308,8 @@ class RegisterView(APIView):
             except Exception:
                 pass
         token = RefreshToken.for_user(user)
+        # B12：与登录保持一致，写入 tv claim（认证端校验 token_version）
+        token["tv"] = user.token_version
         OperationLog.objects.create(
             user=user, module="accounts", action="create", target="用户注册", detail=user.username,
             ip=get_client_ip(request),
@@ -372,7 +387,9 @@ class ChangePasswordView(APIView):
         ser = ChangePasswordSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
         request.user.set_password(ser.validated_data["new_password"])
-        request.user.save(update_fields=["password"])
+        # B12：改密后吊销该用户所有已签发 token（tv claim 对不上即失效）
+        request.user.token_version += 1
+        request.user.save(update_fields=["password", "token_version"])
         return Response({"message": "密码修改成功，请重新登录"})
 
 
@@ -661,15 +678,15 @@ class UserDetailView(APIView):
             if field in request.data:
                 setattr(user, field, request.data[field])
         if "storage_quota_mb" in request.data:
-            user.storage_quota_mb = int(request.data["storage_quota_mb"])
+            user.storage_quota_mb = as_int(request.data["storage_quota_mb"], field="storage_quota_mb", minimum=0)
         if "is_disabled" in request.data:
-            user.is_disabled = bool(request.data["is_disabled"])
+            user.is_disabled = parse_bool(request.data["is_disabled"], field="is_disabled")
             user.is_active = not user.is_disabled
         if "department" in request.data:
-            dept_id = request.data.get("department")
+            dept_id = as_int(request.data["department"], field="department") if request.data["department"] else None
             user.department = Department.objects.filter(pk=dept_id).first() if dept_id else None
         if "tenant" in request.data:
-            tenant_id = request.data.get("tenant")
+            tenant_id = as_int(request.data["tenant"], field="tenant") if request.data["tenant"] else None
             user.tenant = Tenant.objects.filter(pk=tenant_id).first() if tenant_id else None
         user.save()
         role_ids = request.data.get("role_ids")
@@ -714,7 +731,9 @@ class AdminResetPasswordView(APIView):
         ser = AdminResetPasswordSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         user.set_password(ser.validated_data["new_password"])
-        user.save(update_fields=["password"])
+        # B12：管理员重置密码同样吊销该用户所有旧 token
+        user.token_version += 1
+        user.save(update_fields=["password", "token_version"])
         return Response({"message": "密码已重置"})
 
 
@@ -757,10 +776,7 @@ class AdminBatchActionView(APIView):
             n = qs.exclude(is_superuser=True).delete()[0]
             msg = f"已删除 {n} 个用户"
         elif action == "quota":
-            try:
-                quota = int(request.data.get("storage_quota_mb", 2048))
-            except (TypeError, ValueError):
-                return Response({"message": "配额必须是整数"}, status=status.HTTP_400_BAD_REQUEST)
+            quota = as_int(request.data.get("storage_quota_mb"), default=2048, field="storage_quota_mb", minimum=0)
             n = qs.update(storage_quota_mb=quota)
             msg = f"已为 {n} 个用户设置配额 {quota}MB"
         elif action == "roles":
@@ -792,7 +808,10 @@ class AdminBatchActionView(APIView):
                     n_tok += 1
             except Exception:
                 n_tok = 0
-            msg = f"已强制 {qs.count()} 个用户下线（会话 {n_sess} 个 / 吊销令牌 {n_tok} 个）"
+            # B12：黑名单只挡 refresh，access 在有效期内仍可用；
+            # token_version +1 让所有已签发 access 立即失效（认证端校验 tv claim）
+            n_tv = qs.update(token_version=F("token_version") + 1)
+            msg = f"已强制 {qs.count()} 个用户下线（会话 {n_sess} 个 / 吊销令牌 {n_tok} 个 / 令牌版本 {n_tv} 个）"
         elif action == "reset_2fa":
             n = TwoFactorSecret.objects.filter(user__in=qs).update(
                 enabled=False, confirmed_at=None, last_used_at=None
@@ -945,7 +964,7 @@ class OnlineUsersView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        minutes = int(request.query_params.get("minutes", 15))
+        minutes = as_int(request.query_params.get("minutes"), default=15, field="minutes", minimum=1, maximum=43200)
         qs = User.objects.filter(last_active_at__gte=timezone.now() - timezone.timedelta(minutes=minutes))
         return Response({"list": UserSerializer(qs, many=True).data, "count": qs.count()})
 
@@ -1023,8 +1042,8 @@ class MyInviteCodesView(APIView):
         return Response({"list": InviteCodeSerializer(qs, many=True).data, "total": qs.count()})
 
     def post(self, request):
-        max_uses = int(request.data.get("max_uses", 1))
-        expires_days = int(request.data.get("expires_days", 30))
+        max_uses = as_int(request.data.get("max_uses"), default=1, field="max_uses", minimum=0)
+        expires_days = as_int(request.data.get("expires_days"), default=30, field="expires_days", minimum=0)
         code = InviteCode.generate(request.user, max_uses=max_uses, expires_days=expires_days)
         return Response(InviteCodeSerializer(code).data, status=status.HTTP_201_CREATED)
 
@@ -1089,7 +1108,7 @@ class DepartmentListView(APIView):
 
     def get(self, request):
         tenant = request.query_params.get("tenant")
-        tenant_id = int(tenant) if tenant else None
+        tenant_id = as_int(tenant, field="tenant") if tenant else None
         flat = request.query_params.get("flat") == "1"
         if flat:
             qs = Department.objects.all().order_by("sort", "id")
@@ -1103,14 +1122,16 @@ class DepartmentListView(APIView):
         name = (request.data.get("name") or "").strip()
         if not name:
             return Response({"message": "部门名不能为空"}, status=status.HTTP_400_BAD_REQUEST)
-        parent_id = request.data.get("parent")
+        parent_id = as_int(request.data.get("parent"), field="parent") if request.data.get("parent") else None
+        tenant_fk = as_int(request.data.get("tenant"), field="tenant") if request.data.get("tenant") else None
+        leader_id = as_int(request.data.get("leader"), field="leader") if request.data.get("leader") else None
         dept = Department.objects.create(
             name=name[:100],
             code=(request.data.get("code") or "")[:50],
             parent=Department.objects.filter(pk=parent_id).first() if parent_id else None,
-            tenant=Tenant.objects.filter(pk=request.data.get("tenant")).first() if request.data.get("tenant") else None,
-            leader=User.objects.filter(pk=request.data.get("leader")).first() if request.data.get("leader") else None,
-            sort=int(request.data.get("sort") or 0),
+            tenant=Tenant.objects.filter(pk=tenant_fk).first() if tenant_fk else None,
+            leader=User.objects.filter(pk=leader_id).first() if leader_id else None,
+            sort=as_int(request.data.get("sort"), default=0, field="sort"),
         )
         return Response(DepartmentSerializer(dept).data, status=status.HTTP_201_CREATED)
 
@@ -1141,16 +1162,16 @@ class DepartmentDetailView(APIView):
         if "code" in request.data:
             dept.code = (request.data["code"] or "")[:50]
         if "sort" in request.data:
-            dept.sort = int(request.data["sort"] or 0)
+            dept.sort = as_int(request.data["sort"], default=0, field="sort")
         if "is_active" in request.data:
-            dept.is_active = bool(request.data["is_active"])
+            dept.is_active = parse_bool(request.data["is_active"], field="is_active")
         if "leader" in request.data:
-            lid = request.data.get("leader")
+            lid = as_int(request.data.get("leader"), field="leader") if request.data.get("leader") else None
             dept.leader = User.objects.filter(pk=lid).first() if lid else None
         if "parent" in request.data:
-            pid = request.data.get("parent")
+            pid = as_int(request.data.get("parent"), field="parent") if request.data.get("parent") else None
             # 防止把上级设为自己或自己的后代，造成环
-            if pid and int(pid) in (dept.descendant_ids(include_self=True)):
+            if pid and pid in (dept.descendant_ids(include_self=True)):
                 return Response({"message": "不能将部门移动到自身或其下级"}, status=400)
             dept.parent = Department.objects.filter(pk=pid).first() if pid else None
         dept.save()
@@ -1220,7 +1241,7 @@ class TenantDetailView(APIView):
         if "expire_at" in request.data:
             tenant.expire_at = request.data["expire_at"] or None
         if "is_active" in request.data:
-            tenant.is_active = bool(request.data["is_active"])
+            tenant.is_active = parse_bool(request.data["is_active"], field="is_active")
         tenant.save()
         return Response(TenantSerializer(tenant).data)
 
@@ -1247,6 +1268,10 @@ def _guard(fn):
     def inner(self, request, *args, **kwargs):
         try:
             return fn(self, request, *args, **kwargs)
+        except ValidationError as exc:
+            # core/validators 的 as_int/parse_bool 走 DRF ValidationError，
+            # 与 ValueError 一样按 400 处理，避免变成 422
+            return Response({"ok": False, "error": str(exc.detail[0]) if exc.detail else "参数有误", "code": 400}, status=400)
         except ValueError as exc:
             return Response({"ok": False, "error": str(exc), "code": 400}, status=400)
         except Exception as exc:  # noqa: BLE001 —— 结构化降级
@@ -1550,7 +1575,7 @@ class FollowListView(APIView):
     @_guard
     def get(self, request):
         kind = request.query_params.get("type") or "following"
-        limit = min(int(request.query_params.get("limit", 50) or 50), 200)
+        limit = as_int(request.query_params.get("limit"), default=50, field="limit", minimum=1, maximum=200)
         if kind == "followers":
             qs = [f.follower for f in
                   UserFollow.objects.filter(following=request.user).select_related("follower")[:limit]]

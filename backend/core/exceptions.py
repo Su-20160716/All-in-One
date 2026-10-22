@@ -1,6 +1,12 @@
+# -*- coding: utf-8 -*-
 """统一异常处理：把 DRF 异常转成 {code, message, detail} 结构"""
+import logging
+
+from django.conf import settings
 from rest_framework.response import Response
 from rest_framework.views import exception_handler
+
+logger = logging.getLogger(__name__)
 
 
 def _record(exc, context):
@@ -32,11 +38,26 @@ def custom_exception_handler(exc, context):
                         parts.append(f"{k}: {v[0]}")
                     else:
                         parts.append(f"{k}: {v}")
+            elif isinstance(data, (list, tuple)):
+                # DRF ValidationError 的 detail 是列表（如 as_int 抛的），
+                # 直接 str() 会带上方括号和引号，逐条拍平 join
+                parts = [str(x) for x in data]
             else:
                 parts.append(str(data))
-            message = "；".join(parts)
+            message = "；".join(parts) or "参数校验失败"
         return Response(
             {"code": response.status_code, "message": message, "detail": data},
             status=response.status_code,
         )
-    return Response({"code": 500, "message": "服务器内部错误", "detail": str(exc)}, status=500)
+    # 未识别异常（ValueError 等）：DRF 默认会 re-raise 成 500，
+    # 这里结构化兜底。生产环境不回显 str(exc)——可能带 SQL、路径、
+    # 密钥片段；完整堆栈进日志，前端只拿通用文案（S1-B25）。
+    request = (context or {}).get("request")
+    logger.exception(
+        "未处理异常 %s %s", getattr(request, "method", ""), getattr(request, "path", "")
+    )
+    if settings.DEBUG:
+        return Response(
+            {"code": 500, "message": "服务器内部错误", "detail": str(exc)}, status=500
+        )
+    return Response({"code": 500, "message": "服务器内部错误"}, status=500)

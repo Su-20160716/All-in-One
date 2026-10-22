@@ -9,6 +9,7 @@ from django.db.models import Count, Max, Q
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import serializers, status
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -24,6 +25,7 @@ from core.models import (
 from core.pagination import StandardPagination
 from core.scoping import scope_queryset, visible_user_ids
 from core.utils import format_size
+from core.validators import as_int
 
 
 # ---------------- 序列化器 ----------------
@@ -548,11 +550,8 @@ class FullTextSearchView(APIView):
             return Response({"total": 0, "results": [], "terms": [], "took_ms": 0, "query": "",
                              "syntax": parse_syntax(""), "by_module": [], "group_counts": {}})
         modules = [m for m in (request.query_params.get("module") or "").split(",") if m]
-        try:
-            limit = min(int(request.query_params.get("limit", 20)), 100)
-            offset = max(int(request.query_params.get("offset", 0)), 0)
-        except (TypeError, ValueError):
-            return Response({"ok": False, "error": "limit / offset 需为整数"}, status=400)
+        limit = as_int(request.query_params.get("limit"), default=20, field="limit", minimum=1, maximum=100)
+        offset = as_int(request.query_params.get("offset"), default=0, field="offset", minimum=0)
         data = search(q, visible_user_ids(request.user), modules=modules or None, limit=limit, offset=offset)
         data["limit"] = limit
         data["offset"] = offset
@@ -573,7 +572,7 @@ class SearchSuggestView(APIView):
         from core.search import suggest
 
         q = request.query_params.get("q") or ""
-        limit = min(int(request.query_params.get("limit", 10)), 30)
+        limit = as_int(request.query_params.get("limit"), default=10, field="limit", minimum=1, maximum=30)
         return Response({"list": suggest(q, visible_user_ids(request.user), limit=limit)})
 
 
@@ -614,7 +613,7 @@ class SearchHistoryView(APIView):
 
     def get(self, request):
         from core.models import SearchQueryLog
-        limit = min(int(request.query_params.get("limit", 20)), 100)
+        limit = as_int(request.query_params.get("limit"), default=20, field="limit", minimum=1, maximum=100)
         rows = SearchQueryLog.objects.filter(owner=request.user)[:limit]
         # 去重（保留最新一次）
         seen, items = set(), []
@@ -679,6 +678,11 @@ def _guard(fn):
     def inner(self, request, *args, **kwargs):
         try:
             return fn(self, request, *args, **kwargs)
+        except ValidationError as exc:
+            # core/validators 的 as_int/parse_bool 走 DRF ValidationError，
+            # 与 ValueError 一样按 400 处理，避免变成 422
+            detail = exc.detail[0] if isinstance(exc.detail, list) and exc.detail else exc.detail
+            return Response({"ok": False, "error": str(detail), "code": 400}, status=400)
         except ValueError as exc:
             return Response({"ok": False, "error": str(exc), "code": 400}, status=400)
         except Exception as exc:  # noqa: BLE001 —— 结构化降级
@@ -845,7 +849,7 @@ class AnnouncementReadTrendView(APIView):
         from django.contrib.auth import get_user_model
 
         UserModel = get_user_model()
-        window = min(max(int(request.query_params.get("days", 7) or 7), 1), 30)
+        window = as_int(request.query_params.get("days"), default=7, field="days", minimum=1, maximum=30)
         active_users = UserModel.objects.filter(is_active=True).count() or 1
         today = timezone.localdate()
         start_day = today - timedelta(days=window - 1)
@@ -983,7 +987,7 @@ class AdminSlowEndpointView(APIView):
     def get(self, request):
         from core.platform import slow_endpoints
 
-        limit = min(max(int(request.query_params.get("limit", 10) or 10), 1), 50)
+        limit = as_int(request.query_params.get("limit"), default=10, field="limit", minimum=1, maximum=50)
         return Response(slow_endpoints(limit=limit))
 
 
@@ -1003,7 +1007,7 @@ class AdminExceptionListView(APIView):
         if kw:
             qs = qs.filter(Q(etype__icontains=kw) | Q(message__icontains=kw)
                            | Q(location__icontains=kw) | Q(path__icontains=kw))
-        limit = min(max(int(request.query_params.get("limit", 50) or 50), 1), 200)
+        limit = as_int(request.query_params.get("limit"), default=50, field="limit", minimum=1, maximum=200)
         return Response({
             "list": [
                 {
@@ -1048,7 +1052,7 @@ class AdminLoginFailTopView(APIView):
         from accounts.models import LoginLog
         from accounts.views import LOGIN_LOCK_THRESHOLD, login_lock_state
 
-        days = min(max(int(request.query_params.get("days", 7) or 7), 1), 90)
+        days = as_int(request.query_params.get("days"), default=7, field="days", minimum=1, maximum=90)
         since = timezone.now() - timezone.timedelta(days=days)
         qs = LoginLog.objects.filter(is_success=False, created_at__gte=since)
         by_account = [
@@ -1089,7 +1093,7 @@ class AdminTableStatsView(APIView):
     def get(self, request):
         from core.platform import table_stats
 
-        top = min(max(int(request.query_params.get("top", 60) or 60), 1), 300)
+        top = as_int(request.query_params.get("top"), default=60, field="top", minimum=1, maximum=300)
         return Response(table_stats(top=top))
 
 
@@ -1239,8 +1243,8 @@ class AdminAuditSearchView(APIView):
 
         q = request.query_params.get("q") or ""
         kinds = [k for k in (request.query_params.get("kinds") or "").split(",") if k]
-        limit = request.query_params.get("limit") or 50
-        return Response(audit_search(q=q, kinds=kinds or None, limit=int(limit)))
+        limit = as_int(request.query_params.get("limit"), default=50, field="limit", minimum=1, maximum=200)
+        return Response(audit_search(q=q, kinds=kinds or None, limit=limit))
 
 
 # ---------------- F641 管理员群发通知 ----------------

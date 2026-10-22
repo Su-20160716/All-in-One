@@ -1,6 +1,8 @@
 """用户/角色/权限/租户/部门 序列化"""
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
+from rest_framework_simplejwt.exceptions import InvalidToken
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 
 from accounts.models import (
     DATA_SCOPE_CHOICES,
@@ -16,6 +18,32 @@ from accounts.models import (
 )
 
 User = get_user_model()
+
+
+class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """B12：登录签发时把 token_version 写进 tv claim，
+    认证端（accounts.auth.TokenVersionJWTAuthentication）据此判断 token 是否已失效"""
+
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        token["tv"] = user.token_version
+        return token
+
+
+class MyTokenRefreshSerializer(TokenRefreshSerializer):
+    """B12：refresh 时同样校验 tv claim —— 改密后旧 refresh 一律拒绝，
+    避免「旧 access 失效但旧 refresh 还能续出新 access」的半失效状态"""
+
+    def validate(self, attrs):
+        refresh = attrs["refresh"]
+        try:
+            user = User.objects.filter(id=refresh.get("user_id")).first()
+        except Exception:
+            user = None
+        if user is None or refresh.get("tv") != user.token_version:
+            raise InvalidToken("登录态已失效，请重新登录")
+        return super().validate(attrs)
 
 
 class RegisterSerializer(serializers.ModelSerializer):

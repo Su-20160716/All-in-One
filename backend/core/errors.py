@@ -29,3 +29,6 @@ ERR_RESOURCE_LOCKED = 1012     # 资源被锁定
 ERR_NETWORK = 1013              # 网络异常
 ERR_SERVER = 1014               # 服务器内部错误
 ERR_TOKEN_EXPIRED = 1015       # Token 已过期
+ERR_LOGIN_LOCKED = 1016        # 登录连续失败，账号临时锁定
+ERR_TWOFA_REQUIRED = 1017      # 账号已开启两步验证，需要 TOTP 验证码
+ERR_TWOFA_INVALID = 1018       # 两步验证码错误或已过期

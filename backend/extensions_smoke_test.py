@@ -370,7 +370,10 @@ def ws_collab_test(note_id, username="admin"):
 
     User = get_user_model()
     user = User.objects.get(username=username)
-    token = str(RefreshToken.for_user(user).access_token)
+    tok = RefreshToken.for_user(user)
+    # B12：与登录签发保持一致，带上 tv claim（WS 中间件会校验 token_version）
+    tok["tv"] = user.token_version
+    token = str(tok.access_token)
 
     async def run():
         results = {}

@@ -17,6 +17,7 @@ from django.db.models import Count, Q, Sum
 from django.http import FileResponse, HttpResponse, StreamingHttpResponse
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -25,6 +26,7 @@ from rest_framework.views import APIView
 from core.models import Notification, notify
 from core.scoping import is_visible, scope_queryset
 from core.utils import file_kind, format_size, sha1_file
+from core.validators import as_int, parse_bool
 from files import office
 from files.models import (
     ChunkUpload,
@@ -103,6 +105,18 @@ def _owner_folder(user, folder_id):
     except (TypeError, ValueError):
         return None  # 非法 id 视为根目录，避免 500
     return Folder.objects.filter(pk=folder_id, owner=user).first()
+
+
+def _would_create_cycle(folder, new_parent):
+    """把 folder 移动到 new_parent 下是否会形成环：沿 new_parent 祖先链上溯，遇到 folder 即成环"""
+    node = new_parent
+    guard = 0
+    while node is not None and guard < 100:
+        if node.pk == folder.pk:
+            return True
+        node = node.parent
+        guard += 1
+    return False
 
 
 # ============ F559 操作记录 / F561 可见性快照 辅助 ============
@@ -217,13 +231,22 @@ class FolderTreeView(APIView):
     """完整文件夹嵌套树（移动/目录导航用）"""
 
     def get(self, request):
-        def build(parent_id):
+        def build(parent_id, visited):
             qs = Folder.objects.filter(owner=request.user, parent_id=parent_id).order_by("name")
-            return [{
-                "id": f.id, "name": f.name, "color": f.color, "parent": f.parent_id,
-                "children": build(f.id),
-            } for f in qs]
-        return Response({"tree": build(None)})
+            nodes = []
+            for f in qs:
+                # 防递归：历史脏数据可能成环，已访问过的 id 不再展开
+                if f.id in visited:
+                    nodes.append({"id": f.id, "name": f.name, "color": f.color, "parent": f.parent_id,
+                                  "children": [], "cycle": True})
+                    continue
+                visited.add(f.id)
+                nodes.append({
+                    "id": f.id, "name": f.name, "color": f.color, "parent": f.parent_id,
+                    "children": build(f.id, visited),
+                })
+            return nodes
+        return Response({"tree": build(None, set())})
 
 
 class FolderBreadcrumbView(APIView):
@@ -260,14 +283,21 @@ class FolderDetailView(APIView):
             folder.color = request.data["color"]
         if "parent" in request.data:
             new_parent_id = request.data.get("parent")
-            if new_parent_id in (None, "", "null"):
+            if new_parent_id in (None, "", "null", "0"):
                 folder.parent = None
             else:
+                try:
+                    new_parent_id = as_int(new_parent_id, field="parent")
+                except ValidationError:
+                    return Response({"message": "parent 必须是整数"}, status=status.HTTP_400_BAD_REQUEST)
                 new_parent = Folder.objects.filter(pk=new_parent_id, owner=request.user).first()
                 if not new_parent:
                     return Response({"message": "目标文件夹不存在"}, status=status.HTTP_404_NOT_FOUND)
                 if new_parent.pk == folder.pk:
                     return Response({"message": "不能移动到自身"}, status=status.HTTP_400_BAD_REQUEST)
+                # 环检测：不能移动到自己的子孙目录下
+                if _would_create_cycle(folder, new_parent):
+                    return Response({"message": "不能移动到自身的子文件夹下"}, status=status.HTTP_400_BAD_REQUEST)
                 folder.parent = new_parent
         folder.save()
         return Response(FolderSerializer(folder).data)
@@ -588,7 +618,7 @@ class FileDetailView(APIView):
             _log_op(request.user, fm, "move", from_folder=from_folder_old,
                     to_folder=_folder_label(fm.folder))
         if "is_star" in request.data:
-            fm.is_star = bool(request.data["is_star"])
+            fm.is_star = parse_bool(request.data["is_star"], field="is_star")
             fields.append("is_star")
         if "description" in request.data:
             fm.description = request.data["description"][:500]
@@ -807,7 +837,9 @@ class FileDownloadView(APIView):
             token = request.query_params.get("share") or request.query_params.get("token")
             if not token:
                 return Response(
-                    {"message": "非本人文件，需通过共享链接下载", "code": 1016},
+                    # 1016 是登录锁定专用码（accounts LoginView），
+                    # 分享下载场景复用会污染前端锁定提示，这里用 1011 无操作权限。
+                    {"message": "非本人文件，需通过共享链接下载", "code": 1011},
                     status=status.HTTP_403_FORBIDDEN,
                 )
             link = find_link(token, file_id=fm.pk)
@@ -1000,7 +1032,7 @@ class FileToPdfView(APIView):
     """
 
     def post(self, request, pk):
-        return self._convert(request, pk, force=bool(request.data.get("force")))
+        return self._convert(request, pk, force=parse_bool(request.data.get("force"), field="force"))
 
     def get(self, request, pk):
         return self._convert(request, pk, force=request.query_params.get("force") == "1")
@@ -1322,7 +1354,7 @@ class ShareLinkDetailView(APIView):
             else:
                 link.expire_at = None
         if "is_revoked" in request.data:
-            link.is_revoked = bool(request.data["is_revoked"])
+            link.is_revoked = parse_bool(request.data["is_revoked"], field="is_revoked")
         link.save()
         if link.file:
             _record_visibility(link.file, request.user, note="更新共享链接", action="share_update")

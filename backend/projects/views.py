@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 
 from accounts.models import User
 from core.models import notify
+from core.validators import as_int
 from projects.models import (
     AcceptanceItem,
     Board,
@@ -257,7 +258,7 @@ class BoardDetailView(APIView):
         if "name" in request.data:
             board.name = request.data["name"].strip() or board.name
         if "sort_order" in request.data:
-            board.sort_order = int(request.data["sort_order"])
+            board.sort_order = as_int(request.data["sort_order"], field="sort_order")
         board.save()
         return Response(BoardSerializer(board).data)
 
@@ -286,7 +287,7 @@ class CardListView(APIView):
             board=board, title=title, description=request.data.get("description", ""),
             priority=request.data.get("priority", "medium"), status=request.data.get("status", "todo"),
             due_date=request.data.get("due_date") or None,
-            story_points=int(request.data.get("story_points", 0) or 0),
+            story_points=as_int(request.data.get("story_points"), default=0, field="story_points", minimum=0),
             sort_order=max_order + 1, created_by=request.user,
         )
         if request.data.get("labels"):
@@ -294,7 +295,7 @@ class CardListView(APIView):
             card.save(update_fields=["labels"])
         assignee_ids = request.data.get("assignee_ids") or []
         if assignee_ids:
-            card.assignees.set(User.objects.filter(id__in=assignee_ids))
+            card.assignees.set(User.objects.filter(id__in=[as_int(x, field="assignee_ids") for x in assignee_ids]))
             for u in card.assignees.all():
                 if u.id != request.user.id:
                     notify(u, f"你被分配了新任务「{card.title}」", category="project", link=f"/projects/{board.project_id}")
@@ -320,7 +321,7 @@ class CardDetailView(APIView):
             if f in request.data:
                 setattr(card, f, request.data[f])
         if "story_points" in request.data:
-            card.story_points = int(request.data["story_points"] or 0)
+            card.story_points = as_int(request.data["story_points"], default=0, field="story_points", minimum=0)
         if "status" in request.data:
             new_status = request.data["status"]
             if new_status == "doing" and not card.started_at:
@@ -335,12 +336,15 @@ class CardDetailView(APIView):
         if "labels" in request.data and isinstance(request.data["labels"], list):
             card.labels = request.data["labels"][:10]
         if "board" in request.data:
-            new_board = Board.objects.filter(pk=request.data["board"], project=card.board.project).first()
+            new_board_id = as_int(request.data["board"], field="board") if request.data.get("board") else None
+            new_board = Board.objects.filter(pk=new_board_id, project=card.board.project).first() if new_board_id else None
             if new_board:
                 card.board = new_board
                 card.sort_order = (TaskCard.objects.filter(board=new_board).aggregate(m=ModelsMax("sort_order"))["m"] or 0) + 1
         if "assignee_ids" in request.data:
-            card.assignees.set(User.objects.filter(id__in=request.data["assignee_ids"]))
+            card.assignees.set(User.objects.filter(id__in=[
+                as_int(x, field="assignee_ids") for x in (request.data["assignee_ids"] or [])
+            ]))
         card.save()
         _log_activity(card.board.project, request.user, "更新了任务", card.title)
         return Response(TaskCardSerializer(card).data)
@@ -359,12 +363,12 @@ class CardBatchView(APIView):
     """项目内批量任务：status / priority / assignees / delete / move"""
 
     def post(self, request):
-        project_id = request.data.get("project_id")
+        project_id = as_int(request.data.get("project_id"), field="project_id")
         ids = request.data.get("card_ids") or []
         project = Project.objects.filter(pk=project_id).first()
         if not project or not _can_access(request.user, project):
             return Response({"message": "项目不存在或无权访问"}, status=404)
-        qs = TaskCard.objects.filter(id__in=ids, board__project=project)
+        qs = TaskCard.objects.filter(id__in=[as_int(x, field="card_ids") for x in ids], board__project=project)
         action = request.data.get("action")
         if action == "delete":
             n = qs.delete()[0]
@@ -415,8 +419,8 @@ class CardMoveView(APIView):
         card = _card_of(request.user, pk)
         if not card:
             return Response({"message": "任务不存在"}, status=404)
-        target_board_id = request.data.get("board_id")
-        target_index = int(request.data.get("index", 0))
+        target_board_id = as_int(request.data.get("board_id"), field="board_id") if request.data.get("board_id") else None
+        target_index = as_int(request.data.get("index"), default=0, field="index", minimum=0)
         if target_board_id:
             target_board = Board.objects.filter(pk=target_board_id, project=card.board.project).first()
             if not target_board:
@@ -524,7 +528,7 @@ class WorkLogListView(APIView):
         card = _card_of(request.user, pk)
         if not card:
             return Response({"message": "任务不存在"}, status=404)
-        minutes = int(request.data.get("minutes", 0) or 0)
+        minutes = as_int(request.data.get("minutes"), default=0, field="minutes", minimum=0)
         if minutes <= 0:
             return Response({"message": "工时必须大于 0 分钟"}, status=400)
         wl = WorkLog.objects.create(card=card, user=request.user, minutes=minutes, note=request.data.get("note", "")[:200])
@@ -808,10 +812,7 @@ class BoardWipView(APIView):
         board = _board_of(request.user, board_id)
         if not board:
             return Response({"message": "看板列不存在或无权访问"}, status=404)
-        try:
-            limit = int(request.data.get("wip_limit", 0) or 0)
-        except (TypeError, ValueError):
-            return Response({"message": "wip_limit 必须为整数"}, status=400)
+        limit = as_int(request.data.get("wip_limit"), default=0, field="wip_limit", minimum=0)
         board.wip_limit = max(limit, 0)
         board.save(update_fields=["wip_limit"])
         active = board.cards.exclude(status="done").count()
@@ -855,10 +856,7 @@ class ProjectWeeklyReportView(APIView):
         project = Project.objects.filter(pk=project_id).first()
         if not project or not _can_access(request.user, project):
             return Response({"message": "项目不存在或无权访问"}, status=404)
-        try:
-            span = min(max(int(request.query_params.get("days", 7)), 1), 30)
-        except (TypeError, ValueError):
-            span = 7
+        span = as_int(request.query_params.get("days"), default=7, field="days", minimum=1, maximum=30)
         today = timezone.localdate()
         days = [today - timedelta(days=i) for i in range(span - 1, -1, -1)]
         cards = list(TaskCard.objects.filter(board__project=project))
@@ -913,9 +911,12 @@ class CardDependencyView(APIView):
         project_id = card.board.project_id
         added = []
         for bid in ids:
-            if not bid or int(bid) == card.id:
+            if not bid:
                 continue
-            other = TaskCard.objects.filter(pk=bid, board__project_id=project_id).first()
+            bid_int = as_int(bid, field="blocked_by_id")
+            if bid_int == card.id:
+                continue
+            other = TaskCard.objects.filter(pk=bid_int, board__project_id=project_id).first()
             if not other:
                 continue
             CardDependency.objects.get_or_create(card=card, blocked_by=other)
@@ -926,9 +927,7 @@ class CardDependencyView(APIView):
         card = _card_of(request.user, pk)
         if not card:
             return Response({"message": "任务不存在"}, status=404)
-        bid = request.query_params.get("blocked_by_id")
-        if not bid:
-            return Response({"message": "缺少 blocked_by_id"}, status=400)
+        bid = as_int(request.query_params.get("blocked_by_id"), field="blocked_by_id")
         deleted = card.dependencies.filter(blocked_by_id=bid).delete()[0]
         return Response({"message": f"已移除 {deleted} 条依赖"})
 
@@ -1012,10 +1011,7 @@ class CardEstimateView(APIView):
         card = _card_of(request.user, pk)
         if not card:
             return Response({"message": "任务不存在"}, status=404)
-        try:
-            minutes = int(request.data.get("estimated_minutes", 0) or 0)
-        except (TypeError, ValueError):
-            return Response({"message": "estimated_minutes 必须为整数"}, status=400)
+        minutes = as_int(request.data.get("estimated_minutes"), default=0, field="estimated_minutes", minimum=0)
         card.estimated_minutes = max(minutes, 0)
         card.save(update_fields=["estimated_minutes"])
         return Response({"message": "已更新预估工时", "estimated_minutes": card.estimated_minutes})
@@ -1080,13 +1076,11 @@ class CardBatchMoveView(APIView):
         cards = list(TaskCard.objects.filter(id__in=ids, board__project=project).order_by("sort_order", "id"))
         if not cards:
             return Response({"message": "没有可移动的卡片"}, status=400)
-        start = request.data.get("index")
-        if start is None:
+        raw_start = request.data.get("index")
+        if raw_start is None:
             start = (TaskCard.objects.filter(board=board).aggregate(m=ModelsMax("sort_order"))["m"] or 0) + 1
-        try:
-            start = max(int(start), 0)
-        except (TypeError, ValueError):
-            start = 0
+        else:
+            start = as_int(raw_start, default=0, field="index", minimum=0)
         moved = []
         for i, card in enumerate(cards):
             card.board = board
@@ -1128,8 +1122,8 @@ class CardTemplateListView(APIView):
         tpl = CardTemplate.objects.create(
             owner=request.user, name=(request.data.get("name") or title)[:200], title=title,
             description=request.data.get("description", ""), priority=request.data.get("priority", "medium"),
-            labels=request.data.get("labels") or [], story_points=int(request.data.get("story_points", 0) or 0),
-            estimated_minutes=int(request.data.get("estimated_minutes", 0) or 0),
+            labels=request.data.get("labels") or [], story_points=as_int(request.data.get("story_points"), default=0, field="story_points", minimum=0),
+            estimated_minutes=as_int(request.data.get("estimated_minutes"), default=0, field="estimated_minutes", minimum=0),
         )
         return Response(CardTemplateSerializer(tpl).data, status=201)
 

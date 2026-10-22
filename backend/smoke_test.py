@@ -77,6 +77,10 @@ def main():
     ct = auth_client(rr.data["access"])
     r = ct.post("/api/auth/profile/change-password/", {"old_password": "test123", "new_password": "newpass456"}, format="json")
     check("修改密码", r.status_code == 200)
+    # B12：改密后旧 token 立即失效是预期行为 —— 重新登录拿新凭证再走注销
+    r = APIClient().post("/api/auth/login/", {"username": f"throw{ts}", "password": "newpass456"}, format="json")
+    check("改密后重新登录", r.status_code == 200)
+    ct = auth_client(r.data["access"])
     r = ct.post("/api/auth/profile/deactivate/", {"password": "newpass456"}, format="json")
     check("注销账号", r.status_code == 200)
 

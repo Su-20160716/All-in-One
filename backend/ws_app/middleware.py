@@ -27,7 +27,9 @@ def _resolve_user(token: str):
     """校验 token 并取出用户，返回 (user, reason)。
 
     reason 仅用于日志排障，取值：ok / no-token / token-expired /
-    token-invalid(...) / token-missing-user_id / user-not-found-or-inactive
+    token-invalid(...) / token-missing-user_id / user-not-found-or-inactive /
+    token-version-mismatch（B12：tv claim 与用户当前 token_version 不一致，
+    改密 / 强制下线后签发的旧 token 一律拒绝，与 HTTP 侧认证保持同一套规则）
     """
     from django.contrib.auth import get_user_model
     from rest_framework_simplejwt.exceptions import TokenError
@@ -51,6 +53,9 @@ def _resolve_user(token: str):
     user = get_user_model().objects.filter(id=user_id, is_active=True).first()
     if not user:
         return AnonymousUser(), "user-not-found-or-inactive"
+    # B12：tv claim 缺失或与当前 token_version 不一致 → 视为已失效
+    if validated.get("tv") != user.token_version:
+        return AnonymousUser(), "token-version-mismatch"
     return user, "ok"
 
 

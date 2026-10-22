@@ -4,7 +4,9 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.http import HttpResponse, JsonResponse
 from django.urls import include, path
-from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
+from rest_framework_simplejwt.views import TokenVerifyView
+
+from accounts.views import RefreshView  # noqa: E402 —— B12：带 tv claim 校验的刷新视图
 
 
 def api_root(request):
@@ -48,7 +50,7 @@ urlpatterns = [
     path("api/dataintel/", include("dataintel.urls")),
     path("api/officesuite/", include("officesuite.urls")),
     path("api/code/", include("code.urls")),
-    path("api/auth/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("api/auth/refresh/", RefreshView.as_view(), name="token_refresh"),
     path("api/auth/verify/", TokenVerifyView.as_view(), name="token_verify"),
 ]
 

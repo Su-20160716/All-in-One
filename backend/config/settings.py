@@ -42,7 +42,18 @@ if not DEBUG and SECRET_KEY == _DEV_SECRET_KEY:
         "拒绝以内置开发密钥启动。生成方式："
         "python -c \"import secrets; print(secrets.token_urlsafe(64))\""
     )
-ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
+# ALLOWED_HOSTS：开发默认放开（*）；生产必须显式配置域名白名单，
+# 拒绝静默使用通配符（Host 头攻击面）。确需通配可在生产中显式设 DJANGO_ALLOWED_HOSTS="*"。
+_allowed_hosts = [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",") if h.strip()]
+if _allowed_hosts:
+    ALLOWED_HOSTS = _allowed_hosts
+elif DEBUG:
+    ALLOWED_HOSTS = ["*"]
+else:
+    raise ImproperlyConfigured(
+        "生产环境（DJANGO_DEBUG=0）必须通过环境变量 DJANGO_ALLOWED_HOSTS 配置允许的域名"
+        "（逗号分隔，如 example.com,www.example.com）；本地开发无需配置。"
+    )
 
 # ---------------------------------------------------------------------------
 # 写权限策略
@@ -220,6 +231,14 @@ _cors_allowed = os.environ.get("CORS_ALLOWED_ORIGINS", "").strip()
 if _cors_allowed:
     CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_allowed.split(",") if o.strip()]
     CORS_ALLOW_ALL_ORIGINS = False
+elif not DEBUG:
+    # 不拒绝启动（有些部署前后端同域），但必须吼一声：否则前端跨域全挂很难排查
+    import logging as _logging
+
+    _logging.getLogger(__name__).warning(
+        "生产环境未配置 CORS_ALLOWED_ORIGINS：所有跨域请求将被拒绝。"
+        "如前后端不同域，请设置前端站点地址（逗号分隔）。"
+    )
 
 # CSRF 可信来源（admin 登录等表单场景用），逗号分隔
 CSRF_TRUSTED_ORIGINS = [
@@ -229,7 +248,8 @@ CSRF_TRUSTED_ORIGINS = [
 # DRF
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        # B12：带 token_version（tv claim）校验的 JWT 认证，改密/踢人后旧 token 立即失效
+        "accounts.auth.TokenVersionJWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_PAGINATION_CLASS": "core.pagination.StandardPagination",

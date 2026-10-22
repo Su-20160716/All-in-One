@@ -166,6 +166,10 @@ class User(AbstractUser):
     tags = models.JSONField(default=list, blank=True, verbose_name="个人标签")
     dnd_start = models.TimeField(null=True, blank=True, verbose_name="免打扰开始")
     dnd_end = models.TimeField(null=True, blank=True, verbose_name="免打扰结束")
+    # B12：JWT 令牌版本号。签发时写入 tv claim，认证时比对；
+    # 改密 / 强制下线时 +1，令该用户此前签发的所有 token 立即失效
+    # （黑名单只挡 refresh，access 在有效期内仍可用，这个字段补上这个洞）。
+    token_version = models.PositiveIntegerField(default=0, verbose_name="令牌版本号")
 
     class Meta:
         verbose_name = "用户"

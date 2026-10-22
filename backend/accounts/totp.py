@@ -69,7 +69,9 @@ def verify(secret: str, code, window: int = WINDOW) -> bool:
     except (binascii.Error, ValueError):
         return False
     now = _counter()
-    for w in range(-window, window + window + 1):
+    # 容差窗口 ±window：历史上写成 range(-w, w+w+1)，前向多放一个步长，
+    # 等于把验证码有效期延长到 90 秒，削弱防重放强度。
+    for w in range(-window, window + 1):
         if hmac.compare_digest(_hotp(key, now + w), code):
             return True
     return False

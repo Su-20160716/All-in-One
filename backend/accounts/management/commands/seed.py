@@ -3,11 +3,13 @@ python manage.py seed
 - 创建内置角色（admin/user）与权限点
 - 创建默认管理员（用户名/密码可用环境变量 SEED_ADMIN_USERNAME / SEED_ADMIN_PASSWORD 覆盖，
   公网部署务必设置强密码，避免 admin/admin123 裸奔）
+- 生产环境（DJANGO_DEBUG=0）未显式提供 SEED_ADMIN_PASSWORD 时拒绝创建弱密码管理员
 """
 import os
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from accounts.models import Permission, Role
 
@@ -70,7 +72,18 @@ class Command(BaseCommand):
         user_role.permissions.set([created_perms[c] for c in USER_ROLE_PERMS if c in created_perms])
 
         username = os.environ.get("SEED_ADMIN_USERNAME", "admin")
-        password = os.environ.get("SEED_ADMIN_PASSWORD", "admin123")
+        password = os.environ.get("SEED_ADMIN_PASSWORD", "")
+        if not password:
+            if not settings.DEBUG:
+                raise CommandError(
+                    "生产环境（DJANGO_DEBUG=0）必须通过环境变量 SEED_ADMIN_PASSWORD "
+                    "设置强密码后再执行 seed，拒绝创建 admin/admin123 弱密码管理员。"
+                )
+            # 开发默认值：本地开箱即用，公网部署必须显式覆盖
+            password = "admin123"
+            self.stdout.write(self.style.WARNING(
+                "未设置 SEED_ADMIN_PASSWORD，使用开发默认密码 admin123（仅限本地开发，公网部署务必覆盖）"
+            ))
         if not User.objects.filter(username=username).exists():
             User.objects.create_superuser(username=username, password=password, nickname="系统管理员")
             self.stdout.write(self.style.SUCCESS(f"已创建管理员 {username}（密码见环境变量）"))

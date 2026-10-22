@@ -95,6 +95,19 @@ def _folder_of(user, folder_id):
     return NoteFolder.objects.filter(pk=folder_id, owner=user).first()
 
 
+def _would_create_cycle(node, new_parent):
+    """把 node 挂到 new_parent 下是否会形成环：沿 new_parent 祖先链上溯，遇到 node 即成环。
+    node / new_parent 均需为同一模型（Note 或 NoteFolder）的实例。"""
+    cursor = new_parent
+    guard = 0
+    while cursor is not None and guard < 100:
+        if cursor.pk == node.pk:
+            return True
+        cursor = cursor.parent
+        guard += 1
+    return False
+
+
 def extract_outline(text: str):
     """从 Markdown 提取标题目录"""
     outline = []
@@ -260,6 +273,9 @@ class NoteDetailView(APIView):
                 note.parent = Note.objects.filter(pk=int(pid), owner=request.user).first() if pid else None
             except (TypeError, ValueError):
                 return Response({"message": "parent 必须是整数"}, status=400)
+            # 环检测：不能把笔记移动到自己的子笔记下
+            if note.parent and _would_create_cycle(note, note.parent):
+                return Response({"message": "不能移动到自身的子笔记下"}, status=400)
             changed = True
         # F572 六色标记
         if "color" in request.data:
@@ -330,6 +346,11 @@ class NoteBatchView(APIView):
                 parent = Note.objects.filter(pk=int(pid), owner=request.user).first() if pid else None
             except (TypeError, ValueError):
                 return Response({"message": "parent 必须是整数"}, status=400)
+            # 环检测：目标 parent 不能是被移动笔记中任何一篇的后代（含其自身）
+            if parent is not None:
+                for n in qs:
+                    if _would_create_cycle(n, parent):
+                        return Response({"message": "不能移动到自身的子笔记下"}, status=400)
             n = qs.update(parent=parent)
             return Response({"message": f"已移动 {n} 篇"})
         if action == "archive":
@@ -371,14 +392,21 @@ class NoteCopyView(APIView):
 
 class NoteTreeView(APIView):
     def get(self, request):
-        def build(parent_id):
+        def build(parent_id, visited):
             qs = _note_qs(request.user).filter(parent_id=parent_id, is_deleted=False).order_by("-is_pinned", "updated_at")
-            return [
-                {"id": n.id, "title": n.title, "is_public": n.is_public, "is_favorite": n.is_favorite,
-                 "is_pinned": n.is_pinned, "children": build(n.id)}
-                for n in qs
-            ]
-        return Response({"tree": build(None)})
+            nodes = []
+            for n in qs:
+                # 防递归：历史脏数据可能成环，已展开过的 id 不再下钻
+                if n.id in visited:
+                    nodes.append({"id": n.id, "title": n.title, "is_public": n.is_public,
+                                  "is_favorite": n.is_favorite, "is_pinned": n.is_pinned, "children": []})
+                    continue
+                visited.add(n.id)
+                nodes.append({"id": n.id, "title": n.title, "is_public": n.is_public,
+                              "is_favorite": n.is_favorite, "is_pinned": n.is_pinned,
+                              "children": build(n.id, visited)})
+            return nodes
+        return Response({"tree": build(None, set())})
 
 
 class NoteTagListView(APIView):
@@ -1630,6 +1658,9 @@ class NoteFolderDetailView(APIView):
                 return _nb("父文件夹不存在")
             if parent and parent.pk == folder.pk:
                 return _nb("不能移动到自身")
+            # 环检测：不能移动到自身的子文件夹下
+            if parent and _would_create_cycle(folder, parent):
+                return _nb("不能移动到自身的子文件夹下")
             folder.parent = parent
         folder.save()
         return Response({"id": folder.id, "name": folder.name, "parent": folder.parent_id})
