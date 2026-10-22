@@ -5,9 +5,22 @@ from datetime import datetime, time
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 
-from core.scoping import is_visible
+from core.scoping import can_write, is_visible
 
 from devtools.common import fail, ok
+
+# 按模型的写策略（模型名 -> callable(user, obj) -> bool）。
+# 默认 owner-only；审批/报销/合同这类「审批人也要写」的对象在此登记，
+# 避免一刀切把合法业务流程干废。后续新增协作对象在这里扩展即可。
+WRITE_POLICIES = {}
+
+
+def can_write_obj(user, obj):
+    """对象级写权限：优先查 WRITE_POLICIES，未登记则按 owner 判定。"""
+    policy = WRITE_POLICIES.get(obj.__class__.__name__)
+    if policy is not None:
+        return bool(policy(user, obj))
+    return can_write(user, obj)
 
 
 def obj_dict(o, extra=(), owner_name=None):
@@ -35,14 +48,20 @@ def obj_dict(o, extra=(), owner_name=None):
     return d
 
 
-def get_obj(model, pk, user, allow_owner=True):
-    """取对象 + 行级可见性校验（core.scoping 收口）。"""
+def get_obj(model, pk, user, write=False):
+    """取对象 + 行级可见性校验（core.scoping 收口）。
+
+    :param write: True 表示该接口会修改对象，此时额外要求写权限。
+        默认 False 保持既有读行为不变；写接口请显式传 write=True。
+    """
     try:
         o = model.objects.get(pk=pk)
     except model.DoesNotExist:
         raise ValueError("对象不存在")
     if not is_visible(o, user):
         raise ValueError("无权访问该对象")
+    if write and not can_write_obj(user, o):
+        raise ValueError("无权修改该对象")
     return o
 
 

@@ -14,7 +14,7 @@ import zipfile
 import zlib
 from urllib.parse import parse_qsl, urlencode, urlparse
 
-from .common import (as_lines, endpoint, ok, opt_bool, opt_num, opt_str, p,
+from .common import (as_lines, endpoint, fail, ok, opt_bool, opt_num, opt_str, p,
                      req, req_list, req_num, req_str)
 from .data import (CODE39_TABLE, HTTP_HEADERS, HTTP_STATUS, MAGIC_SIGNATURES,
                    MIME_TABLE)

@@ -14,6 +14,9 @@ from django.db.models import Q
 __all__ = [
     "visible_user_ids",
     "scope_queryset",
+    "owner_qs",
+    "get_owned",
+    "can_write",
     "is_visible",
     "data_scope_of",
     "describe_scope",
@@ -104,6 +107,47 @@ def is_visible(obj, user, owner_field="owner") -> bool:
         return True
     owner_id = getattr(obj, f"{owner_field}_id", None)
     return owner_id in ids
+
+
+# ---------------------------------------------------------------------------
+# 写权限：与「读可见范围」严格区分
+#
+# 数据范围（dept / dept_and_sub / all）只决定「能不能看见」，不决定「能不能改」。
+# 历史实现把 scope_queryset 直接复用到 PATCH/DELETE，导致部门负责人甚至全平台
+# 角色可以改删他人笔记、代码文件与办公数据。这里统一收口成 owner 限定。
+#
+# 业务上确实需要「非 owner 可写」的场景（审批人、项目成员），由调用方显式传入
+# 自己的判定逻辑，不要通过放宽本函数来实现。
+# ---------------------------------------------------------------------------
+
+
+def _write_strict() -> bool:
+    """写权限是否严格按 owner 收口（应急可关闭，默认开启）。"""
+    return bool(getattr(settings, "WRITE_SCOPE_STRICT", True))
+
+
+def owner_qs(qs, user, owner_field="owner"):
+    """写操作用的 queryset：默认只含本人拥有的对象。
+
+    `WRITE_SCOPE_STRICT=False` 时回退到旧的读范围行为，仅供紧急回滚使用。
+    """
+    if not _write_strict():
+        return scope_queryset(qs, user, owner_field)
+    return qs.filter(**{f"{owner_field}_id": getattr(user, "id", None)})
+
+
+def get_owned(qs, user, pk, owner_field="owner"):
+    """按主键取「本人拥有」的对象；不存在或非本人返回 None。"""
+    return owner_qs(qs, user, owner_field).filter(pk=pk).first()
+
+
+def can_write(user, obj, owner_field="owner") -> bool:
+    """单对象写权限判定。"""
+    if obj is None:
+        return False
+    if not _write_strict():
+        return is_visible(obj, user, owner_field)
+    return getattr(obj, f"{owner_field}_id", None) == getattr(user, "id", None)
 
 
 def describe_scope(user) -> dict:

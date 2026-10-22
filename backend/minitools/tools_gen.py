@@ -8,7 +8,7 @@ import string
 import time
 import uuid as _uuid
 
-from .common import endpoint, ok, opt_bool, opt_num, opt_str, req_str
+from .common import endpoint, ok, opt_bool, opt_num, opt_str, req_num, req_str
 
 
 _LAST_NAMES = ["王", "李", "张", "刘", "陈", "杨", "赵", "黄", "周", "吴", "徐", "孙", "马", "朱", "胡", "郭", "何", "林", "罗", "郑"]

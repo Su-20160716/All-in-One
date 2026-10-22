@@ -43,13 +43,30 @@ from files.serializers import (
     FolderSerializer,
     ShareLinkSerializer,
 )
+from files.share_access import (
+    ShareAccessError,
+    bump_download,
+    bump_view,
+    find_link,
+    validate_link,
+)
 
 MEDIA = settings.MEDIA_ROOT
 
 
 def _safe_join(base, *paths):
-    target = os.path.realpath(os.path.join(base, *paths))
-    if not target.startswith(os.path.realpath(base)):
+    """把用户可控的相对路径安全地拼到 base 下。
+
+    旧实现用 `startswith(base)` 判断，`/media_evil` 这类同前缀兄弟目录能绕过
+    `/media` 的判断。改用 commonpath，并处理 Windows 跨盘抛出的 ValueError。
+    """
+    base_real = os.path.realpath(base)
+    target = os.path.realpath(os.path.join(base_real, *paths))
+    try:
+        inside = os.path.commonpath([base_real, target]) == base_real
+    except ValueError:
+        inside = False
+    if not inside:
         raise ValueError("非法路径")
     return target
 
@@ -773,18 +790,33 @@ class FileBatchDownloadView(APIView):
 
 
 class FileDownloadView(APIView):
-    """下载文件（记录日志与最近访问，支持共享链接内网访问）"""
+    """下载文件（记录日志与最近访问）
+
+    权限规则（安全收口）：
+    - owner：直接放行
+    - 非 owner：必须带 `?share=<token>`，且该 token 必须指向**本文件**，
+      并完整通过撤销/过期/密码/权限/次数上限校验。
+    不能再用「存在任意一条分享链接」当作放行依据。
+    """
 
     def get(self, request, pk):
         fm = FileMeta.objects.filter(pk=pk, is_deleted=False).first()
         if not fm:
             return Response({"message": "文件不存在"}, status=status.HTTP_404_NOT_FOUND)
         if fm.owner_id != request.user.id:
-            allowed = ShareLink.objects.filter(file=fm, permission__in=["download", "edit"], is_revoked=False).filter(
-                Q(expire_at__isnull=True) | Q(expire_at__gt=timezone.now())
-            ).exists()
-            if not allowed:
-                return Response({"message": "无权下载"}, status=status.HTTP_403_FORBIDDEN)
+            token = request.query_params.get("share") or request.query_params.get("token")
+            if not token:
+                return Response(
+                    {"message": "非本人文件，需通过共享链接下载", "code": 1016},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            link = find_link(token, file_id=fm.pk)
+            try:
+                validate_link(link, request.query_params.get("password", ""), for_download=True)
+            except ShareAccessError as exc:
+                return exc.as_response()
+            if not bump_download(link):
+                return Response({"message": "下载次数已达上限"}, status=status.HTTP_403_FORBIDDEN)
         abs_path = _safe_join(MEDIA, fm.storage_path)
         if not os.path.exists(abs_path):
             return Response({"message": "物理文件缺失"}, status=status.HTTP_404_NOT_FOUND)
@@ -1313,15 +1345,12 @@ class ShareAccessView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, token):
-        link = ShareLink.objects.filter(token=token).first()
-        if not link or link.is_revoked:
-            return Response({"message": "链接不存在或已失效"}, status=404)
-        if link.expire_at and link.expire_at < timezone.now():
-            return Response({"message": "链接已过期"}, status=410)
-        if link.password and request.query_params.get("password", "") != link.password:
-            return Response({"need_password": True, "message": "请输入访问密码"}, status=401)
-        link.view_count += 1
-        link.save(update_fields=["view_count"])
+        link = find_link(token)
+        try:
+            validate_link(link, request.query_params.get("password", ""))
+        except ShareAccessError as exc:
+            return exc.as_response()
+        bump_view(link)
         if link.file:
             fm = link.file
             info = {
@@ -1355,23 +1384,20 @@ class ShareDownloadView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, token, pk):
-        link = ShareLink.objects.filter(token=token, file_id=pk).first()
-        if not link or link.is_revoked:
-            return Response({"message": "链接不存在"}, status=404)
-        if link.expire_at and link.expire_at < timezone.now():
-            return Response({"message": "链接已过期"}, status=410)
-        if link.password and request.query_params.get("password", "") != link.password:
-            return Response({"need_password": True, "message": "请输入访问密码"}, status=401)
-        if link.permission not in ("download", "edit"):
-            return Response({"message": "当前链接不允许下载"}, status=403)
-        if link.max_downloads is not None and link.download_count >= link.max_downloads:
-            return Response({"message": "下载次数已达上限"}, status=403)
+        link = find_link(token, file_id=pk)
+        try:
+            validate_link(link, request.query_params.get("password", ""), for_download=True)
+        except ShareAccessError as exc:
+            return exc.as_response()
         fm = link.file
+        if not fm:
+            return Response({"message": "链接异常"}, status=404)
         abs_path = _safe_join(MEDIA, fm.storage_path)
         if not os.path.exists(abs_path):
             return Response({"message": "物理文件缺失"}, status=404)
-        link.download_count += 1
-        link.save(update_fields=["download_count"])
+        # 原子占用一次下载额度，并发下不会突破 max_downloads
+        if not bump_download(link):
+            return Response({"message": "下载次数已达上限"}, status=403)
         return FileResponse(open(abs_path, "rb"), as_attachment=True, filename=fm.name)
 
 

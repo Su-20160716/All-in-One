@@ -1,29 +1,47 @@
 # -*- coding: utf-8 -*-
-"""代码工坊 —— 序列化助手与公共查询收口。"""
-from core.scoping import scope_queryset
+"""代码工坊 —— 序列化助手与公共查询收口。
+
+读与写分开：
+- `ws_qs` / `file_qs` 按数据范围过滤，用于列表与详情（能看见就能读）
+- `ws_write_qs` / `file_write_qs` 只含本人对象，用于所有写操作
+历史上把读范围直接用于写，导致部门/全平台角色可以改删他人代码文件。
+"""
+from core.scoping import owner_qs, scope_queryset
 
 from .models import CodeFile, CodeWorkspace
 
 
 def ws_qs(user):
-    """当前用户可见的工作区。"""
+    """当前用户可见的工作区（读）。"""
     return scope_queryset(CodeWorkspace.objects.all(), user, "owner")
 
 
-def get_ws(user, pk):
-    obj = ws_qs(user).filter(pk=pk).first()
+def ws_write_qs(user):
+    """当前用户可写的工作区（仅本人）。"""
+    return owner_qs(CodeWorkspace.objects.all(), user, "owner")
+
+
+def get_ws(user, pk, write=False):
+    qs = ws_write_qs(user) if write else ws_qs(user)
+    obj = qs.filter(pk=pk).first()
     if not obj:
         raise ValueError(f"工作区不存在或无权访问: {pk}")
     return obj
 
 
 def file_qs(user):
-    """当前用户可见的代码文件。"""
+    """当前用户可见的代码文件（读）。"""
     return scope_queryset(CodeFile.objects.all(), user, "owner").select_related("workspace")
 
 
-def get_file(user, pk):
-    obj = file_qs(user).filter(pk=pk).first()
+def file_write_qs(user):
+    """当前用户可写的代码文件（仅本人）。"""
+    return owner_qs(CodeFile.objects.all(), user, "owner").select_related("workspace")
+
+
+def get_file(user, pk, write=False):
+    qs = file_write_qs(user) if write else file_qs(user)
+    obj = qs.filter(pk=pk).first()
     if not obj:
         raise ValueError(f"代码文件不存在或无权访问: {pk}")
     return obj

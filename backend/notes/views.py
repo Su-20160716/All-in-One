@@ -16,7 +16,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.scoping import is_visible, scope_queryset
+from core.scoping import is_visible, owner_qs, scope_queryset
 from notes import links as link_lib
 from notes.models import Note, NoteFolder, NoteLink, NoteSnippet, NoteTag, NoteVersion, WordActivity, WritingGoal
 from notes.serializers import NoteSerializer, NoteTagSerializer, NoteVersionSerializer
@@ -35,13 +35,26 @@ SOURCE_LABELS = {
 
 
 def _note_qs(user):
-    """按数据范围取可见笔记（管理员=全部、部门负责人=本部门、普通用户=本人）"""
+    """按数据范围取可见笔记（管理员=全部、部门负责人=本部门、普通用户=本人）
+
+    注意：只用于**读**。写操作请用 `_note_write_qs`，否则部门/全平台范围
+    会连带把他人笔记变成可改可删。
+    """
     return scope_queryset(Note.objects.all(), user)
 
 
-def _get_note(user, pk, include_deleted=False):
-    """单篇可见性校验：详情/更新/导出统一入口"""
-    note = _note_qs(user).filter(pk=pk).first()
+def _note_write_qs(user):
+    """写操作范围：仅本人笔记（owner 收口）。"""
+    return owner_qs(Note.objects.all(), user)
+
+
+def _get_note(user, pk, include_deleted=False, write=False):
+    """单篇笔记取用：详情/更新/导出统一入口。
+
+    :param write: True 表示用于修改/删除，按 owner 限定，不看读范围
+    """
+    qs = _note_write_qs(user) if write else _note_qs(user)
+    note = qs.filter(pk=pk).first()
     if note is None:
         return None
     if not include_deleted and note.is_deleted and note.owner_id != getattr(user, "id", None):
@@ -222,9 +235,9 @@ class NoteDetailView(APIView):
         return Response(data)
 
     def patch(self, request, pk):
-        note = self.get_object(request, pk)
+        note = _get_note(request.user, pk, include_deleted=True, write=True)
         if not note:
-            return Response({"message": "笔记不存在"}, status=404)
+            return Response({"message": "笔记不存在或无权修改"}, status=404)
         changed = False
         if "title" in request.data and request.data["title"]:
             note.title = request.data["title"].strip()[:200]
@@ -275,9 +288,9 @@ class NoteDetailView(APIView):
         return Response(NoteSerializer(note).data)
 
     def delete(self, request, pk):
-        note = self.get_object(request, pk)
+        note = _get_note(request.user, pk, include_deleted=True, write=True)
         if not note:
-            return Response({"message": "笔记不存在"}, status=404)
+            return Response({"message": "笔记不存在或无权删除"}, status=404)
         note.is_deleted = True
         note.deleted_at = timezone.now()
         note.save(update_fields=["is_deleted", "deleted_at"])
@@ -292,7 +305,7 @@ class NoteBatchView(APIView):
         ids = request.data.get("note_ids") or []
         if not ids:
             return Response({"message": "未选择笔记"}, status=400)
-        qs = _note_qs(request.user).filter(id__in=ids)
+        qs = _note_write_qs(request.user).filter(id__in=ids)
         if action == "trash":
             n = qs.update(is_deleted=True, deleted_at=timezone.now())
             return Response({"message": f"已移入回收站 {n} 篇"})
@@ -332,11 +345,11 @@ class NoteTrashView(APIView):
     """回收站：列表 / 清空"""
 
     def get(self, request):
-        qs = _note_qs(request.user).filter(is_deleted=True).order_by("-deleted_at")
+        qs = _note_write_qs(request.user).filter(is_deleted=True).order_by("-deleted_at")
         return Response({"list": NoteSerializer(qs, many=True).data, "total": qs.count()})
 
     def delete(self, request):
-        n = _note_qs(request.user).filter(is_deleted=True).delete()[0]
+        n = _note_write_qs(request.user).filter(is_deleted=True).delete()[0]
         return Response({"message": f"已清空回收站（{n} 篇）"})
 
 
@@ -473,7 +486,7 @@ class NoteVersionDiffView(APIView):
 
 class NoteRollbackView(APIView):
     def post(self, request, pk, version):
-        note = _get_note(request.user, pk, include_deleted=True)
+        note = _get_note(request.user, pk, include_deleted=True, write=True)
         if not note:
             return Response({"message": "笔记不存在"}, status=404)
         snap = NoteVersion.objects.filter(note=note, version=version).first()
@@ -1289,8 +1302,8 @@ class NoteMergeView(APIView):
             return _nb("source_id / target_id 必须是整数")
         if source_id == target_id:
             return _nb("不能与自身合并")
-        source = _get_note(request.user, source_id, include_deleted=True)
-        target = _get_note(request.user, target_id, include_deleted=True)
+        source = _get_note(request.user, source_id, include_deleted=True, write=True)
+        target = _get_note(request.user, target_id, include_deleted=True, write=True)
         if not source:
             return _nb("源笔记不存在", 404)
         if not target:
@@ -1334,7 +1347,7 @@ class NoteSplitView(APIView):
     """F576 按一级标题（# ）拆分笔记为多篇"""
 
     def post(self, request, pk):
-        note = _get_note(request.user, pk, include_deleted=True)
+        note = _get_note(request.user, pk, include_deleted=True, write=True)
         if not note:
             return _nb("笔记不存在", 404)
         if note.is_deleted:
@@ -1492,7 +1505,7 @@ class NoteTodoToggleView(APIView):
             line_no = int(request.data.get("line_no"))
         except (TypeError, ValueError):
             return _nb("note_id / line_no 必须是整数")
-        note = _get_note(request.user, note_id, include_deleted=True)
+        note = _get_note(request.user, note_id, include_deleted=True, write=True)
         if not note:
             return _nb("笔记不存在", 404)
         lines = (note.content or "").split("\n")
@@ -1686,7 +1699,7 @@ class NotePinView(APIView):
     """
 
     def post(self, request, pk):
-        note = _get_note(request.user, pk, include_deleted=True)
+        note = _get_note(request.user, pk, include_deleted=True, write=True)
         if not note:
             return _nb("笔记不存在", 404)
         if "pinned" in request.data:

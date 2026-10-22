@@ -21,9 +21,12 @@ from devtools.common import (
 from . import runtime as rt
 from .models import (
     CodeComment, CodeFile, CodeJudgeTask, CodeRun, CodeRunPreset, CodeShare, CodeSnippet,
-    CodeVersion,
+    CodeVersion, CodeWorkspace,
 )
-from .serializers import build_tree, file_brief, file_qs, get_file, get_ws, ws_brief, ws_detail, ws_qs
+from .serializers import (
+    build_tree, file_brief, file_qs, file_write_qs, get_file, get_ws,
+    ws_brief, ws_detail, ws_qs,
+)
 
 # ============================================================
 # 一、元信息 / 目录
@@ -162,7 +165,7 @@ def workspace_detail(request, pk):
 
 @endpoint(("PATCH", "POST"))
 def workspace_update(request, pk):
-    ws = get_ws(request.user, pk)
+    ws = get_ws(request.user, pk, write=True)
     for field in ("name", "description", "language", "icon", "color"):
         if p(request, field) is not None:
             val = p(request, field)
@@ -183,14 +186,14 @@ def workspace_update(request, pk):
 
 @endpoint(("DELETE", "POST"))
 def workspace_delete(request, pk):
-    ws = get_ws(request.user, pk)
+    ws = get_ws(request.user, pk, write=True)
     ws.delete()
     return ok({"deleted": pk})
 
 
 @endpoint(("POST",))
 def workspace_star(request, pk):
-    ws = get_ws(request.user, pk)
+    ws = get_ws(request.user, pk, write=True)
     ws.is_starred = not ws.is_starred
     ws.save(update_fields=["is_starred", "updated_at"])
     return ok({"is_starred": ws.is_starred})
@@ -260,7 +263,7 @@ def file_list(request):
 
 @endpoint(("POST",))
 def file_create(request):
-    ws = get_ws(request.user, req(request, "workspace"))
+    ws = get_ws(request.user, req(request, "workspace"), write=True)
     path = req_str(request, "path", "").strip().replace("\\", "/").lstrip("/")
     if not path:
         raise ValueError("文件路径不能为空")
@@ -299,7 +302,7 @@ def file_detail(request, pk):
 @endpoint(("PATCH", "POST"))
 def file_update(request, pk):
     """更新文件内容 / 属性。内容变更即落版本快照（可配）。"""
-    obj = get_file(request.user, pk)
+    obj = get_file(request.user, pk, write=True)
     old_content = obj.content
     content_changed = False
 
@@ -359,14 +362,14 @@ def file_update(request, pk):
 
 @endpoint(("DELETE", "POST"))
 def file_delete(request, pk):
-    obj = get_file(request.user, pk)
+    obj = get_file(request.user, pk, write=True)
     obj.delete()
     return ok({"deleted": pk})
 
 
 @endpoint(("POST",))
 def file_favorite(request, pk):
-    obj = get_file(request.user, pk)
+    obj = get_file(request.user, pk, write=True)
     obj.is_favorite = not obj.is_favorite
     obj.save(update_fields=["is_favorite", "updated_at"])
     return ok({"is_favorite": obj.is_favorite})
@@ -375,7 +378,7 @@ def file_favorite(request, pk):
 @endpoint(("POST",))
 def file_entry(request, pk):
     """把某文件设为工作区唯一入口。"""
-    obj = get_file(request.user, pk)
+    obj = get_file(request.user, pk, write=True)
     CodeFile.objects.filter(workspace_id=obj.workspace_id).update(is_entry=False)
     obj.is_entry = True
     obj.save(update_fields=["is_entry", "updated_at"])
@@ -385,7 +388,7 @@ def file_entry(request, pk):
 @endpoint(("POST",))
 def file_move(request, pk):
     """移动文件到新路径（重命名 + 换目录）。"""
-    obj = get_file(request.user, pk)
+    obj = get_file(request.user, pk, write=True)
     new_path = req_str(request, "path", "").strip().replace("\\", "/").lstrip("/")
     if not new_path:
         raise ValueError("目标路径不能为空")
@@ -405,7 +408,7 @@ def file_batch(request):
     """批量操作：delete / favorite / unfavorite / move。"""
     ids = req_list(request, "ids")
     action = req_str(request, "action", "delete")
-    qs = file_qs(request.user).filter(id__in=ids)
+    qs = file_write_qs(request.user).filter(id__in=ids)
     n = qs.count()
     if action == "delete":
         qs.delete()
@@ -448,7 +451,7 @@ def version_list(request, pk):
 
 @endpoint(("POST",))
 def version_create(request, pk):
-    obj = get_file(request.user, pk)
+    obj = get_file(request.user, pk, write=True)
     v = CodeVersion.objects.create(
         file=obj, content=obj.content,
         message=opt_str(request, "message", "手动快照"),
@@ -510,7 +513,7 @@ def version_diff(request, pk):
 @endpoint(("POST",))
 def version_rollback(request, pk, vid):
     """回滚到指定版本（先给当前内容打快照，避免不可逆）。"""
-    obj = get_file(request.user, pk)
+    obj = get_file(request.user, pk, write=True)
     v = obj.versions.filter(id=vid).first()
     if not v:
         raise ValueError(f"版本不存在: {vid}")
@@ -527,7 +530,7 @@ def version_rollback(request, pk, vid):
 
 @endpoint(("POST",))
 def version_delete(request, pk, vid):
-    obj = get_file(request.user, pk)
+    obj = get_file(request.user, pk, write=True)
     n, _ = obj.versions.filter(id=vid).delete()
     return ok({"deleted": n})
 
@@ -573,11 +576,12 @@ def run(request):
     env = p(request, "env")
     if env is not None and not isinstance(env, dict):
         raise ValueError("env 必须是对象")
-    allow_dangerous = opt_bool(request, "allow_dangerous", False)
-
-    # 高危拦截需要显式确认
+    # 安全：禁止任何来自 HTTP 的「危险操作放行」开关。
+    # 早期版本读取 request 里的 allow_dangerous，等同于把 RCE 交给调用方；
+    # 现由 runtime 的沙箱分层（code/sandbox.py）+ 高危扫描双重把关，
+    # 命令行运维如确需放行，只能走本地管理命令，不走 HTTP。
     hits = rt.scan_dangerous(code)
-    if hits and not allow_dangerous:
+    if hits:
         rec = CodeRun.objects.create(
             owner=request.user, file=source_file, workspace=ws,
             language=language, source_code=code[:20000], stdin=stdin,
@@ -594,7 +598,7 @@ def run(request):
     t0 = time.perf_counter()
     result = rt.run_code(
         language, code, stdin=stdin, timeout=timeout, args=args, env=env,
-        allow_dangerous=allow_dangerous, files=files,
+        allow_dangerous=False, files=files,
     )
     elapsed = result.get("duration_ms") or int((time.perf_counter() - t0) * 1000)
 

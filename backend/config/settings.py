@@ -44,6 +44,13 @@ if not DEBUG and SECRET_KEY == _DEV_SECRET_KEY:
     )
 ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
 
+# ---------------------------------------------------------------------------
+# 写权限策略
+# 数据范围（self/dept/dept_and_sub/all）只决定「能看见什么」，不决定「能改什么」。
+# 默认严格按 owner 收口；设为 0 可临时回退到旧行为（读范围即写范围），仅用于紧急回滚。
+# ---------------------------------------------------------------------------
+WRITE_SCOPE_STRICT = os.environ.get("WRITE_SCOPE_STRICT", "1") == "1"
+
 INSTALLED_APPS = [
     "daphne",
     "django.contrib.admin",

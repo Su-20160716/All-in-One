@@ -67,7 +67,10 @@ export const useUserStore = defineStore('user', {
       this.profile = null
       this.permissions = []
       this.isAdmin = false
-      localStorage.clear()
+      // 只清认证数据，保留 theme / 快捷入口 / 侧边栏折叠等本地偏好
+      localStorage.removeItem('access_token')
+      localStorage.removeItem('refresh_token')
+      localStorage.removeItem('user_profile')
     },
   },
 })

@@ -36,6 +36,26 @@ request.interceptors.request.use((config) => {
 })
 
 let refreshing = null
+let redirecting = false
+
+// 认证类接口的 401 是「业务结果」（密码错误、验证码错误、refresh 失效），
+// 不能当成令牌过期去刷新/跳转，否则登录失败会变成整页刷新死循环。
+const AUTH_ENDPOINTS = ['/auth/login', '/auth/register', '/auth/refresh', '/auth/2fa']
+
+function isAuthEndpoint(url) {
+  const path = String(url || '').split('?')[0]
+  return AUTH_ENDPOINTS.some((p) => path.includes(p))
+}
+
+function clearAuthAndRedirect() {
+  // 只清认证数据，保留 theme / 快捷入口 / 侧边栏等偏好设置
+  localStorage.removeItem('access_token')
+  localStorage.removeItem('refresh_token')
+  if (redirecting) return
+  if (window.location.pathname === '/login') return
+  redirecting = true
+  window.location.href = '/login'
+}
 
 request.interceptors.response.use(
   (res) => {
@@ -52,7 +72,8 @@ request.interceptors.response.use(
     if (config?._startTime) {
       recordLatency(config.url, performance.now() - config._startTime)
     }
-    if (response && response.status === 401 && !config._retry) {
+    const skipAuthHandling = isAuthEndpoint(config?.url)
+    if (response && response.status === 401 && !skipAuthHandling && config && !config._retry) {
       config._retry = true
       const refresh = localStorage.getItem('refresh_token')
       if (refresh) {
@@ -61,21 +82,26 @@ request.interceptors.response.use(
           const { access } = await refreshing
           refreshing = null
           localStorage.setItem('access_token', access)
+          // 通知 Pinia 同步 token，避免 store 里 token 滞后导致守卫判断错误
+          window.dispatchEvent(new CustomEvent('auth:token', { detail: { access } }))
           config.headers.Authorization = `Bearer ${access}`
           return request(config)
         } catch (e) {
           refreshing = null
-          localStorage.clear()
-          window.location.href = '/login'
+          clearAuthAndRedirect()
         }
       } else {
-        window.location.href = '/login'
+        clearAuthAndRedirect()
       }
     }
     // #96 统一错误码映射
     const code = response?.data?.code
     const message = (code && ERROR_MESSAGES[code]) || response?.data?.message || response?.data?.error || error.message || '请求失败'
-    return Promise.reject(new Error(message))
+    // 保留原始 error 字段，避免调用方拿不到 response/code
+    error.message = message
+    error.code = code
+    error.status = response?.status
+    return Promise.reject(error)
   }
 )
 
