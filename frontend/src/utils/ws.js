@@ -217,6 +217,10 @@ class AuthedSocket {
     this._socket = null
     this._queue = []
     this._closed = false
+    // F8：4001 刷新重连 + 普通断线指数退避（与 connectWs 主通道同策略）
+    this._token = ''
+    this._retryDelay = BASE_RETRY_MS
+    this._retryTimer = null
     this._open()
   }
 
@@ -228,11 +232,13 @@ class AuthedSocket {
       this.opts.onClose && this.opts.onClose({ code: AUTH_CLOSE_CODE, reason: 'no-token' })
       return
     }
+    this._token = token
     const socket = new WebSocket(buildWsUrl(this.path, token))
     this._socket = socket
 
     socket.onopen = () => {
       this.readyState = WebSocket.OPEN
+      this._retryDelay = BASE_RETRY_MS
       this._queue.forEach((d) => socket.send(d))
       this._queue = []
       this.opts.onOpen && this.opts.onOpen()
@@ -247,8 +253,32 @@ class AuthedSocket {
     socket.onerror = () => {
       /* onclose 会跟着触发 */
     }
-    socket.onclose = (e) => {
+    socket.onclose = async (e) => {
       this.readyState = WebSocket.CLOSED
+      // 主动 close() 后不重连
+      if (this._closed) {
+        this.opts.onClose && this.opts.onClose(e)
+        return
+      }
+      if (e && e.code === AUTH_CLOSE_CODE) {
+        // F8：令牌被服务端拒绝 → 刷新一次再重连；换不到新令牌则放弃
+        //（否则会在 REJECT→重连之间刷屏，且永远不会自愈）
+        const fresh = await ensureFreshToken()
+        if (fresh && fresh !== this._token) {
+          this._retryDelay = BASE_RETRY_MS
+          this._open()
+          return
+        }
+        this.opts.onClose && this.opts.onClose(e)
+        return
+      }
+      // F8：普通断线按指数退避重连（3s→6s→…→30s），连上后复位
+      this.opts.onReconnecting && this.opts.onReconnecting(this._retryDelay)
+      clearTimeout(this._retryTimer)
+      this._retryTimer = setTimeout(() => {
+        if (!this._closed) this._open()
+      }, this._retryDelay)
+      this._retryDelay = Math.min(this._retryDelay * 2, MAX_RETRY_MS)
       this.opts.onClose && this.opts.onClose(e)
     }
   }
@@ -260,6 +290,7 @@ class AuthedSocket {
 
   close() {
     this._closed = true
+    clearTimeout(this._retryTimer)
     try {
       this._socket && this._socket.close()
     } catch (e) {

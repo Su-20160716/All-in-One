@@ -178,10 +178,27 @@ export class NoteCollab {
   }
 
   destroy() {
+    if (this.destroyed) return
     this.destroyed = true
     clearInterval(this.snapshotTimer)
-    if (this.dirty) this.compact()
-    try { this.socket && this.socket.close() } catch (e) { /* ignore */ }
-    try { this.doc.destroy() } catch (e) { /* ignore */ }
+    // F8：先 compact 再关连接——close() 会丢弃尚未 flush 的帧，
+    // 最后一次增量/快照会丢。等 bufferedAmount 归零（上限 300ms）后再 close/destroy。
+    const hadPending = this.dirty
+    if (hadPending) this.compact()
+    const sock = this.socket
+    const finish = () => {
+      try { sock && sock.close() } catch (e) { /* ignore */ }
+      try { this.doc.destroy() } catch (e) { /* ignore */ }
+    }
+    if (hadPending && sock && sock.readyState === WebSocket.OPEN && sock.bufferedAmount > 0) {
+      const t0 = Date.now()
+      const wait = () => {
+        if (sock.bufferedAmount === 0 || Date.now() - t0 > 300) finish()
+        else setTimeout(wait, 20)
+      }
+      setTimeout(wait, 20)
+    } else {
+      finish()
+    }
   }
 }

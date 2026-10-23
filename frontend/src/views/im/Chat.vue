@@ -297,33 +297,41 @@ function renderContent(m) {
 }
 
 async function loadSessions() {
-  const r = await imApi.sessions({ search: keyword.value || undefined, archived: showArchived.value ? '1' : undefined })
-  sessions.value = r.list || []
+  try {
+    const r = await imApi.sessions({ search: keyword.value || undefined, archived: showArchived.value ? '1' : undefined })
+    sessions.value = r.list || []
+  } catch (e) { app.toastMsg(e?.message || '加载会话列表失败', 'error') }
 }
 async function openSession(s) {
-  activeSession.value = s
-  draft.value = s.draft || ''
-  groupAnn.value = s.announcement || ''
-  replying.value = null
-  const r = await imApi.messages(s.id, { page_size: 30 })
-  messages.value = (r.list || []).slice().reverse()
-  pinned.value = r.pinned || []
-  await imApi.setting(s.id, { mark_read: true })
-  s.unread = 0
-  nextTick(scrollBottom)
+  try {
+    activeSession.value = s
+    draft.value = s.draft || ''
+    groupAnn.value = s.announcement || ''
+    replying.value = null
+    const r = await imApi.messages(s.id, { page_size: 30 })
+    // F5：r.list 是接口响应里的新数组，无其他引用，直接 reverse 即可，
+    // 原来的 .slice().reverse() 多一次无用拷贝
+    messages.value = (r.list || []).reverse()
+    pinned.value = r.pinned || []
+    await imApi.setting(s.id, { mark_read: true })
+    s.unread = 0
+    nextTick(scrollBottom)
+  } catch (e) { app.toastMsg(e?.message || '打开会话失败', 'error') }
 }
 async function send() {
-  const content = draft.value.trim()
-  if (!content || !activeSession.value) return
-  const payload = { content }
-  if (replying.value) payload.reply_to = replying.value.id
-  const m = await imApi.send(activeSession.value.id, payload)
-  messages.value.push(m)
-  draft.value = ''
-  replying.value = null
-  showEmoji.value = false
-  await imApi.setting(activeSession.value.id, { draft: '' })
-  nextTick(scrollBottom)
+  try {
+    const content = draft.value.trim()
+    if (!content || !activeSession.value) return
+    const payload = { content }
+    if (replying.value) payload.reply_to = replying.value.id
+    const m = await imApi.send(activeSession.value.id, payload)
+    messages.value.push(m)
+    draft.value = ''
+    replying.value = null
+    showEmoji.value = false
+    await imApi.setting(activeSession.value.id, { draft: '' })
+    nextTick(scrollBottom)
+  } catch (e) { app.toastMsg(e?.message || '发送失败', 'error') }
 }
 function replyMsg(m) { replying.value = m }
 function pickEmoji(e) { draft.value += e; showEmoji.value = false }
@@ -333,39 +341,55 @@ function saveDraft() {
   draftTimer = setTimeout(() => imApi.setting(activeSession.value.id, { draft: draft.value }), 500)
 }
 async function togglePin() {
-  await imApi.setting(activeSession.value.id, { is_pinned: !activeSession.value.is_pinned })
-  activeSession.value.is_pinned = !activeSession.value.is_pinned
-  loadSessions()
+  try {
+    await imApi.setting(activeSession.value.id, { is_pinned: !activeSession.value.is_pinned })
+    activeSession.value.is_pinned = !activeSession.value.is_pinned
+    loadSessions()
+  } catch (e) { app.toastMsg(e?.message || '置顶操作失败', 'error') }
 }
 async function toggleMute() {
-  await imApi.setting(activeSession.value.id, { is_muted: !activeSession.value.is_muted })
-  activeSession.value.is_muted = !activeSession.value.is_muted
+  try {
+    await imApi.setting(activeSession.value.id, { is_muted: !activeSession.value.is_muted })
+    activeSession.value.is_muted = !activeSession.value.is_muted
+  } catch (e) { app.toastMsg(e?.message || '免打扰操作失败', 'error') }
 }
 async function toggleArchiveSession() {
-  const v = !activeSession.value.is_archived
-  await imApi.setting(activeSession.value.id, { is_archived: v })
-  app.toastMsg(v ? '已归档' : '已取消归档', 'success')
-  activeSession.value = null
-  loadSessions()
+  try {
+    const v = !activeSession.value.is_archived
+    await imApi.setting(activeSession.value.id, { is_archived: v })
+    app.toastMsg(v ? '已归档' : '已取消归档', 'success')
+    activeSession.value = null
+    loadSessions()
+  } catch (e) { app.toastMsg(e?.message || '归档操作失败', 'error') }
 }
 async function leave() {
-  if (!confirm('确定退出该会话？群聊将解散或退出')) return
-  await imApi.leaveSession(activeSession.value.id)
-  activeSession.value = null
-  loadSessions()
+  try {
+    if (!confirm('确定退出该会话？群聊将解散或退出')) return
+    await imApi.leaveSession(activeSession.value.id)
+    activeSession.value = null
+    loadSessions()
+  } catch (e) { app.toastMsg(e?.message || '退出会话失败', 'error') }
 }
-function recall(m) { imApi.recall(m.id).then(() => (m.is_recalled = true)) }
+function recall(m) {
+  imApi.recall(m.id).then(() => (m.is_recalled = true)).catch(() => app.toastMsg('撤回失败', 'error'))
+}
 async function deleteForMe(m) {
-  await imApi.deleteMsg(m.id)
-  messages.value = messages.value.filter((x) => x.id !== m.id)
+  try {
+    await imApi.deleteMsg(m.id)
+    messages.value = messages.value.filter((x) => x.id !== m.id)
+  } catch (e) { app.toastMsg(e?.message || '删除消息失败', 'error') }
 }
 async function togglePinMsg(m) {
-  await imApi.pinMsg(m.id)
-  m.is_pinned = !m.is_pinned
-  if (m.is_pinned) pinned.value.unshift(m)
-  else pinned.value = pinned.value.filter((p) => p.id !== m.id)
+  try {
+    await imApi.pinMsg(m.id)
+    m.is_pinned = !m.is_pinned
+    if (m.is_pinned) pinned.value.unshift(m)
+    else pinned.value = pinned.value.filter((p) => p.id !== m.id)
+  } catch (e) { app.toastMsg(e?.message || '置顶操作失败', 'error') }
 }
-function unpin(m) { imApi.pinMsg(m.id).then(() => { pinned.value = pinned.value.filter((p) => p.id !== m.id) }) }
+function unpin(m) {
+  imApi.pinMsg(m.id).then(() => { pinned.value = pinned.value.filter((p) => p.id !== m.id) }).catch(() => app.toastMsg('取消置顶失败', 'error'))
+}
 function forwardMsg(m) { forwarding.value = m; forwardTargets.value = new Set() }
 function toggleForward(id) {
   const s = new Set(forwardTargets.value)
@@ -373,16 +397,22 @@ function toggleForward(id) {
   forwardTargets.value = s
 }
 async function confirmForward() {
-  if (!forwardTargets.value.size) return
-  await imApi.forward(forwarding.value.id, [...forwardTargets.value])
-  app.toastMsg('已转发', 'success')
-  forwarding.value = null
+  try {
+    if (!forwardTargets.value.size) return
+    await imApi.forward(forwarding.value.id, [...forwardTargets.value])
+    app.toastMsg('已转发', 'success')
+    forwarding.value = null
+  } catch (e) { app.toastMsg(e?.message || '转发失败', 'error') }
 }
 function openNew() { showNew.value = true; picked.value = new Set(); newGroupName.value = '' }
 let candTimer = null
 function loadCandidates() {
   clearTimeout(candTimer)
-  candTimer = setTimeout(async () => { candidates.value = (await authApi.directory(candidateQuery.value)).list || [] }, 250)
+  candTimer = setTimeout(async () => {
+    try {
+      candidates.value = (await authApi.directory(candidateQuery.value)).list || []
+    } catch (e) { app.toastMsg(e?.message || '搜索失败', 'error') }
+  }, 250)
 }
 function togglePick(id) {
   const s = new Set(picked.value)
@@ -390,82 +420,108 @@ function togglePick(id) {
   picked.value = s
 }
 async function startSession() {
-  if (!picked.value.size) return app.toastMsg('请选择成员', 'error')
-  const payload = { member_ids: [...picked.value] }
-  payload.type = newGroupName.value.trim() || picked.value.size > 1 ? 'group' : 'direct'
-  if (newGroupName.value.trim()) payload.name = newGroupName.value.trim()
-  const s = await imApi.createSession(payload)
-  showNew.value = false
-  await loadSessions()
-  const found = sessions.value.find((x) => x.id === s.id) || s
-  openSession(found)
+  try {
+    if (!picked.value.size) return app.toastMsg('请选择成员', 'error')
+    const payload = { member_ids: [...picked.value] }
+    payload.type = newGroupName.value.trim() || picked.value.size > 1 ? 'group' : 'direct'
+    if (newGroupName.value.trim()) payload.name = newGroupName.value.trim()
+    const s = await imApi.createSession(payload)
+    showNew.value = false
+    await loadSessions()
+    const found = sessions.value.find((x) => x.id === s.id) || s
+    openSession(found)
+  } catch (e) { app.toastMsg(e?.message || '创建会话失败', 'error') }
 }
 let addTimer = null
 function searchAdd() {
   clearTimeout(addTimer)
-  addTimer = setTimeout(async () => { addCandidates.value = (await authApi.directory(groupAddQ.value)).list || [] }, 250)
+  addTimer = setTimeout(async () => {
+    try {
+      addCandidates.value = (await authApi.directory(groupAddQ.value)).list || []
+    } catch (e) { app.toastMsg(e?.message || '搜索失败', 'error') }
+  }, 250)
 }
 async function addMember(uid) {
-  await imApi.addMembers(activeSession.value.id, [uid])
-  app.toastMsg('已添加', 'success')
-  const fresh = await imApi.sessionDetail(activeSession.value.id)
-  activeSession.value = fresh
+  try {
+    await imApi.addMembers(activeSession.value.id, [uid])
+    app.toastMsg('已添加', 'success')
+    const fresh = await imApi.sessionDetail(activeSession.value.id)
+    activeSession.value = fresh
+  } catch (e) { app.toastMsg(e?.message || '添加成员失败', 'error') }
 }
 async function kick(uid) {
-  await imApi.removeMember(activeSession.value.id, uid)
-  const fresh = await imApi.sessionDetail(activeSession.value.id)
-  activeSession.value = fresh
+  try {
+    await imApi.removeMember(activeSession.value.id, uid)
+    const fresh = await imApi.sessionDetail(activeSession.value.id)
+    activeSession.value = fresh
+  } catch (e) { app.toastMsg(e?.message || '移出成员失败', 'error') }
 }
 async function updateGroup(field, val) {
-  await imApi.updateSession(activeSession.value.id, { [field]: val })
-  app.toastMsg('已更新', 'success')
+  try {
+    await imApi.updateSession(activeSession.value.id, { [field]: val })
+    app.toastMsg('已更新', 'success')
+  } catch (e) { app.toastMsg(e?.message || '更新群信息失败', 'error') }
 }
 // 导出聊天记录为 JSON
 async function exportChat() {
-  const r = await imApi.messages(activeSession.value.id, {})
-  const data = { session: sessionName(activeSession.value), exported_at: new Date().toISOString(), messages: r.list }
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = `chat-${activeSession.value.id}-${Date.now()}.json`
-  a.click()
-  app.toastMsg('已导出 JSON', 'success')
+  try {
+    const r = await imApi.messages(activeSession.value.id, {})
+    const data = { session: sessionName(activeSession.value), exported_at: new Date().toISOString(), messages: r.list }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `chat-${activeSession.value.id}-${Date.now()}.json`
+    a.click()
+    app.toastMsg('已导出 JSON', 'success')
+  } catch (e) { app.toastMsg(e?.message || '导出聊天记录失败', 'error') }
 }
 async function openQuickReplies() {
-  quickReplies.value = (await imApi.quickReplies()).list || []
-  showQuickReply.value = true
+  try {
+    quickReplies.value = (await imApi.quickReplies()).list || []
+    showQuickReply.value = true
+  } catch (e) { app.toastMsg(e?.message || '加载快捷回复失败', 'error') }
 }
 function useQuickReply(q) {
   draft.value = q.content
   showQuickReply.value = false
 }
 async function addQuickReply() {
-  if (!newQRContent.value.trim()) return
-  await imApi.createQuickReply({ title: newQRTitle.value, content: newQRContent.value })
-  newQRTitle.value = ''; newQRContent.value = ''
-  openQuickReplies()
+  try {
+    if (!newQRContent.value.trim()) return
+    await imApi.createQuickReply({ title: newQRTitle.value, content: newQRContent.value })
+    newQRTitle.value = ''; newQRContent.value = ''
+    openQuickReplies()
+  } catch (e) { app.toastMsg(e?.message || '添加快捷回复失败', 'error') }
 }
 async function delQuickReply(q) {
-  await imApi.deleteQuickReply(q.id)
-  openQuickReplies()
+  try {
+    await imApi.deleteQuickReply(q.id)
+    openQuickReplies()
+  } catch (e) { app.toastMsg(e?.message || '删除快捷回复失败', 'error') }
 }
 async function openKeyword() {
-  const r = await imApi.keywordAlert()
-  keywordInput.value = (r.keywords || []).join(', ')
-  showKeyword.value = true
+  try {
+    const r = await imApi.keywordAlert()
+    keywordInput.value = (r.keywords || []).join(', ')
+    showKeyword.value = true
+  } catch (e) { app.toastMsg(e?.message || '加载关键词失败', 'error') }
 }
 async function saveKeywords() {
-  const kws = keywordInput.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
-  await imApi.saveKeywordAlert(kws)
-  app.toastMsg('关键词已保存', 'success')
-  showKeyword.value = false
+  try {
+    const kws = keywordInput.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+    await imApi.saveKeywordAlert(kws)
+    app.toastMsg('关键词已保存', 'success')
+    showKeyword.value = false
+  } catch (e) { app.toastMsg(e?.message || '保存关键词失败', 'error') }
 }
 async function openSearch() {
   searchResults.value = []
   showSearch.value = true
 }
 async function doSearch() {
-  searchResults.value = (await imApi.searchMessages(searchForm.value)).list || []
+  try {
+    searchResults.value = (await imApi.searchMessages(searchForm.value)).list || []
+  } catch (e) { app.toastMsg(e?.message || '搜索失败', 'error') }
 }
 function scrollBottom() { if (msgBox.value) msgBox.value.scrollTop = msgBox.value.scrollHeight }
 

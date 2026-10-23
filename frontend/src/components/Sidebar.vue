@@ -8,7 +8,7 @@
       </div>
     </div>
     <nav class="flex-1 space-y-0.5 overflow-y-auto px-2 py-2">
-      <RouterLink v-for="item in menus" :key="item.to" :to="item.to" class="menu-item" :class="{ active: isActive(item.to) }">
+      <RouterLink v-for="item in visibleMenus" :key="item.to" :to="item.to" class="menu-item" :class="{ active: isActive(item.to) }">
         <span class="text-[15px] leading-none">{{ item.icon }}</span>
         <span class="flex-1">{{ item.label }}</span>
         <span v-if="item.badge" class="grid h-4 min-w-4 place-items-center rounded-pill bg-rose-500 px-1 text-[10px] font-medium text-white">
@@ -29,10 +29,12 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAppStore } from '../stores/app'
+import { useUserStore } from '../stores/user'
 import { imApi } from '../api'
 
 const route = useRoute()
 const app = useAppStore()
+const user = useUserStore()
 const imUnread = ref(0)
 
 const menus = computed(() => [
@@ -63,13 +65,19 @@ const menus = computed(() => [
   { to: '/learning/study', label: '我的学习', icon: '⏱' },
   { to: '/code', label: '代码工坊', icon: '🧑‍💻' },
   { to: '/code/learn', label: '代码学习中心', icon: '🏅' },
-  { to: '/admin/stats', label: '统计面板', icon: '📊' },
-  { to: '/admin/users', label: '用户管理', icon: '👥' },
-  { to: '/admin/roles', label: '角色权限', icon: '🔐' },
-  { to: '/admin/org', label: '组织架构', icon: '🏢' },
-  { to: '/admin/logs', label: '操作日志', icon: '🧾' },
+  // F9：管理入口仅管理员可见（与 router meta.requiresAdmin 双保险）
+  { to: '/admin/stats', label: '统计面板', icon: '📊', adminOnly: true },
+  { to: '/admin/users', label: '用户管理', icon: '👥', adminOnly: true },
+  { to: '/admin/roles', label: '角色权限', icon: '🔐', adminOnly: true },
+  { to: '/admin/org', label: '组织架构', icon: '🏢', adminOnly: true },
+  { to: '/admin/logs', label: '操作日志', icon: '🧾', adminOnly: true },
+  { to: '/admin/announcements', label: '公告管理', icon: '📢', adminOnly: true },
+  { to: '/admin/settings', label: '站点设置', icon: '⚙️', adminOnly: true },
   { to: '/profile', label: '个人设置', icon: '⚙️' },
 ])
+
+// F9：普通用户看不到管理菜单
+const visibleMenus = computed(() => menus.value.filter((m) => !m.adminOnly || user.isAdmin))
 
 function isActive(to) {
   if (to === '/admin/stats') return route.path.startsWith('/admin')

@@ -334,149 +334,209 @@ function matchCards(b) {
 }
 
 async function load() {
-  const r = await projectApi.board(projectId)
-  project.value = r.project
-  boards.value = r.boards || []
+  try {
+    const r = await projectApi.board(projectId)
+    project.value = r.project
+    boards.value = r.boards || []
+  } catch (e) { app.toastMsg(e?.message || '加载看板失败', 'error') }
 }
 async function addBoard() {
-  const name = prompt('新列名称：')
-  if (name) { await projectApi.createBoard(projectId, name); load() }
+  try {
+    const name = prompt('新列名称：')
+    if (name) { await projectApi.createBoard(projectId, name); load() }
+  } catch (e) { app.toastMsg(e?.message || '新建列失败', 'error') }
 }
 async function renameBoard(b) {
-  const name = prompt('列名称：', b.name)
-  if (name) { await projectApi.renameBoard(b.id, name); load() }
+  try {
+    const name = prompt('列名称：', b.name)
+    if (name) { await projectApi.renameBoard(b.id, name); load() }
+  } catch (e) { app.toastMsg(e?.message || '重命名失败', 'error') }
 }
 async function removeBoard(b) {
-  if (confirm(`删除列「${b.name}」及所有卡片？`)) { await projectApi.deleteBoard(b.id); load() }
+  try {
+    if (confirm(`删除列「${b.name}」及所有卡片？`)) { await projectApi.deleteBoard(b.id); load() }
+  } catch (e) { app.toastMsg(e?.message || '删除列失败', 'error') }
 }
 async function createCard() {
-  const boardId = showNewCard.value.board || cardForm.board
-  if (!cardForm.title.trim() || !boardId) return app.toastMsg('请填写标题并选择列', 'error')
-  await projectApi.createCard(boardId, { title: cardForm.title, description: cardForm.description, priority: cardForm.priority, due_date: cardForm.due_date || null })
-  app.toastMsg('已创建', 'success')
-  Object.assign(cardForm, { board: null, title: '', description: '', due_date: '' })
-  showNewCard.value = null
-  load()
+  try {
+    const boardId = showNewCard.value.board || cardForm.board
+    if (!cardForm.title.trim() || !boardId) return app.toastMsg('请填写标题并选择列', 'error')
+    await projectApi.createCard(boardId, { title: cardForm.title, description: cardForm.description, priority: cardForm.priority, due_date: cardForm.due_date || null })
+    app.toastMsg('已创建', 'success')
+    Object.assign(cardForm, { board: null, title: '', description: '', due_date: '' })
+    showNewCard.value = null
+    load()
+  } catch (e) { app.toastMsg(e?.message || '创建卡片失败', 'error') }
 }
 function onDragStart(e, card) { dragCard = card; e.dataTransfer.effectAllowed = 'move' }
 async function onDrop(e, targetBoardId) {
-  if (!dragCard) return
-  const target = boards.value.find((b) => b.id === targetBoardId)
-  await projectApi.moveCard(dragCard.id, targetBoardId, target.cards.length)
-  dragCard = null
-  load()
+  try {
+    if (!dragCard) return
+    const target = boards.value.find((b) => b.id === targetBoardId)
+    await projectApi.moveCard(dragCard.id, targetBoardId, target.cards.length)
+    dragCard = null
+    load()
+  } catch (e) { app.toastMsg(e?.message || '移动卡片失败', 'error') }
 }
 async function openCard(c) {
-  const [full, cm] = await Promise.all([projectApi.card(c.id), projectApi.comments(c.id)])
-  activeCard.value = { ...full }
-  comments.value = cm.list || []
-  subtasks.value = full.subtasks || []
-  worklogs.value = full.worklogs || []
+  try {
+    const [full, cm] = await Promise.all([projectApi.card(c.id), projectApi.comments(c.id)])
+    activeCard.value = { ...full }
+    comments.value = cm.list || []
+    subtasks.value = full.subtasks || []
+    worklogs.value = full.worklogs || []
+  } catch (e) { app.toastMsg(e?.message || '打开卡片失败', 'error') }
 }
 async function updateCard(patch) {
-  const r = await projectApi.updateCard(activeCard.value.id, patch)
-  activeCard.value = { ...activeCard.value, ...r }
-  load()
+  try {
+    const r = await projectApi.updateCard(activeCard.value.id, patch)
+    activeCard.value = { ...activeCard.value, ...r }
+    load()
+  } catch (e) { app.toastMsg(e?.message || '更新卡片失败', 'error') }
 }
 async function deleteCard() {
-  if (!confirm('删除该任务？')) return
-  await projectApi.deleteCard(activeCard.value.id)
-  activeCard.value = null
-  load()
+  try {
+    if (!confirm('删除该任务？')) return
+    await projectApi.deleteCard(activeCard.value.id)
+    activeCard.value = null
+    load()
+  } catch (e) { app.toastMsg(e?.message || '删除卡片失败', 'error') }
 }
 async function copyCard() {
-  await projectApi.copyCard(activeCard.value.id)
-  app.toastMsg('已复制', 'success')
-  activeCard.value = null
-  load()
+  try {
+    await projectApi.copyCard(activeCard.value.id)
+    app.toastMsg('已复制', 'success')
+    activeCard.value = null
+    load()
+  } catch (e) { app.toastMsg(e?.message || '复制卡片失败', 'error') }
 }
 async function quickCopy(c) {
-  await projectApi.copyCard(c.id)
-  app.toastMsg('已复制卡片', 'success')
-  load()
+  try {
+    await projectApi.copyCard(c.id)
+    app.toastMsg('已复制卡片', 'success')
+    load()
+  } catch (e) { app.toastMsg(e?.message || '复制卡片失败', 'error') }
 }
 async function addComment() {
-  const content = commentInput.value.trim()
-  if (!content) return
-  comments.value.push(await projectApi.addComment(activeCard.value.id, content))
-  commentInput.value = ''
+  try {
+    const content = commentInput.value.trim()
+    if (!content) return
+    comments.value.push(await projectApi.addComment(activeCard.value.id, content))
+    commentInput.value = ''
+  } catch (e) { app.toastMsg(e?.message || '发表评论失败', 'error') }
 }
 async function editComment(cm) {
-  const content = prompt('修改评论：', cm.content)
-  if (content === null) return
-  const r = await projectApi.updateComment(activeCard.value.id, cm.id, content)
-  Object.assign(cm, r)
+  try {
+    const content = prompt('修改评论：', cm.content)
+    if (content === null) return
+    const r = await projectApi.updateComment(activeCard.value.id, cm.id, content)
+    Object.assign(cm, r)
+  } catch (e) { app.toastMsg(e?.message || '修改评论失败', 'error') }
 }
 async function delComment(cm) {
-  await projectApi.deleteComment(activeCard.value.id, cm.id)
-  comments.value = comments.value.filter((x) => x.id !== cm.id)
+  try {
+    await projectApi.deleteComment(activeCard.value.id, cm.id)
+    comments.value = comments.value.filter((x) => x.id !== cm.id)
+  } catch (e) { app.toastMsg(e?.message || '删除评论失败', 'error') }
 }
 async function addLabel() {
-  const l = labelInput.value.trim()
-  if (!l) return
-  const labels = [...(activeCard.value.labels || []), l]
-  labelInput.value = ''
-  await updateCard({ labels })
+  try {
+    const l = labelInput.value.trim()
+    if (!l) return
+    const labels = [...(activeCard.value.labels || []), l]
+    labelInput.value = ''
+    await updateCard({ labels })
+  } catch (e) { app.toastMsg(e?.message || '添加标签失败', 'error') }
 }
 async function removeLabel(l) {
-  await updateCard({ labels: (activeCard.value.labels || []).filter((x) => labelName(x) !== l) })
+  try {
+    await updateCard({ labels: (activeCard.value.labels || []).filter((x) => labelName(x) !== l) })
+  } catch (e) { app.toastMsg(e?.message || '移除标签失败', 'error') }
 }
 async function toggleAssignee(uid) {
-  let ids = [...activeCard.value.assignee_ids]
-  ids = ids.includes(uid) ? ids.filter((x) => x !== uid) : [...ids, uid]
-  await updateCard({ assignee_ids: ids })
+  try {
+    let ids = [...activeCard.value.assignee_ids]
+    ids = ids.includes(uid) ? ids.filter((x) => x !== uid) : [...ids, uid]
+    await updateCard({ assignee_ids: ids })
+  } catch (e) { app.toastMsg(e?.message || '调整负责人失败', 'error') }
 }
 async function addSubtask() {
-  const title = subInput.value.trim()
-  if (!title) return
-  subtasks.value.push(await projectApi.addSubtask(activeCard.value.id, title))
-  subInput.value = ''
-  refreshCardMeta()
+  try {
+    const title = subInput.value.trim()
+    if (!title) return
+    subtasks.value.push(await projectApi.addSubtask(activeCard.value.id, title))
+    subInput.value = ''
+    refreshCardMeta()
+  } catch (e) { app.toastMsg(e?.message || '添加子任务失败', 'error') }
 }
 async function toggleSubtask(s) {
-  const r = await projectApi.updateSubtask(activeCard.value.id, s.id, { is_done: !s.is_done })
-  Object.assign(s, r)
-  refreshCardMeta()
+  try {
+    const r = await projectApi.updateSubtask(activeCard.value.id, s.id, { is_done: !s.is_done })
+    Object.assign(s, r)
+    refreshCardMeta()
+  } catch (e) { app.toastMsg(e?.message || '更新子任务失败', 'error') }
 }
 async function delSubtask(s) {
-  await projectApi.deleteSubtask(activeCard.value.id, s.id)
-  subtasks.value = subtasks.value.filter((x) => x.id !== s.id)
-  refreshCardMeta()
+  try {
+    await projectApi.deleteSubtask(activeCard.value.id, s.id)
+    subtasks.value = subtasks.value.filter((x) => x.id !== s.id)
+    refreshCardMeta()
+  } catch (e) { app.toastMsg(e?.message || '删除子任务失败', 'error') }
 }
 async function addWorklog() {
-  if (!wlMinutes.value) return
-  const wl = await projectApi.addWorklog(activeCard.value.id, { minutes: wlMinutes.value, note: wlNote.value })
-  worklogs.value.push(wl)
-  wlMinutes.value = null; wlNote.value = ''
-  refreshCardMeta()
+  try {
+    if (!wlMinutes.value) return
+    const wl = await projectApi.addWorklog(activeCard.value.id, { minutes: wlMinutes.value, note: wlNote.value })
+    worklogs.value.push(wl)
+    wlMinutes.value = null; wlNote.value = ''
+    refreshCardMeta()
+  } catch (e) { app.toastMsg(e?.message || '记录工时失败', 'error') }
 }
 async function delWorklog(w) {
-  await projectApi.deleteWorklog(activeCard.value.id, w.id)
-  worklogs.value = worklogs.value.filter((x) => x.id !== w.id)
-  refreshCardMeta()
+  try {
+    await projectApi.deleteWorklog(activeCard.value.id, w.id)
+    worklogs.value = worklogs.value.filter((x) => x.id !== w.id)
+    refreshCardMeta()
+  } catch (e) { app.toastMsg(e?.message || '删除工时失败', 'error') }
 }
 async function refreshCardMeta() {
-  const full = await projectApi.card(activeCard.value.id)
-  activeCard.value = { ...activeCard.value, subtask_total: full.subtask_total, subtask_done: full.subtask_done, progress: full.progress, spent_minutes: full.spent_minutes }
+  try {
+    const full = await projectApi.card(activeCard.value.id)
+    activeCard.value = { ...activeCard.value, subtask_total: full.subtask_total, subtask_done: full.subtask_done, progress: full.progress, spent_minutes: full.spent_minutes }
+  } catch (e) { app.toastMsg(e?.message || '刷新卡片失败', 'error') }
 }
 let memberTimer = null
 function searchMembers() {
   clearTimeout(memberTimer)
   memberTimer = setTimeout(async () => {
-    candidates.value = (await authApi.directory(memberQ.value)).list || []
+    try {
+      candidates.value = (await authApi.directory(memberQ.value)).list || []
+    } catch (e) { app.toastMsg(e?.message || '搜索成员失败', 'error') }
   }, 250)
 }
 async function addMembers(ids) {
-  await projectApi.addMembers(projectId, ids)
-  app.toastMsg('已添加', 'success')
-  load()
+  try {
+    await projectApi.addMembers(projectId, ids)
+    app.toastMsg('已添加', 'success')
+    load()
+  } catch (e) { app.toastMsg(e?.message || '添加成员失败', 'error') }
 }
 async function removeMember(uid) {
-  await projectApi.removeMember(projectId, uid)
-  load()
+  try {
+    await projectApi.removeMember(projectId, uid)
+    load()
+  } catch (e) { app.toastMsg(e?.message || '移出成员失败', 'error') }
 }
-async function loadStats() { stats.value = await projectApi.stats(projectId) }
-async function loadBurndown() { burn.value = await projectApi.burndown(projectId) }
+async function loadStats() {
+  try {
+    stats.value = await projectApi.stats(projectId)
+  } catch (e) { app.toastMsg(e?.message || '加载统计失败', 'error') }
+}
+async function loadBurndown() {
+  try {
+    burn.value = await projectApi.burndown(projectId)
+  } catch (e) { app.toastMsg(e?.message || '加载燃尽图失败', 'error') }
+}
 function linePoints(arr) {
   if (!arr || arr.length < 2) return ''
   const max = Math.max(...arr, 1)
@@ -487,18 +547,26 @@ async function loadShare() {
   shareUrl.value = ''; shareToken.value = ''
 }
 async function genShare() {
-  const r = await projectApi.createShare(projectId)
-  shareToken.value = r.token
-  // F4：对外链接走 base.js shareUrl()，部署时给出正确的前端站点地址
-  shareUrl.value = buildShareUrl(r.token)
-  app.toastMsg('已生成分享链接', 'success')
+  try {
+    const r = await projectApi.createShare(projectId)
+    shareToken.value = r.token
+    // F4：对外链接走 base.js shareUrl()，部署时给出正确的前端站点地址
+    shareUrl.value = buildShareUrl(r.token)
+    app.toastMsg('已生成分享链接', 'success')
+  } catch (e) { app.toastMsg(e?.message || '生成分享链接失败', 'error') }
 }
-function copyShare() { navigator.clipboard?.writeText(shareUrl.value); app.toastMsg('已复制', 'success') }
+function copyShare() {
+  // 剪贴板在非安全上下文/无权限时会 reject，吞掉避免触发全局兜底弹错
+  navigator.clipboard?.writeText(shareUrl.value).catch(() => {})
+  app.toastMsg('已复制', 'success')
+}
 async function revokeShare() {
-  if (!shareToken.value) return
-  await projectApi.revokeShare(projectId, shareToken.value)
-  shareUrl.value = ''; shareToken.value = ''
-  app.toastMsg('已撤销', 'success')
+  try {
+    if (!shareToken.value) return
+    await projectApi.revokeShare(projectId, shareToken.value)
+    shareUrl.value = ''; shareToken.value = ''
+    app.toastMsg('已撤销', 'success')
+  } catch (e) { app.toastMsg(e?.message || '撤销分享失败', 'error') }
 }
 onMounted(load)
 </script>

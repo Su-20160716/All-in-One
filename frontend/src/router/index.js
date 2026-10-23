@@ -62,13 +62,13 @@ const routes = [
       { path: 'code', name: 'code-forge', component: () => import('../views/code/CodeForge.vue'), meta: { title: '代码工坊' } },
       { path: 'code/learn', name: 'code-learn', component: () => import('../views/code/LearnCenter.vue'), meta: { title: '代码学习中心' } },
       { path: 'announcements', name: 'announcements', component: () => import('../views/Announcements.vue'), meta: { title: '系统公告' } },
-      { path: 'admin/stats', name: 'admin-stats', component: () => import('../views/admin/AdminStats.vue'), meta: { title: '统计面板' } },
-      { path: 'admin/users', name: 'admin-users', component: () => import('../views/admin/AdminUsers.vue'), meta: { title: '用户管理' } },
-      { path: 'admin/roles', name: 'admin-roles', component: () => import('../views/admin/AdminRoles.vue'), meta: { title: '角色权限' } },
-      { path: 'admin/org', name: 'admin-org', component: () => import('../views/admin/AdminOrg.vue'), meta: { title: '组织架构' } },
-      { path: 'admin/logs', name: 'admin-logs', component: () => import('../views/admin/AdminLogs.vue'), meta: { title: '操作日志' } },
-      { path: 'admin/announcements', name: 'admin-announcements', component: () => import('../views/admin/AdminAnnouncements.vue'), meta: { title: '公告管理' } },
-      { path: 'admin/settings', name: 'admin-settings', component: () => import('../views/admin/AdminSettings.vue'), meta: { title: '站点设置' } },
+      { path: 'admin/stats', name: 'admin-stats', component: () => import('../views/admin/AdminStats.vue'), meta: { title: '统计面板', requiresAdmin: true } },
+      { path: 'admin/users', name: 'admin-users', component: () => import('../views/admin/AdminUsers.vue'), meta: { title: '用户管理', requiresAdmin: true } },
+      { path: 'admin/roles', name: 'admin-roles', component: () => import('../views/admin/AdminRoles.vue'), meta: { title: '角色权限', requiresAdmin: true } },
+      { path: 'admin/org', name: 'admin-org', component: () => import('../views/admin/AdminOrg.vue'), meta: { title: '组织架构', requiresAdmin: true } },
+      { path: 'admin/logs', name: 'admin-logs', component: () => import('../views/admin/AdminLogs.vue'), meta: { title: '操作日志', requiresAdmin: true } },
+      { path: 'admin/announcements', name: 'admin-announcements', component: () => import('../views/admin/AdminAnnouncements.vue'), meta: { title: '公告管理', requiresAdmin: true } },
+      { path: 'admin/settings', name: 'admin-settings', component: () => import('../views/admin/AdminSettings.vue'), meta: { title: '站点设置', requiresAdmin: true } },
       { path: 'profile', name: 'profile', component: () => import('../views/Profile.vue'), meta: { title: '个人设置' } },
     ],
   },
@@ -86,6 +86,10 @@ router.beforeEach((to) => {
   const user = useUserStore()
   if (!to.meta.public && !user.loggedIn) {
     return { name: 'login' }
+  }
+  // F9：管理路由双保险——侧边栏已对普通用户隐藏，这里拦住直接输 URL 的情况
+  if (to.meta.requiresAdmin && !user.isAdmin) {
+    return { path: '/dashboard' }
   }
   if (to.name === 'login' && user.loggedIn) {
     return { path: '/dashboard' }

@@ -748,8 +748,10 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { marked } from 'marked'
+import { renderMarkdown } from '../../utils/markdown'
+import { useAutosave } from '../../composables/useAutosave'
 import { aiApi, noteApi } from '../../api'
+import { API_URL } from '../../api/base'
 import { notex } from '../../api/notex'
 import { useAppStore } from '../../stores/app'
 import { formatTime } from '../../utils/format'
@@ -781,7 +783,6 @@ const showTagMgr = ref(false)
 const newTagName = ref('')
 const saving = ref(false)
 const tagInput = ref('')
-let saveTimer = null
 
 // #14 导入 / #15 闪卡 / #22 diff / #23 快捷键
 const showImport = ref(false)
@@ -845,9 +846,8 @@ function flattenTree(nodes) {
   for (const n of nodes) { out.push(n); if (n.children) out.push(...flattenTree(n.children)) }
   return out
 }
-const rendered = computed(() => {
-  try { return marked.parse(current.value?.content || '') } catch (e) { return current.value?.content || '' }
-})
+// F6：marked + DOMPurify 安全渲染（marked 本身不消毒，直接 v-html 有 XSS 风险）
+const rendered = computed(() => renderMarkdown(current.value?.content || ''))
 
 async function loadTree() {
   const r = await noteApi.tree()
@@ -877,6 +877,8 @@ function switchSide(t) {
   else loadTree()
 }
 async function openNote(id) {
+  // F7：切笔记前先把上一篇的待存内容落库（防抖窗口内不丢）
+  await flushSave()
   if (collabMode.value) stopCollab()
   current.value = await noteApi.detail(id)
   activeNote.value = id
@@ -944,15 +946,38 @@ async function toggleArchive() {
   app.toastMsg(current.value.is_archived ? '已归档' : '已取消归档', 'success')
   loadTree()
 }
-function autoSave() {
-  clearTimeout(saveTimer)
-  saveTimer = setTimeout(async () => {
+// F7：防抖自动保存 + 离开前强制落盘（切笔记/切标签/关页面不丢最后一段输入）
+const { schedule: scheduleSave, flush: flushSave } = useAutosave(
+  async () => {
     if (!current.value || collabMode.value) return
     saving.value = true
-    current.value = await noteApi.update(current.value.id, { title: current.value.title, content: current.value.content })
-    loadTree()
-    setTimeout(() => (saving.value = false), 600)
-  }, 800)
+    try {
+      current.value = await noteApi.update(current.value.id, { title: current.value.title, content: current.value.content })
+      loadTree()
+    } finally {
+      setTimeout(() => (saving.value = false), 600)
+    }
+  },
+  { delay: 800, beacon: beaconSave },
+)
+function autoSave() { scheduleSave() }
+
+// F7：保底通道。页面隐藏/卸载时异步请求可能被取消，用 fetch keepalive
+// 复用同一 PATCH 接口（sendBeacon 带不了 Authorization 头，同步 XHR 已废弃）
+function beaconSave() {
+  if (!current.value || collabMode.value) return
+  const token = localStorage.getItem('access_token')
+  if (!token) return
+  try {
+    fetch(`${API_URL}/notes/${current.value.id}/`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ title: current.value.title, content: current.value.content }),
+      keepalive: true,
+    })
+  } catch {
+    /* ignore */
+  }
 }
 
 // ================= 双链 =================

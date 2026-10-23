@@ -2164,32 +2164,38 @@ async function loadMeta() {
 }
 
 async function loadWorkspaces() {
-  const res = await codeApi.workspaces({ include_archived: true })
-  workspaces.value = res.items || []
-  if (!activeWsId.value && workspaces.value.length) {
-    activeWsId.value = workspaces.value[0].id
-    await loadWorkspace(activeWsId.value)
-  }
+  try {
+    const res = await codeApi.workspaces({ include_archived: true })
+    workspaces.value = res.items || []
+    if (!activeWsId.value && workspaces.value.length) {
+      activeWsId.value = workspaces.value[0].id
+      await loadWorkspace(activeWsId.value)
+    }
+  } catch (e) { app.toastMsg?.(e?.message || '加载工作区失败', 'error') }
 }
 
 async function loadWorkspace(id) {
-  const res = await codeApi.workspace(id)
-  activeWs.value = res
-  const treeRes = await codeApi.fileTree(id)
-  tree.value = treeRes.tree || []
+  try {
+    const res = await codeApi.workspace(id)
+    activeWs.value = res
+    const treeRes = await codeApi.fileTree(id)
+    tree.value = treeRes.tree || []
+  } catch (e) { app.toastMsg?.(e?.message || '加载工作区失败', 'error') }
 }
 
 async function onSwitchWorkspace() {
-  if (!activeWsId.value) {
-    activeWs.value = null
-    tree.value = []
-    return
-  }
-  await loadWorkspace(activeWsId.value)
-  tabs.value = []
-  activeFileId.value = null
-  activeFile.value = null
-  code.value = ''
+  try {
+    if (!activeWsId.value) {
+      activeWs.value = null
+      tree.value = []
+      return
+    }
+    await loadWorkspace(activeWsId.value)
+    tabs.value = []
+    activeFileId.value = null
+    activeFile.value = null
+    code.value = ''
+  } catch (e) { app.toastMsg?.(e?.message || '切换工作区失败', 'error') }
 }
 
 async function doCreateWs() {
@@ -2225,10 +2231,12 @@ async function openWsSettings() {
 }
 
 async function doCloneWs() {
-  if (!activeWs.value) return
-  const res = await codeApi.cloneWorkspace(activeWs.value.id)
-  await loadWorkspaces()
-  app.toastMsg?.(`已克隆为「${res.name}」`)
+  try {
+    if (!activeWs.value) return
+    const res = await codeApi.cloneWorkspace(activeWs.value.id)
+    await loadWorkspaces()
+    app.toastMsg?.(`已克隆为「${res.name}」`)
+  } catch (e) { app.toastMsg?.(e?.message || '克隆工作区失败', 'error') }
 }
 
 async function doExportZip() {
@@ -2393,14 +2401,16 @@ async function saveCurrent(silent = false, snapshot = false) {
 }
 
 async function doSnapshot() {
-  if (!activeFileId.value) return
-  const msg = window.prompt('版本说明', '手动快照')
-  if (msg === null) return
-  await saveCurrent(true, false)
-  await codeApi.createVersion(activeFileId.value, msg || '手动快照')
-  await loadVersions()
-  graphDrawer.value = true
-  app.toastMsg?.('快照已创建')
+  try {
+    if (!activeFileId.value) return
+    const msg = window.prompt('版本说明', '手动快照')
+    if (msg === null) return
+    await saveCurrent(true, false)
+    await codeApi.createVersion(activeFileId.value, msg || '手动快照')
+    await loadVersions()
+    graphDrawer.value = true
+    app.toastMsg?.('快照已创建')
+  } catch (e) { app.toastMsg?.(e?.message || '创建快照失败', 'error') }
 }
 
 // ---- 运行 ----
@@ -2509,8 +2519,10 @@ function currentOutputText() {
 }
 
 async function copyOutput() {
-  await copyText(currentOutputText())
-  app.toastMsg?.('已复制')
+  try {
+    await copyText(currentOutputText())
+    app.toastMsg?.('已复制')
+  } catch (e) { app.toastMsg?.(e?.message || '复制输出失败', 'error') }
 }
 
 function downloadOutput() {
@@ -2602,13 +2614,17 @@ async function sendReply(c) {
 }
 
 async function toggleResolve(c) {
-  await codeApi.resolveComment(activeFileId.value, c.id)
-  await loadComments()
+  try {
+    await codeApi.resolveComment(activeFileId.value, c.id)
+    await loadComments()
+  } catch (e) { app.toastMsg?.(e?.message || '解决评论失败', 'error') }
 }
 
 async function removeComment(c) {
-  await codeApi.deleteComment(activeFileId.value, c.id)
-  await loadComments()
+  try {
+    await codeApi.deleteComment(activeFileId.value, c.id)
+    await loadComments()
+  } catch (e) { app.toastMsg?.(e?.message || '删除评论失败', 'error') }
 }
 
 // ---- 分析 ----
@@ -2872,10 +2888,12 @@ async function loadRunDetail(id) {
 }
 
 async function clearHistory() {
-  if (!window.confirm('清空全部运行历史？')) return
-  await codeApi.clearRuns()
-  await loadHistory()
-  app.toastMsg?.('已清空')
+  try {
+    if (!window.confirm('清空全部运行历史？')) return
+    await codeApi.clearRuns()
+    await loadHistory()
+    app.toastMsg?.('已清空')
+  } catch (e) { app.toastMsg?.(e?.message || '清空历史失败', 'error') }
 }
 
 async function loadLeaderboard() {
@@ -2934,15 +2952,19 @@ function insertSnippet(s) {
 }
 
 async function copySnippetInto(s) {
-  const res = await codeApi.copySnippet(s.id, true)
-  await loadSnippets()
-  app.toastMsg?.(`已存入我的库：${res.title}`)
+  try {
+    const res = await codeApi.copySnippet(s.id, true)
+    await loadSnippets()
+    app.toastMsg?.(`已存入我的库：${res.title}`)
+  } catch (e) { app.toastMsg?.(e?.message || '复制片段失败', 'error') }
 }
 
 async function removeSnippet(s) {
-  if (!window.confirm(`删除片段「${s.title}」？`)) return
-  await codeApi.deleteSnippet(s.id)
-  await loadSnippets()
+  try {
+    if (!window.confirm(`删除片段「${s.title}」？`)) return
+    await codeApi.deleteSnippet(s.id)
+    await loadSnippets()
+  } catch (e) { app.toastMsg?.(e?.message || '删除片段失败', 'error') }
 }
 
 // ---- 分享 ----
@@ -2961,10 +2983,14 @@ async function doShare() {
 
 // ---- 生命周期 ----
 onMounted(async () => {
-  await loadMeta()
-  await loadWorkspaces()
-  await loadSnippets()
-  await loadHistory()
+  try {
+    await loadMeta()
+    await loadWorkspaces()
+    await loadSnippets()
+    await loadHistory()
+  } catch (e) {
+    app.toastMsg?.(e?.message || '初始化加载失败', 'error')
+  }
 })
 
 onBeforeUnmount(() => {
