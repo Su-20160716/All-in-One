@@ -9,6 +9,10 @@
 - 绝不返回 SECRET_KEY / 密码 / Token 等敏感原文（统一走 mask）；
 - git、dbstat 等外部能力拿不到时返回结构化降级结果，而不是报错。
 """
+import logging
+
+logger = logging.getLogger(__name__)
+
 import csv
 import hashlib
 import io
@@ -21,6 +25,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.db import connection
+from django.db.models import F
 from django.utils import timezone
 
 # 进程启动时间（模块首次导入时刻），用于「关于页」的运行时长
@@ -216,7 +221,7 @@ def health_card() -> dict:
         out["db"]["engine"] = eng.get("ENGINE", "").rsplit(".", 1)[-1]
         out["db"]["name"] = os.path.basename(str(eng.get("NAME", "")))
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（core/platform.py:219 原为 pass）——review 是否应收窄异常类型")
 
     try:
         tables = connection.introspection.table_names()
@@ -238,7 +243,7 @@ def health_card() -> dict:
             cur.execute("SELECT COUNT(*) FROM django_migrations")
             out["migration"]["count"] = int(cur.fetchone()[0])
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（core/platform.py:241 原为 pass）——review 是否应收窄异常类型")
 
     try:
         db_name = str(settings.DATABASES.get("default", {}).get("NAME", ""))
@@ -253,7 +258,7 @@ def health_card() -> dict:
             "total_text": human_size(db_bytes + media_bytes),
         }
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（core/platform.py:256 原为 pass）——review 是否应收窄异常类型")
 
     import django
     import platform as _platform
@@ -511,7 +516,7 @@ def audit_search(q: str = "", kinds=None, limit: int = 50) -> dict:
                         "detail": (x.detail or "")[:240], "ip": x.ip or "",
                     })
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（core/platform.py:514 原为 pass）——review 是否应收窄异常类型")
 
     try:
         if "login" in kinds:
@@ -531,7 +536,7 @@ def audit_search(q: str = "", kinds=None, limit: int = 50) -> dict:
                         "detail": f"{x.device} · {x.ip or '未知IP'}", "ip": x.ip or "",
                     })
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（core/platform.py:534 原为 pass）——review 是否应收窄异常类型")
 
     try:
         if "role" in kinds:
@@ -559,7 +564,7 @@ def audit_search(q: str = "", kinds=None, limit: int = 50) -> dict:
                         "detail": x.detail, "ip": x.ip or "",
                     })
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（core/platform.py:562 原为 pass）——review 是否应收窄异常类型")
 
     try:
         if "command" in kinds:
@@ -578,7 +583,7 @@ def audit_search(q: str = "", kinds=None, limit: int = 50) -> dict:
                         "detail": (x.output or x.error or "")[:240], "ip": "",
                     })
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（core/platform.py:581 原为 pass）——review 是否应收窄异常类型")
 
     try:
         if "exception" in kinds:
@@ -597,7 +602,7 @@ def audit_search(q: str = "", kinds=None, limit: int = 50) -> dict:
                         "detail": f"{x.location} {x.path}".strip(), "ip": "",
                     })
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（core/platform.py:600 原为 pass）——review 是否应收窄异常类型")
 
     items.sort(key=lambda r: r["time"] or timezone.now(), reverse=True)
     return {"list": items[:limit], "total": len(items), "keyword": q,
@@ -647,12 +652,16 @@ def report_latency(samples) -> dict:
             ignored += 1
             continue
         obj, created = SlowEndpoint.objects.get_or_create(path=path)
+        # B22：读-改-写改 F() 原子更新——原来 obj.samples + 1 是「先读后写」，
+        # 两个并发上报同一 path 会互相覆盖丢计数；update+F 是单条 SQL 原子完成
         SlowEndpoint.objects.filter(pk=obj.pk).update(
-            samples=obj.samples + 1,
-            total_ms=obj.total_ms + dur,
-            slow_samples=obj.slow_samples + (1 if dur >= SLOW_MS else 0),
-            max_ms=max(obj.max_ms, dur),
+            samples=F("samples") + 1,
+            total_ms=F("total_ms") + dur,
+            slow_samples=F("slow_samples") + (1 if dur >= SLOW_MS else 0),
         )
+        # max_ms 是「取大」，F 表达式里做不了比较——用条件 UPDATE 保证原子性：
+        # 仅当库里现值小于 dur 才写，并发下也不会把大值覆盖回小值
+        SlowEndpoint.objects.filter(pk=obj.pk, max_ms__lt=dur).update(max_ms=dur)
         known.add(path)
         accepted += 1
     return {"accepted": accepted, "ignored": ignored, "threshold_ms": SLOW_MS}

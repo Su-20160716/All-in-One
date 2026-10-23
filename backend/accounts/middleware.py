@@ -3,6 +3,10 @@
   会话被踢出 / 批量强制下线后，对应 access token 立即失效（F637 批量下线依赖此实现）。
 - TenantMiddleware：解析当前请求所属租户，挂到 request.tenant（多租户基础层）
 """
+import logging
+
+logger = logging.getLogger(__name__)
+
 import base64
 import json
 
@@ -59,7 +63,7 @@ class LastActiveMiddleware(MiddlewareMixin):
                                     status=401,
                                 )
                         except Exception:
-                            pass
+                            logger.exception("B23：静默兜底已登记（accounts/middleware.py:62 原为 pass）——review 是否应收窄异常类型")
 
         user = getattr(request, "user", None)
         if user is None or not user.is_authenticated:

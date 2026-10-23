@@ -24,9 +24,13 @@ for path, body in tests:
     r = c.post("/api/minitools/" + path, body, format="json")
     print("  %s: status=%d ok=%s" % (path, r.status_code, r.json().get("ok")))
 
+# S3-B2/B17：code catalog 响应不带 endpoint_count，权威数字在 code/urls.py 的
+# _EXPECTED 路由契约断言里（模块导入时就会校验，对不上直接 ImportError）
+from code.urls import _EXPECTED as _CODE_EP
+
 r = c.get("/api/code/catalog/")
 if r.status_code == 200:
-    print("code catalog: %d endpoints" % r.json()["data"]["endpoint_count"])
+    print("code catalog: %d endpoints (路由契约 _EXPECTED)" % _CODE_EP)
 else:
     print("code catalog status: %d" % r.status_code)
 

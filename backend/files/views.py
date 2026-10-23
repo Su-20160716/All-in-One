@@ -1,6 +1,10 @@
 """文件管理视图：文件夹树、分片上传、断点续传、秒传、回收站、共享链接、
 批量操作、在线新建/编辑、复制、收藏备注、存储分析、重复检测、最近访问、打包下载、
 多类型在线预览（含 HTTP Range 流式播放）、Office 转 PDF。"""
+import logging
+
+logger = logging.getLogger(__name__)
+
 import csv
 import io
 import json
@@ -97,7 +101,7 @@ def _touch_recent(user, fm):
         if not created:
             rec.save(update_fields=["accessed_at"])
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（files/views.py:100 原为 pass）——review 是否应收窄异常类型")
 
 
 def _owner_folder(user, folder_id):
@@ -137,7 +141,7 @@ def _log_op(user, fm, action, detail="", from_folder="", to_folder=""):
             to_folder=str(to_folder or "")[:200],
         )
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（files/views.py:140 原为 pass）——review 是否应收窄异常类型")
 
 
 def _active_file_shares(fm):
@@ -175,7 +179,12 @@ def _visibility_state(fm):
         "active_shares": len(active),
         "shares": [{
             "token": l.token, "permission": l.permission, "is_revoked": l.is_revoked,
-            "is_expired": l.is_expired, "expire_at": l.expire_at,
+            "is_expired": l.is_expired,
+            # B23 排障修复：expire_at 是 datetime，此 dict 会整包塞进
+            # FileVisibilitySnapshot.snapshot（JSONField）——原来直接放 datetime
+            # 对象，一旦文件有未过期分享就 TypeError 炸栈（被 except 静默吞掉，
+            # 可见性快照从此missed）。isoformat 后存储/接口两端都安全。
+            "expire_at": l.expire_at.isoformat() if l.expire_at else None,
             "password": bool(l.password), "view_count": l.view_count, "download_count": l.download_count,
             "url": f"/share/{l.token}",
         } for l in shares[:20]],
@@ -196,7 +205,7 @@ def _record_visibility(fm, user, note="", action=""):
             snapshot=state, note=note or action,
         )
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（files/views.py:199 原为 pass）——review 是否应收窄异常类型")
 
 
 # ============ 文件夹 ============
@@ -361,7 +370,10 @@ class FileListView(APIView):
         page = pg.paginate_queryset(qs, request)
         if page is not None:
             return pg.get_paginated_response(FileMetaSerializer(page, many=True).data)
-        return Response({"list": FileMetaSerializer(qs, many=True).data, "total": qs.count()})
+        # B20：序列化结果已包含全部行，len 即总数——省掉一次多余的 COUNT 查询
+        # （原来 FileMetaSerializer(qs).data 与 qs.count() 是两条独立 SQL）
+        data = FileMetaSerializer(qs, many=True).data
+        return Response({"list": data, "total": len(data)})
 
 
 class FileSearchView(APIView):

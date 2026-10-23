@@ -267,10 +267,13 @@ class MessageListView(APIView):
             qs = qs.filter(id__lt=as_int(before, field="before"))
         # B6：sender / reply_to / reply_to.sender 全部 select_related，
         # 避免每条消息 2-3 次 sender 查询
+        # B19：total 取过滤后总量（切片前 count）——原来是 len(本页数据)，
+        # 命中 50 条上限时恒等于 50，名不副实；前端未消费该字段，改语义零影响
+        total = qs.count()
         qs = qs.select_related("sender", "reply_to", "reply_to__sender").order_by("-id")[:50]
         data = ChatMessageSerializer(list(qs)[::-1], many=True, context={"request": request}).data
         pinned_data = ChatMessageSerializer(pinned, many=True, context={"request": request}).data
-        return Response({"list": data, "total": len(data), "pinned": pinned_data})
+        return Response({"list": data, "total": total, "pinned": pinned_data})
 
 
 class MessageCreateView(APIView):

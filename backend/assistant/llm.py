@@ -9,6 +9,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import json
 import time
 import urllib.error
@@ -97,7 +101,7 @@ def chat(messages, temperature=None, max_tokens=None, json_mode=False, timeout=N
         try:
             detail = exc.read().decode("utf-8", errors="ignore")[:300]
         except Exception:
-            pass
+            logger.exception("B23：静默兜底已登记（assistant/llm.py:100 原为 pass）——review 是否应收窄异常类型")
         return {"ok": False, "content": "", "provider": "llm", "model": settings.LLM_MODEL,
                 "error": f"HTTP {exc.code} {detail}", "code": "HTTP_ERROR",
                 "duration_ms": int((time.time() - started) * 1000)}
@@ -135,7 +139,7 @@ def chat_json(messages, fallback=None, **kwargs):
             try:
                 return json.loads(raw[start:end + 1]), res
             except Exception:
-                pass
+                logger.exception("B23：静默兜底已登记（assistant/llm.py:138 原为 pass）——review 是否应收窄异常类型")
     return fallback, res
 
 
@@ -152,7 +156,7 @@ def log_usage(owner_id, feature, result, prompt_chars=0, output_chars=0):
             error=(result.get("error") or "")[:255],
         )
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（assistant/llm.py:155 原为 pass）——review 是否应收窄异常类型")
 
 
 # ---------------------------------------------------------------------------

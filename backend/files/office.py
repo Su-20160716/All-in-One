@@ -11,6 +11,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import os
 import shutil
 import subprocess
@@ -149,7 +153,7 @@ def _cleanup(path: Path):
         if path.exists():
             shutil.rmtree(path, ignore_errors=True)
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（files/office.py:152 原为 pass）——review 是否应收窄异常类型")
 
 
 def relative_media_path(abs_path: str) -> str:

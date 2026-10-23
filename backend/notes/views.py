@@ -1,6 +1,10 @@
 """笔记视图：CRUD、标签、搜索、版本历史/对比/回滚、分享、回收站、批量、导出、大纲、模板、统计、双链
 + F565–F582：字数目标/日记/未链接提及/随机回顾/健康度/置顶/颜色/来源/片段库/合并/拆分/
   生词联动/周回顾/待办抽取/引用格式/分组文件夹"""
+import logging
+
+logger = logging.getLogger(__name__)
+
 import calendar
 import io
 import random
@@ -83,7 +87,7 @@ def bump_words_activity(user, delta: int):
         row.delta += int(delta)
         row.save(update_fields=["delta"])
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（notes/views.py:86 原为 pass）——review 是否应收窄异常类型")
 
 
 def _folder_of(user, folder_id):
@@ -1380,7 +1384,7 @@ class NoteMergeView(APIView):
         try:
             link_lib.rebuild_links_for_note(target)
         except Exception:
-            pass
+            logger.exception("B23：静默兜底已登记（notes/views.py:1383 原为 pass）——review 是否应收窄异常类型")
         keep = bool(request.data.get("keep_source", False))
         if keep:
             message = f"已合并到「{target.title}」（源笔记保留）"

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 """dataintel · 图表与实验面接口：chart(8) abtest(5) cohort(4) sampling(4) geo(5) = 26 个。"""
+import logging
+
+logger = logging.getLogger(__name__)
+
 import hashlib
 import math
 
@@ -387,7 +391,9 @@ def cohort_summary(request):
             users.setdefault(str(e["user"]), set()).add(str(e["period"]))
     periods = sorted({p_ for ps in users.values() for p_ in ps})
     pidx = {p_: i for i, p_ in enumerate(periods)}
-    first_seen = {u: min(ps, key=lambda p_: pidx[p_]) for u in users}
+    # S3-B2 顺手修复：原写法 min(ps, ...) 里 ps 是推导外的自由变量，
+    # users 非空时必抛 NameError（被 endpoint 兜底成 422，静默坏了很久）
+    first_seen = {u: min(users[u], key=lambda p_: pidx[p_]) for u in users}
     rows = []
     for p_ in periods:
         active = sum(1 for ps in users.values() if p_ in ps)
@@ -874,7 +880,7 @@ def insight_narrate(request):
             sentences = [text]
             provider = "llm"
         except Exception:
-            pass
+            logger.exception("B23：静默兜底已登记（dataintel/views_extra.py:877 原为 pass）——review 是否应收窄异常类型")
     return ok({"narrative": " ".join(sentences), "provider": provider,
                "numeric_columns": num_cols})
 

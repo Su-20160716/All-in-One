@@ -12,6 +12,10 @@
   事务回滚时也不会留下「库里没有、索引里有」的幽灵记录。
   无活动事务时 on_commit 立即执行，行为与原来一致。
 """
+import logging
+
+logger = logging.getLogger(__name__)
+
 from django.db import transaction
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
@@ -21,7 +25,7 @@ def _safe(fn, *args, **kwargs):
     try:
         fn(*args, **kwargs)
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（core/signals.py:24 原为 pass）——review 是否应收窄异常类型")
 
 
 def _on_commit(fn, *args, **kwargs):

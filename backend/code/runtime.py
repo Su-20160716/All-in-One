@@ -669,9 +669,11 @@ def _spawn(argv, stdin, cwd, timeout, env):
 
 
 def _kill(proc):
+    # B23：收窄异常——原来 except Exception 会把 MemoryError 之类真bug也吞了。
+    # 杀进程在清理路径上，预期失败只有「进程已退出/无权终止」（都是 OSError 家族）
     try:
         proc.kill()
-    except Exception:  # noqa: BLE001
+    except OSError:
         pass
 
 

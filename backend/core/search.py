@@ -12,6 +12,10 @@
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import html
 import math
 import os
@@ -187,7 +191,7 @@ def _read_xlsx(path: str, cap: int) -> str:
         try:
             wb.close()
         except Exception:
-            pass
+            logger.exception("B23：静默兜底已登记（core/search.py:190 原为 pass）——review 是否应收窄异常类型")
         return "\n".join(parts)[:cap]
     except Exception:
         return ""
@@ -216,7 +220,7 @@ def extract_text(abs_path: str, ext: str = "") -> str:
             if ok and result.lower().endswith(".pdf"):
                 return _read_pdf(result, cap)
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（core/search.py:219 原为 pass）——review 是否应收窄异常类型")
     return ""
 
 

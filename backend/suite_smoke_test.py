@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""v5 套件冒烟测试：devtools(154) + dataintel(114) + officesuite(233) = 501 接口全链路。
+"""v5 套件冒烟测试：devtools + dataintel + officesuite 三 catalog 全链路。
 
+接口总数由各源 SUBSYSTEMS 动态计算（见下方 *_EXPECTED），不写死。
 运行：venv/Scripts/python suite_smoke_test.py
 注意：必须与其它测试**串行**执行（SQLite database is locked），勿并行。
 """
@@ -13,6 +14,17 @@ import django  # noqa: E402
 django.setup()
 
 from rest_framework.test import APIClient  # noqa: E402
+
+# S3-B2/B17：三个 catalog 的期望数统一从源动态计算（SUBSYSTEMS 是唯一事实源），
+# 以后加接口冒烟自动跟上，不再出现"脚本过期假装接口丢了"的假阳性。
+from devtools.urls import SUBSYSTEMS as _DEV_SUBS  # noqa: E402
+from dataintel.urls import SUBSYSTEMS as _DI_SUBS  # noqa: E402
+from officesuite.views_cal import OFFICE_SUBSYSTEMS as _OS_SUBS  # noqa: E402
+
+# endpoint_count 均含 catalog 自身接口（各 urls.py / views 里都是 sum(...)+1）
+DEVT_EXPECTED = sum(len(eps) for _, _, eps in _DEV_SUBS) + 1
+DI_EXPECTED = sum(c for _, _, c in _DI_SUBS) + 1
+OS_EXPECTED = sum(c for _, _, c in _OS_SUBS) + 1
 
 passed, failed = [], []
 
@@ -197,9 +209,9 @@ DEVT = [
 
 
 def test_devtools(c):
-    print("\n【devtools 开发者工具箱】154 接口")
+    print("\n【devtools 开发者工具箱】%d 接口" % DEVT_EXPECTED)
     r = c.get("/api/devtools/catalog/")
-    check("devtools/catalog 目录", ok200(r) and r.data["data"]["endpoint_count"] == 154)
+    check("devtools/catalog 目录", ok200(r) and r.data["data"]["endpoint_count"] == DEVT_EXPECTED)
 
     jwt_token, luhn_code = "", ""
     # 先跑 jwt-sign / luhn-gen，拿值给 verify / checksum
@@ -390,9 +402,9 @@ DATAI_ROWS = [
 
 
 def test_dataintel(c):
-    print("\n【dataintel 数据智能中心】114 接口")
+    print("\n【dataintel 数据智能中心】%d 接口" % DI_EXPECTED)
     r = c.get("/api/dataintel/catalog/")
-    check("dataintel/catalog 目录", ok200(r) and r.data["data"]["endpoint_count"] == 114)
+    check("dataintel/catalog 目录", ok200(r) and r.data["data"]["endpoint_count"] == DI_EXPECTED)
 
     # dataset CRUD（6）
     r = call(c, "POST", "/api/dataintel/dataset/create/", {"name": "销售样例", "rows": SAMPLE_ROWS})
@@ -449,9 +461,9 @@ def test_dataintel(c):
 
 
 def test_officesuite(c, peer):
-    print("\n【officesuite 办公套件】233 接口")
+    print("\n【officesuite 办公套件】%d 接口" % OS_EXPECTED)
     r = c.get("/api/officesuite/catalog/")
-    check("officesuite/catalog 目录", ok200(r) and r.data["data"]["endpoint_count"] == 233)
+    check("officesuite/catalog 目录", ok200(r) and r.data["data"]["endpoint_count"] == OS_EXPECTED)
 
     # ---- approval（12）----
     r = c.get("/api/officesuite/approval/templates/")

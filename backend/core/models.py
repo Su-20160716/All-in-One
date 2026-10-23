@@ -195,6 +195,10 @@ class SearchDoc(models.Model):
         ("file", "文件"),
         ("project", "项目"),
         ("task", "任务"),
+        # B27：代码工坊（v6）接入全文索引——与 core/signals.py 的
+        # 保存即索引、core/reindex.py 的重建 handler 使用同一组 module 名
+        ("code", "代码文件"),
+        ("snippet", "代码片段"),
     ]
 
     owner = models.ForeignKey(

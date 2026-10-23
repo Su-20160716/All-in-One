@@ -1,4 +1,8 @@
 """用户认证 / 个人中心 / 角色权限管理 视图"""
+import logging
+
+logger = logging.getLogger(__name__)
+
 import json
 
 from django.contrib.auth import get_user_model
@@ -243,7 +247,7 @@ class LoginView(TokenObtainPairView):
 
                 record_exception(exc, request.path)
             except Exception:
-                pass
+                logger.exception("B23：静默兜底已登记（accounts/views.py:246 原为 pass）——review 是否应收窄异常类型")
             return Response(
                 {"code": 422, "message": f"{type(exc).__name__}: {exc}", "detail": {}},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -267,7 +271,7 @@ class LoginView(TokenObtainPairView):
                         user_agent=(request.META.get("HTTP_USER_AGENT", "") or "")[:300],
                     )
                 except Exception:
-                    pass
+                    logger.exception("B23：静默兜底已登记（accounts/views.py:270 原为 pass）——review 是否应收窄异常类型")
                 resp.data["user"] = UserSerializer(user).data
         return resp
 
@@ -310,7 +314,7 @@ class RegisterView(APIView):
                 try:
                     InviteUse.objects.create(invite=invite, user=user)
                 except Exception:
-                    pass
+                    logger.exception("B23：静默兜底已登记（accounts/views.py:313 原为 pass）——review 是否应收窄异常类型")
             token = RefreshToken.for_user(user)
             # B12：与登录保持一致，写入 tv claim（认证端校验 token_version）
             token["tv"] = user.token_version
@@ -366,7 +370,7 @@ class ProfileView(APIView):
                     user=request.user, old_value=old_nickname or "", new_value=new_nickname or ""
                 )
             except Exception:
-                pass
+                logger.exception("B23：静默兜底已登记（accounts/views.py:369 原为 pass）——review 是否应收窄异常类型")
         return Response({"message": "资料已更新", "user": UserSerializer(request.user).data})
 
 
@@ -424,7 +428,7 @@ def snapshot_avatar(user, note: str = ""):
             try:
                 old.image.delete(save=False)
             except Exception:
-                pass
+                logger.exception("B23：静默兜底已登记（accounts/views.py:427 原为 pass）——review 是否应收窄异常类型")
         stale.delete()
         return row
     except Exception:
@@ -615,9 +619,12 @@ class LoginHistoryView(APIView):
         qs = LoginLog.objects.filter(user=request.user)
         pg = StandardPagination()
         page = pg.paginate_queryset(qs, request)
+        # B20：复用 DRF 分页器已算好的 count（paginate_queryset 内部本来就
+        # count 过一次），不再单独执行第二条 COUNT SQL
+        total = pg.page.paginator.count if pg.page else 0
         return Response({
             "list": LoginLogSerializer(page, many=True).data,
-            "total": qs.count(),
+            "total": total,
             "page": pg.page.number if pg.page else 1,
         })
 
@@ -757,7 +764,7 @@ def record_role_change(actor, target, action, roles_from, roles_to, ip=None, det
             ip=ip,
         )
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（accounts/views.py:763 原为 pass）——review 是否应收窄异常类型")
 
 
 class AdminBatchActionView(APIView):
@@ -1016,7 +1023,7 @@ def _compute_badges(user):
                 )
                 UserBadge.objects.get_or_create(user=user, badge=badge)
         except Exception:
-            pass
+            logger.exception("B23：静默兜底已登记（accounts/views.py:1022 原为 pass）——review 是否应收窄异常类型")
 
 
 class MyBadgesView(APIView):
@@ -1080,7 +1087,7 @@ class SessionRevokeView(APIView):
             from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
             OutstandingToken.objects.get_or_create(jti=sess.jti)
         except Exception:
-            pass
+            logger.exception("B23：静默兜底已登记（accounts/views.py:1086 原为 pass）——review 是否应收窄异常类型")
         return Response({"message": "已踢出该设备"})
 
 
@@ -1287,7 +1294,7 @@ def _guard(fn):
 
                 record_exception(exc, getattr(request, "path", ""))
             except Exception:
-                pass
+                logger.exception("B23：静默兜底已登记（accounts/views.py:1293 原为 pass）——review 是否应收窄异常类型")
             return Response(
                 {"ok": False, "error": f"{type(exc).__name__}: {exc}", "code": 422},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,

@@ -25,6 +25,9 @@ class CoreConfig(AppConfig):
                     cur.execute("PRAGMA busy_timeout=20000")
                     cur.execute("PRAGMA synchronous=NORMAL")
             except Exception:
-                pass  # pragma 失败不影响启动（只读库等场景）
+                # pragma 失败不影响启动（只读库等场景）；登记日志便于排查
+                # WAL 未生效时的 database is locked 问题
+                import logging
+                logging.getLogger(__name__).exception("B23：SQLite PRAGMA 调优失败")
 
         connection_created.connect(_sqlite_tune)

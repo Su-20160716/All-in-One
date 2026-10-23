@@ -1,4 +1,8 @@
 """core 视图：通知中心 / 通知偏好 / 系统公告 / 操作日志 / 全局搜索 / 全文搜索 / 健康检查 / 站点设置"""
+import logging
+
+logger = logging.getLogger(__name__)
+
 import csv
 import json
 import re
@@ -561,7 +565,7 @@ class FullTextSearchView(APIView):
             SearchQueryLog.objects.create(
                 owner=request.user, term=q[:200], result_count=data.get("total", 0))
         except Exception:
-            pass
+            logger.exception("B23：静默兜底已登记（core/views.py:564 原为 pass）——review 是否应收窄异常类型")
         return Response(data)
 
 
@@ -691,7 +695,7 @@ def _guard(fn):
 
                 record_exception(exc, getattr(request, "path", ""))
             except Exception:
-                pass
+                logger.exception("B23：静默兜底已登记（core/views.py:694 原为 pass）——review 是否应收窄异常类型")
             return Response(
                 {"ok": False, "error": f"{type(exc).__name__}: {exc}", "code": 422},
                 status=422,
@@ -813,7 +817,7 @@ class AdminCommandRunView(APIView):
 
                 record_exception(exc, request.path)
             except Exception:
-                pass
+                logger.exception("B23：静默兜底已登记（core/views.py:816 原为 pass）——review 是否应收窄异常类型")
         duration = int((_time.time() - t0) * 1000)
         output = out_buf.getvalue()
         if err_buf.getvalue():

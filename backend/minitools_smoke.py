@@ -17,13 +17,19 @@ u, _ = User.objects.get_or_create(username="smoke_test_user", defaults={"is_acti
 c.force_authenticate(user=u)
 
 # 1. catalog
+# B17：期望值从源动态计算（SUBSYSTEMS 是唯一事实源），加工具不再需要改冒烟
+from minitools.urls import SUBSYSTEMS as _MT_SUBS
+_EXP_SUB = len(_MT_SUBS)
+_EXP_EP = sum(len(eps) for _, _, eps in _MT_SUBS) + 1  # endpoint_count 含 catalog 自身
+_EXP_DETAIL = sum(len(eps) for _, _, eps in _MT_SUBS)
+
 r = c.get("/api/minitools/catalog/")
 assert r.status_code == 200, f"catalog status {r.status_code}: {r.content[:200]}"
 data = r.json()["data"]
 print(f"[catalog] domain={data['domain']} subsystems={data['subsystem_count']} endpoints={data['endpoint_count']}")
-assert data["subsystem_count"] == 19, data["subsystem_count"]
-assert data["endpoint_count"] == 321, data["endpoint_count"]
-assert len(data["endpoints"]) == 320, len(data["endpoints"])
+assert data["subsystem_count"] == _EXP_SUB, data["subsystem_count"]
+assert data["endpoint_count"] == _EXP_EP, data["endpoint_count"]
+assert len(data["endpoints"]) == _EXP_DETAIL, len(data["endpoints"])
 
 # 2. 抽测工具（覆盖每个家族至少2个）
 cases = [

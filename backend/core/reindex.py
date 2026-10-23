@@ -76,11 +76,46 @@ def _index_tasks(owner_id=None):
     return n
 
 
+def _index_code_files(owner_id=None):
+    """B27：代码文件入索引（module=code，与 core/signals.py 的保存即索引保持一致）"""
+    from core.search import index_document
+    from code.models import CodeFile
+
+    qs = CodeFile.objects.select_related("workspace")
+    if owner_id:
+        qs = qs.filter(owner_id=owner_id)
+    n = 0
+    for f in qs.iterator():
+        title = f"{f.workspace.name}/{f.path}" if f.workspace_id else f.path
+        index_document("code", f.id, f.owner_id, title, f.content or "")
+        n += 1
+    return n
+
+
+def _index_snippets(owner_id=None):
+    """B27：代码片段入索引（module=snippet）"""
+    from core.search import index_document
+    from code.models import CodeSnippet
+
+    qs = CodeSnippet.objects.all()
+    if owner_id:
+        qs = qs.filter(owner_id=owner_id)
+    n = 0
+    for s in qs.iterator():
+        body = f"{s.description}\n{s.code}"
+        index_document("snippet", s.id, s.owner_id, s.title, body,
+                       summary=s.description or s.code[:200])
+        n += 1
+    return n
+
+
 HANDLERS = {
     "note": _index_notes,
     "file": _index_files,
     "project": _index_projects,
     "task": _index_tasks,
+    "code": _index_code_files,
+    "snippet": _index_snippets,
 }
 
 

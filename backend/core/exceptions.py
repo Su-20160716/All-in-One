@@ -17,7 +17,9 @@ def _record(exc, context):
         request = (context or {}).get("request")
         record_exception(exc, getattr(request, "path", "") if request else "")
     except Exception:
-        pass
+        # 有意兜底：聚合记录失败绝不能影响主响应；但留日志便于发现
+        # record_exception 自身的问题（B23）
+        logger.exception("F633 异常聚合记录失败（不影响主响应）")
 
 
 def custom_exception_handler(exc, context):

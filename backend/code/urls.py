@@ -20,10 +20,12 @@ SUBSYSTEMS = [
     ]],
     ["workspace", "工作区", "代码工程的容器", [
         "workspaces/", "workspaces/create/", "workspaces/<int:pk>/",
+        "workspaces/<int:pk>/update/", "workspaces/<int:pk>/delete/",
         "workspaces/<int:pk>/star/", "workspaces/<int:pk>/clone/",
     ]],
     ["file", "代码文件", "增删改查、树、批量", [
-        "files/", "files/create/", "files/<int:pk>/", "files/<int:pk>/favorite/",
+        "files/", "files/create/", "files/<int:pk>/", "files/<int:pk>/update/",
+        "files/<int:pk>/delete/", "files/<int:pk>/favorite/",
         "files/<int:pk>/entry/", "files/<int:pk>/move/", "files/batch/", "files/tree/",
     ]],
     ["version", "版本历史", "快照 / diff / 回滚", [
@@ -39,21 +41,24 @@ SUBSYSTEMS = [
         "judge/", "judge/history/", "judge/<int:pk>/", "leaderboard/",
     ]],
     ["snippet", "代码片段库", "可复用片段、标签与收藏夹分组", [
-        "snippets/", "snippets/create/", "snippets/<int:pk>/", "snippets/<int:pk>/copy/",
+        "snippets/", "snippets/create/", "snippets/<int:pk>/", "snippets/<int:pk>/update/",
+        "snippets/<int:pk>/delete/", "snippets/<int:pk>/copy/",
         "snippets/tags/", "snippets/from-file/", "snippets/folders/",
     ]],
     ["analyze", "静态分析", "指标 / 大纲 / 复杂度 / 质量 / 统计卡", [
         "analyze/", "outline/", "complexity/", "quality/", "flow/",
         "similarity/", "secret-scan/", "refactor-hints/", "code-stats/",
     ]],
-    ["ai", "智能辅助", "生成 / 解释 / 找bug / 重构 / 测试", [
+    ["ai", "智能辅助", "生成 / 解释 / 找bug / 重构 / 测试 / 评审", [
         "ai/status/", "ai/generate/", "ai/transform/", "ai/error-explain/",
         "ai/regex/", "ai/nl2sql/", "ai/learning-path/", "ai/chat-edit/",
         "ai/inline/", "ai/apply/<int:pk>/",
         "ai/translate/", "ai/comment/", "ai/optimize/", "ai/testgen/", "ai/summary/",
+        "ai/review/",
     ]],
     ["collab", "协作", "行评论与协同状态", [
-        "files/<int:pk>/comments/", "files/<int:pk>/comments/<int:cid>/resolve/",
+        "files/<int:pk>/comments/", "files/<int:pk>/comments/create/",
+        "files/<int:pk>/comments/<int:cid>/resolve/",
         "files/<int:pk>/comments/<int:cid>/delete/",
         "files/<int:pk>/collab/", "files/<int:pk>/collab/ws/",
     ]],
@@ -232,9 +237,18 @@ public_urlpatterns = [
 ]
 
 # 契约断言：接口数量变化时必须显式确认
-# v6 基础 75 + L5 竞技教学 18 + L3 AI 补齐 5 + L4 工程化 6 = 104
+# v6 基础 75 + L5 竞技教学 18 + L3 AI 补齐 6 + L4 工程化 6 = 105
 # F669–F680 能力扩展 +5：snippets/folders · run/presets(2) · code-stats · daily/reminder
 _EXPECTED = 110
 assert len(urlpatterns) == _EXPECTED, (
     f"code 接口数应为 {_EXPECTED}，实际 {len(urlpatterns)}"
+)
+
+# S3-B2/B15 双保险：SUBSYSTEMS 展平后必须与路由表完全一致——
+# 否则前端目录页会漏渲染能力（历史上就是这么漏了 8 个）
+_sub_flat = [ep for _, _, _, eps in SUBSYSTEMS for ep in eps]
+assert sorted(_sub_flat) == sorted(VIEWS.keys()), (
+    f"SUBSYSTEMS 与 VIEWS 不一致："
+    f"多 {sorted(set(_sub_flat) - set(VIEWS))}，"
+    f"少 {sorted(set(VIEWS) - set(_sub_flat))}"
 )

@@ -16,13 +16,19 @@ c = APIClient()
 c.force_authenticate(user=u)
 
 # 1. catalog
+# B17：期望值从源动态计算（SUBSYSTEMS 是唯一事实源），加工具不再需要改冒烟
+from minitools.urls import SUBSYSTEMS as _MT_SUBS
+_EXP_SUB = len(_MT_SUBS)
+_EXP_EP = sum(len(eps) for _, _, eps in _MT_SUBS) + 1  # endpoint_count 含 catalog 自身
+_EXP_DETAIL = sum(len(eps) for _, _, eps in _MT_SUBS)
+
 r = c.get("/api/minitools/catalog/")
 assert r.status_code == 200, r.content[:300]
 data = r.json()["data"]
 print(f"[catalog] subsystems={data['subsystem_count']} endpoints={data['endpoint_count']}")
-assert data["subsystem_count"] == 19, data["subsystem_count"]
-assert data["endpoint_count"] == 321, data["endpoint_count"]
-assert len(data["endpoints"]) == 320, len(data["endpoints"])
+assert data["subsystem_count"] == _EXP_SUB, data["subsystem_count"]
+assert data["endpoint_count"] == _EXP_EP, data["endpoint_count"]
+assert len(data["endpoints"]) == _EXP_DETAIL, len(data["endpoints"])
 
 # 2. 抽测：每个新家族至少 1-2 个
 cases = [

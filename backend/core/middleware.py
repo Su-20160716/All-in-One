@@ -11,6 +11,10 @@
 
 - OperationLogMiddleware：统一操作日志（写请求记录到 OperationLog），原有行为保持不变。
 """
+import logging
+
+logger = logging.getLogger(__name__)
+
 import hashlib
 import json
 
@@ -90,7 +94,7 @@ def _is_superuser_request(request) -> bool:
         if user is not None and user.is_authenticated and user.is_superuser:
             return True
     except Exception:
-        pass
+        logger.exception("B23：静默兜底已登记（core/middleware.py:93 原为 pass）——review 是否应收窄异常类型")
     auth = request.META.get("HTTP_AUTHORIZATION") or ""
     if auth[:7].lower() == "bearer " and not auth[7:].strip().startswith(PAT_PREFIX):
         try:
@@ -166,7 +170,7 @@ class OperationLogMiddleware(MaintenanceModeMiddleware):
                 return
             _ = request.body
         except Exception:
-            pass  # 预读失败不影响主流程，日志降级为无 detail
+            logger.exception("B23：静默兜底已登记（core/middleware.py:169 原为 pass）——review 是否应收窄异常类型")
 
     def process_response(self, request, response):
         try:
@@ -187,7 +191,7 @@ class OperationLogMiddleware(MaintenanceModeMiddleware):
                     keys = list(body.keys())[:8]
                     detail = "{" + ", ".join(f"{k}: {str(body[k])[:40]}" for k in keys) + "}"
             except Exception:
-                pass
+                logger.exception("B23：静默兜底已登记（core/middleware.py:190 原为 pass）——review 是否应收窄异常类型")
 
             # B7：/api/projects/1/boards/ 原来取 parts[0] 恒为 "api"，
             # 模块分组全是同一值；改为跳过 api 前缀取真实模块名
@@ -218,5 +222,5 @@ class OperationLogMiddleware(MaintenanceModeMiddleware):
                 ip=get_client_ip(request),
             )
         except Exception:
-            pass
+            logger.exception("B23：静默兜底已登记（core/middleware.py:221 原为 pass）——review 是否应收窄异常类型")
         return response

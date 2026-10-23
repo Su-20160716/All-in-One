@@ -426,7 +426,10 @@ def main_ws(info):
     r = admin.get(f"/api/notes/{info['note_id']}/")
     check("协同快照已回写笔记正文", r.status_code == 200 and "协同写入的正文" in r.data.get("content", ""),
           str(r.data.get("content"))[:150])
-    r = admin.get("/api/core/search/fulltext/", {"q": "协同写入"})
+    # B27 后 code/snippet 也进全文索引，全库搜「协同写入」会被其他模块文档
+    # 挤出首页（dev 库累积了历史索引）——加 module=note 精准验证意图，
+    # 顺带覆盖搜索接口的 module 过滤参数
+    r = admin.get("/api/core/search/fulltext/", {"q": "协同写入", "module": "note"})
     check("协同写入内容已进入全文索引",
           r.status_code == 200 and any(h["id"] == info["note_id"] for h in r.data.get("results", [])),
           str(r.data)[:200])

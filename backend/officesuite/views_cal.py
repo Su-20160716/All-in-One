@@ -425,27 +425,31 @@ def calendar_free_busy(request):
 # catalog 领域目录（1）
 # =====================================================================
 
+# S3-B2/B17：提取为模块级常量——suite_catalog 与冒烟脚本共用同一事实源，
+# 加接口只改这里，两边永远不会脱节。
+OFFICE_SUBSYSTEMS = [
+    ("approval", "通用审批", 12), ("seal", "用印管理", 6),
+    ("expense", "报销管理", 8), ("travel", "差旅申请", 7),
+    ("contract", "合同台账", 8),
+    ("meeting", "会议室预订", 11), ("asset", "固定资产", 9),
+    ("vehicle", "车辆管理", 7), ("supplies", "办公用品", 7),
+    ("visitor", "访客登记", 7), ("mailroom", "快递代收", 5),
+    ("duty", "值班排班", 13), ("timesheet", "工时填报", 9),
+    ("training", "培训管理", 10), ("recognition", "表彰墙", 6),
+    ("standup", "每日站会", 7), ("okr", "OKR 目标", 10),
+    ("decision", "决策记录", 7), ("todobox", "轻待办", 11),
+    ("faq", "FAQ 知识", 7), ("policy", "制度文档", 7),
+    ("template", "文档模板", 7), ("wiki", "团队 Wiki", 11),
+    ("minutes", "会议纪要", 9), ("formcollect", "收集表单", 8),
+    ("announcement", "部门公告", 8), ("poll", "投票", 9),
+    ("helpdesk", "工单", 11), ("calendar", "共享日程", 11),
+]
+
 
 @endpoint(("GET",))
 def suite_catalog(request):
     """officesuite 目录：30 个子系统 × 249 接口总览（供前端动态渲染）。"""
-    subsystems = [
-        ("approval", "通用审批", 12), ("seal", "用印管理", 6),
-        ("expense", "报销管理", 8), ("travel", "差旅申请", 7),
-        ("contract", "合同台账", 8),
-        ("meeting", "会议室预订", 11), ("asset", "固定资产", 9),
-        ("vehicle", "车辆管理", 7), ("supplies", "办公用品", 7),
-        ("visitor", "访客登记", 7), ("mailroom", "快递代收", 5),
-        ("duty", "值班排班", 13), ("timesheet", "工时填报", 9),
-        ("training", "培训管理", 10), ("recognition", "表彰墙", 6),
-        ("standup", "每日站会", 7), ("okr", "OKR 目标", 10),
-        ("decision", "决策记录", 7), ("todobox", "轻待办", 11),
-        ("faq", "FAQ 知识", 7), ("policy", "制度文档", 7),
-        ("template", "文档模板", 7), ("wiki", "团队 Wiki", 11),
-        ("minutes", "会议纪要", 9), ("formcollect", "收集表单", 8),
-        ("announcement", "部门公告", 8), ("poll", "投票", 9),
-        ("helpdesk", "工单", 11), ("calendar", "共享日程", 11),
-    ]
+    subsystems = OFFICE_SUBSYSTEMS
     return ok({
         "domain": "officesuite", "domain_name": "办公套件",
         "subsystems": [{"key": k, "name": n, "endpoints": c,
