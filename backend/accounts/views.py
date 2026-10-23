@@ -2,6 +2,7 @@
 import json
 
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework import status
@@ -294,27 +295,30 @@ class RegisterView(APIView):
         elif require_invite:
             return Response({"message": "本站点需要邀请码才能注册", "code": 1008}, status=status.HTTP_400_BAD_REQUEST)
 
-        ser = RegisterSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        user = ser.save()
-        # 绑定邀请码
-        if invite:
-            invite.used_by = user
-            invite.uses += 1
-            invite.save(update_fields=["used_by", "uses"])
-            # F625 邀请效果看板：记录本次注册，用于按码聚合「带来注册数」
-            try:
-                InviteUse.objects.create(invite=invite, user=user)
-            except Exception:
-                pass
-        token = RefreshToken.for_user(user)
-        # B12：与登录保持一致，写入 tv claim（认证端校验 token_version）
-        token["tv"] = user.token_version
-        OperationLog.objects.create(
-            user=user, module="accounts", action="create", target="用户注册", detail=user.username,
-            ip=get_client_ip(request),
-        )
-        record_login(request, user, True, user.username)
+        # B5：用户 + 邀请码绑定 + 邀请记录 + 操作日志 + 登录日志多表写，
+        # 任一步失败整体回滚，避免「用户建了但邀请码没用上」的中间态
+        with transaction.atomic():
+            ser = RegisterSerializer(data=request.data)
+            ser.is_valid(raise_exception=True)
+            user = ser.save()
+            # 绑定邀请码
+            if invite:
+                invite.used_by = user
+                invite.uses += 1
+                invite.save(update_fields=["used_by", "uses"])
+                # F625 邀请效果看板：记录本次注册，用于按码聚合「带来注册数」
+                try:
+                    InviteUse.objects.create(invite=invite, user=user)
+                except Exception:
+                    pass
+            token = RefreshToken.for_user(user)
+            # B12：与登录保持一致，写入 tv claim（认证端校验 token_version）
+            token["tv"] = user.token_version
+            OperationLog.objects.create(
+                user=user, module="accounts", action="create", target="用户注册", detail=user.username,
+                ip=get_client_ip(request),
+            )
+            record_login(request, user, True, user.username)
         return Response(
             {
                 "access": str(token.access_token),
@@ -650,6 +654,9 @@ class UserListView(APIView):
             qs = qs.filter(Q(is_superuser=True) | Q(roles__code="admin"))
         if role:
             qs = qs.filter(roles__code=role)
+        # B6：roles m2m（role_names/role_ids 共用）+ department/tenant FK 预取，
+        # 避免每用户 5+ 次附加查询
+        qs = qs.prefetch_related("roles").select_related("department", "tenant")
         pg = StandardPagination()
         page = pg.paginate_queryset(qs.order_by("-date_joined"), request)
         data = UserSerializer(page, many=True).data

@@ -20,6 +20,12 @@ from accounts.models import (
 User = get_user_model()
 
 
+def _has_prefetch(obj, name):
+    """B6：判断 related manager 是否已被 prefetch_related 预取"""
+    cache = getattr(obj, "_prefetched_objects_cache", None)
+    return bool(cache) and name in cache
+
+
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     """B12：登录签发时把 token_version 写进 tv claim，
     认证端（accounts.auth.TokenVersionJWTAuthentication）据此判断 token 是否已失效"""
@@ -91,9 +97,13 @@ class UserSerializer(serializers.ModelSerializer):
                         "tenant": {"required": False, "allow_null": True}}
 
     def get_role_names(self, obj):
+        if _has_prefetch(obj, "roles"):
+            return [r.name for r in obj.roles.all()]
         return list(obj.roles.values_list("name", flat=True))
 
     def get_role_ids(self, obj):
+        if _has_prefetch(obj, "roles"):
+            return [r.id for r in obj.roles.all()]
         return list(obj.roles.values_list("id", flat=True))
 
     def get_department_name(self, obj):

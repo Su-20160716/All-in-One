@@ -10,13 +10,15 @@ import re
 import time
 import zipfile
 
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Sum
 from django.http import HttpResponse
 from django.utils import timezone
 
 from devtools.common import (
     endpoint, ok, fail, p, req, req_str, opt_str, req_num, opt_num, opt_bool, req_list,
 )
+
+from core.pagination import OptionalPageNumberPagination
 
 from . import runtime as rt
 from .models import (
@@ -122,6 +124,18 @@ def workspace_list(request):
         qs = qs.filter(is_starred=True)
     if not opt_bool(request, "include_archived", False):
         qs = qs.filter(is_archived=False)
+    # B6：file_count/total_bytes 原是模型 property（每次访问 1-2 次查询），
+    # 列表 200 条就是 400+ 次；annotate 同名属性覆盖 property，整批 1 次聚合
+    qs = qs.annotate(file_count=Count("files"), total_bytes=Sum("files__size"))
+    # B11：可选分页——不带 page 时仍返回全量（上限 200），items/total 结构不变
+    pg = OptionalPageNumberPagination()
+    page = pg.paginate_queryset(qs, request)
+    if page is not None:
+        return ok({
+            "items": [ws_brief(o) for o in page],
+            "total": pg.page.paginator.count,
+            "page": pg.page.number,
+        })
     return ok({"items": [ws_brief(o) for o in qs[:200]]})
 
 

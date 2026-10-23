@@ -15,6 +15,13 @@ from projects.models import (
 )
 
 
+def _has_prefetch(obj, name):
+    """B6：判断 related manager 是否已被 prefetch_related 预取
+    （命中缓存的访问零查询，用于把逐卡 N+1 压成常量查询）"""
+    cache = getattr(obj, "_prefetched_objects_cache", None)
+    return bool(cache) and name in cache
+
+
 class BoardSerializer(serializers.ModelSerializer):
     card_count = serializers.SerializerMethodField()
 
@@ -23,6 +30,11 @@ class BoardSerializer(serializers.ModelSerializer):
         fields = ["id", "project", "name", "sort_order", "wip_limit", "created_at", "card_count"]
 
     def get_card_count(self, obj):
+        # B6：BoardListView 用 annotate(card_count_total=...) 预计算，零查询；
+        # 无 annotate 时退回原行为
+        cnt = getattr(obj, "card_count_total", None)
+        if cnt is not None:
+            return cnt
         return obj.cards.count()
 
 
@@ -108,21 +120,36 @@ class TaskCardSerializer(serializers.ModelSerializer):
         return f"C-{obj.number}" if obj.number else ""
 
     def get_is_blocked(self, obj):
+        # B6：优先用预取缓存（配合 Prefetch(select_related("blocked_by"))），
+        # 无预取时保持原有查询行为
+        if _has_prefetch(obj, "dependencies"):
+            return any(
+                d.blocked_by is not None and d.blocked_by.status in ("todo", "doing")
+                for d in obj.dependencies.all()
+            )
         return obj.dependencies.filter(blocked_by__status__in=["todo", "doing"]).exists()
 
     def get_dod_total(self, obj):
+        if _has_prefetch(obj, "acceptance_items"):
+            return len(obj.acceptance_items.all())
         return obj.acceptance_items.count()
 
     def get_dod_done(self, obj):
+        if _has_prefetch(obj, "acceptance_items"):
+            return len([a for a in obj.acceptance_items.all() if a.is_done])
         return obj.acceptance_items.filter(is_done=True).count()
 
     def get_assignee_ids(self, obj):
+        if _has_prefetch(obj, "assignees"):
+            return [u.id for u in obj.assignees.all()]
         return list(obj.assignees.values_list("id", flat=True))
 
     def get_assignee_names(self, obj):
         return [u.display_name for u in obj.assignees.all()]
 
     def get_comment_count(self, obj):
+        if _has_prefetch(obj, "comments"):
+            return len(obj.comments.all())
         return obj.comments.count()
 
     def get_is_overdue(self, obj):
@@ -130,18 +157,30 @@ class TaskCardSerializer(serializers.ModelSerializer):
         return bool(obj.due_date and obj.due_date < date.today() and obj.status != "done")
 
     def get_subtask_total(self, obj):
+        if _has_prefetch(obj, "subtasks"):
+            return len(obj.subtasks.all())
         return obj.subtasks.count()
 
     def get_subtask_done(self, obj):
+        if _has_prefetch(obj, "subtasks"):
+            return len([s for s in obj.subtasks.all() if s.is_done])
         return obj.subtasks.filter(is_done=True).count()
 
     def get_progress(self, obj):
+        if _has_prefetch(obj, "subtasks"):
+            total = len(obj.subtasks.all())
+            if not total:
+                return 100 if obj.status == "done" else 0
+            done = len([s for s in obj.subtasks.all() if s.is_done])
+            return round(done / total * 100)
         total = obj.subtasks.count()
         if not total:
             return 100 if obj.status == "done" else 0
         return round(obj.subtasks.filter(is_done=True).count() / total * 100)
 
     def get_spent_minutes(self, obj):
+        if _has_prefetch(obj, "worklogs"):
+            return sum(w.minutes or 0 for w in obj.worklogs.all())
         from django.db.models import Sum
         return obj.worklogs.aggregate(s=Sum("minutes"))["s"] or 0
 
@@ -162,18 +201,31 @@ class ProjectSerializer(serializers.ModelSerializer):
         read_only_fields = ["owner", "created_at", "updated_at"]
 
     def get_member_ids(self, obj):
+        if _has_prefetch(obj, "members"):
+            return [u.id for u in obj.members.all()]
         return list(obj.members.values_list("id", flat=True))
 
     def get_member_names(self, obj):
         return [u.display_name for u in obj.members.all()]
 
     def get_board_count(self, obj):
+        # B6：ProjectListView 用 annotate(board_count=Count(..., distinct=True)) 预计算
+        cnt = getattr(obj, "board_count", None)
+        if cnt is not None:
+            return cnt
         return obj.boards.count()
 
     def get_card_total(self, obj):
+        # B6：同上，annotate(card_total=...) 命中后零查询
+        cnt = getattr(obj, "card_total", None)
+        if cnt is not None:
+            return cnt
         return TaskCard.objects.filter(board__project=obj).count()
 
     def get_done_total(self, obj):
+        cnt = getattr(obj, "done_total", None)
+        if cnt is not None:
+            return cnt
         return TaskCard.objects.filter(board__project=obj, status="done").count()
 
 

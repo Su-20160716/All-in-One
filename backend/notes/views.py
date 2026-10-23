@@ -8,6 +8,7 @@ import re
 import zipfile
 from datetime import date, timedelta
 
+from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.http import HttpResponse
 from django.utils import timezone
@@ -16,6 +17,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.pagination import OptionalPageNumberPagination
 from core.scoping import is_visible, owner_qs, scope_queryset
 from notes import links as link_lib
 from notes.models import Note, NoteFolder, NoteLink, NoteSnippet, NoteTag, NoteVersion, WordActivity, WritingGoal
@@ -149,9 +151,17 @@ class NoteListView(APIView):
     """笔记列表：?parent= / ?tag= / ?search= / ?favorite=1 / ?trash=1 / ?all=1"""
 
     def get(self, request):
-        qs = _note_qs(request.user)
+        # B6：列表页统一预取——tags（tag_names/tag_ids 共用）、folder FK、
+        # child_count 一次聚合算出，避免每篇 4 次附加查询
+        qs = _note_qs(request.user).select_related("folder", "parent").prefetch_related("tags")
         if request.query_params.get("trash") == "1":
             qs = qs.filter(is_deleted=True).order_by("-deleted_at")
+            qs = qs.annotate(child_count=Count("children", filter=Q(children__is_deleted=False)))
+            # B11：可选分页——不带 page 时结构与原来一致
+            pg = OptionalPageNumberPagination()
+            page = pg.paginate_queryset(qs, request)
+            if page is not None:
+                return pg.get_paginated_response(NoteSerializer(page, many=True).data)
             return Response({"list": NoteSerializer(qs, many=True).data, "total": qs.count()})
         qs = qs.filter(is_deleted=False)
         archived = request.query_params.get("archived")
@@ -193,6 +203,18 @@ class NoteListView(APIView):
         if request.query_params.get("pinned") == "1":
             qs = qs.filter(is_pinned=True)
         qs = qs.distinct()
+        # B6：distinct 下 annotate 同样安全（Count 按主键聚合，不受 join 膨胀影响）
+        qs = qs.annotate(child_count=Count("children", filter=Q(children__is_deleted=False)))
+        # B11：可选分页——不带 page 时结构与原来一致
+        pg = OptionalPageNumberPagination()
+        page = pg.paginate_queryset(qs, request)
+        if page is not None:
+            resp = pg.get_paginated_response(NoteSerializer(page, many=True).data)
+            # 分页模式同样带 has_backlink，与全量分支字段保持一致
+            backlinked = link_lib.all_backlink_ids(request.user.id)
+            for item in resp.data["results"]:
+                item["has_backlink"] = item["id"] in backlinked
+            return resp
         data = NoteSerializer(qs, many=True).data
         backlinked = link_lib.all_backlink_ids(request.user.id)
         for item in data:
@@ -252,55 +274,58 @@ class NoteDetailView(APIView):
         if not note:
             return Response({"message": "笔记不存在或无权修改"}, status=404)
         changed = False
-        if "title" in request.data and request.data["title"]:
-            note.title = request.data["title"].strip()[:200]
-            changed = True
-        if "content" in request.data:
-            if request.data["content"] != note.content:
-                NoteVersion.objects.create(
-                    note=note, version=note.version, title=note.title, content=note.content, created_by=request.user
-                )
-                note.version += 1
-                old_words = note.words or count_words(note.content)
-                note.content = request.data["content"]
-                note.words = count_words(note.content)
-                # F565 记录当日写作增量（供字数目标 / 周回顾）
-                bump_words_activity(request.user, (note.words or 0) - old_words)
+        # B5：版本快照 / 笔记本体 / 字数活动 / 标签关联多表写入同一事务，
+        # 中途失败整体回滚，杜绝「版本号 +1 但内容没存上」的错位快照
+        with transaction.atomic():
+            if "title" in request.data and request.data["title"]:
+                note.title = request.data["title"].strip()[:200]
                 changed = True
-        if "parent" in request.data:
-            pid = request.data.get("parent")
-            try:
-                note.parent = Note.objects.filter(pk=int(pid), owner=request.user).first() if pid else None
-            except (TypeError, ValueError):
-                return Response({"message": "parent 必须是整数"}, status=400)
-            # 环检测：不能把笔记移动到自己的子笔记下
-            if note.parent and _would_create_cycle(note, note.parent):
-                return Response({"message": "不能移动到自身的子笔记下"}, status=400)
-            changed = True
-        # F572 六色标记
-        if "color" in request.data:
-            color = str(request.data.get("color") or "")
-            if color and color not in NOTE_COLORS:
-                return Response({"message": f"颜色只能是：{','.join(NOTE_COLORS)}"}, status=400)
-            note.color = color
-            changed = True
-        # F582 移动到分组文件夹
-        if "folder" in request.data:
-            fid = request.data.get("folder")
-            folder = _folder_of(request.user, fid)
-            if fid not in (None, "", "null", "0", 0) and folder is None:
-                return Response({"message": "文件夹不存在"}, status=400)
-            note.folder = folder
-            changed = True
-        for flag in ("is_pinned", "is_favorite", "is_public"):
-            if flag in request.data:
-                setattr(note, flag, bool(request.data[flag]))
+            if "content" in request.data:
+                if request.data["content"] != note.content:
+                    NoteVersion.objects.create(
+                        note=note, version=note.version, title=note.title, content=note.content, created_by=request.user
+                    )
+                    note.version += 1
+                    old_words = note.words or count_words(note.content)
+                    note.content = request.data["content"]
+                    note.words = count_words(note.content)
+                    # F565 记录当日写作增量（供字数目标 / 周回顾）
+                    bump_words_activity(request.user, (note.words or 0) - old_words)
+                    changed = True
+            if "parent" in request.data:
+                pid = request.data.get("parent")
+                try:
+                    note.parent = Note.objects.filter(pk=int(pid), owner=request.user).first() if pid else None
+                except (TypeError, ValueError):
+                    return Response({"message": "parent 必须是整数"}, status=400)
+                # 环检测：不能把笔记移动到自己的子笔记下
+                if note.parent and _would_create_cycle(note, note.parent):
+                    return Response({"message": "不能移动到自身的子笔记下"}, status=400)
                 changed = True
-        if "tags" in request.data and isinstance(request.data["tags"], list):
-            _apply_tags(request.user, note, request.data["tags"])
-            changed = True
-        if changed:
-            note.save()
+            # F572 六色标记
+            if "color" in request.data:
+                color = str(request.data.get("color") or "")
+                if color and color not in NOTE_COLORS:
+                    return Response({"message": f"颜色只能是：{','.join(NOTE_COLORS)}"}, status=400)
+                note.color = color
+                changed = True
+            # F582 移动到分组文件夹
+            if "folder" in request.data:
+                fid = request.data.get("folder")
+                folder = _folder_of(request.user, fid)
+                if fid not in (None, "", "null", "0", 0) and folder is None:
+                    return Response({"message": "文件夹不存在"}, status=400)
+                note.folder = folder
+                changed = True
+            for flag in ("is_pinned", "is_favorite", "is_public"):
+                if flag in request.data:
+                    setattr(note, flag, bool(request.data[flag]))
+                    changed = True
+            if "tags" in request.data and isinstance(request.data["tags"], list):
+                _apply_tags(request.user, note, request.data["tags"])
+                changed = True
+            if changed:
+                note.save()
         return Response(NoteSerializer(note).data)
 
     def delete(self, request, pk):

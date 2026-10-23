@@ -13,6 +13,7 @@ import zipfile
 from datetime import timedelta
 
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.http import FileResponse, HttpResponse, StreamingHttpResponse
 from django.utils import timezone
@@ -24,6 +25,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.models import Notification, notify
+from core.pagination import OptionalPageNumberPagination
+from core.quota import check_quota
 from core.scoping import is_visible, scope_queryset
 from core.utils import file_kind, format_size, sha1_file
 from core.validators import as_int, parse_bool
@@ -306,9 +309,8 @@ class FolderDetailView(APIView):
         folder = self.get_object(request, pk)
         if not folder:
             return Response({"message": "文件夹不存在"}, status=status.HTTP_404_NOT_FOUND)
-        # 物理删除文件与目录
-        for f in folder.files.all():
-            f.delete()
+        # B6：批量删除（一条 DELETE + 级联），替代每文件一次 delete 循环
+        folder.files.all().delete()
         folder.delete()
         return Response({"message": "文件夹已删除"})
 
@@ -351,6 +353,14 @@ class FileListView(APIView):
             "updated_at", "-updated_at", "kind", "-kind",
         }
         qs = qs.order_by("-is_star", sort if sort in allowed else "-created_at")
+        # B6：folder_name 走 folder FK、tag_names/tag_ids 走 m2m，
+        # 预取后每文件 0 次附加查询（原来 3 次/文件）
+        qs = qs.select_related("folder", "owner").prefetch_related("tags")
+        # B11：可选分页——不带 page 参数时响应结构与原来完全一致
+        pg = OptionalPageNumberPagination()
+        page = pg.paginate_queryset(qs, request)
+        if page is not None:
+            return pg.get_paginated_response(FileMetaSerializer(page, many=True).data)
         return Response({"list": FileMetaSerializer(qs, many=True).data, "total": qs.count()})
 
 
@@ -368,6 +378,8 @@ class FileSearchView(APIView):
         if kind:
             qs = qs.filter(kind=kind)
         qs = qs[:100]
+        # B6：同 FileListView，预取 folder/tags
+        qs = qs.select_related("folder", "owner").prefetch_related("tags")
         return Response({"list": FileMetaSerializer(qs, many=True).data, "total": qs.count()})
 
 
@@ -409,6 +421,11 @@ class UploadInitView(APIView):
 
         if data["file_size"] > settings.FILE_MAX_SIZE_MB * 1024 * 1024:
             return Response({"message": f"文件超过大小限制 {settings.FILE_MAX_SIZE_MB}MB"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # B8：配额校验（初始化）——秒传不新增容量故不拦；超限直接拒，避免无效流量
+        blocked = check_quota(request.user, data["file_size"])
+        if blocked:
+            return Response({"code": blocked[0], "message": blocked[1]}, status=status.HTTP_400_BAD_REQUEST)
 
         chunk = ChunkUpload.objects.create(
             user=request.user,
@@ -503,6 +520,12 @@ class UploadCompleteView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # B8：配额双校验（完成）——挡住绕过初始化直接调 complete 的路径；
+        # 秒传命中（exist）不会新增容量，此处只需按本任务大小兜底
+        blocked = check_quota(request.user, chunk.file_size)
+        if blocked:
+            return Response({"code": blocked[0], "message": blocked[1]}, status=status.HTTP_400_BAD_REQUEST)
+
         year_month = timezone.now().strftime("%Y%m")
         rel_dir = os.path.join("files", str(chunk.user_id), year_month)
         abs_dir = _safe_join(MEDIA, rel_dir)
@@ -547,22 +570,28 @@ class UploadCompleteView(APIView):
         if file_kind(chunk.filename) == "image":
             thumb_rel = _make_thumbnail(_safe_join(MEDIA, storage_rel), ext)
 
-        fm = FileMeta.objects.create(
-            name=os.path.basename(storage_rel),
-            folder=folder,
-            owner=request.user,
-            storage_path=storage_rel,
-            size=chunk.file_size,
-            sha1=sha1,
-            kind=file_kind(chunk.filename),
-            ext=ext,
-            thumbnail_path=thumb_rel,
+        # B5：FileMeta 建档 + 任务状态置完成 + 操作流水入同一事务；
+        # 临时分片目录的物理清理放 on_commit，提交后才删，避免「库回滚了、
+        # 临时文件没了」导致分片无法重传
+        with transaction.atomic():
+            fm = FileMeta.objects.create(
+                name=os.path.basename(storage_rel),
+                folder=folder,
+                owner=request.user,
+                storage_path=storage_rel,
+                size=chunk.file_size,
+                sha1=sha1,
+                kind=file_kind(chunk.filename),
+                ext=ext,
+                thumbnail_path=thumb_rel,
+            )
+            chunk.status = "completed"
+            chunk.save(update_fields=["status", "updated_at"])
+            _log_op(request.user, fm, "upload", detail="分片上传完成",
+                    to_folder=_folder_label(folder))
+        transaction.on_commit(
+            lambda: shutil.rmtree(_safe_join(MEDIA, chunk.temp_dir), ignore_errors=True)
         )
-        chunk.status = "completed"
-        chunk.save(update_fields=["status", "updated_at"])
-        shutil.rmtree(_safe_join(MEDIA, chunk.temp_dir), ignore_errors=True)
-        _log_op(request.user, fm, "upload", detail="分片上传完成",
-                to_folder=_folder_label(folder))
         payload = {"message": "上传完成", "file": FileMetaSerializer(fm).data}
         # F557 重名自动改名：把最终名称回传给前端提示
         if fm.name != chunk.filename:

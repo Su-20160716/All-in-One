@@ -4,6 +4,12 @@ from rest_framework import serializers
 from notes.models import Note, NoteLink, NoteTag, NoteVersion
 
 
+def _has_prefetch(obj, name):
+    """B6：判断 related manager 是否已被 prefetch_related 预取"""
+    cache = getattr(obj, "_prefetched_objects_cache", None)
+    return bool(cache) and name in cache
+
+
 class NoteTagSerializer(serializers.ModelSerializer):
     use_count = serializers.SerializerMethodField()
 
@@ -34,12 +40,20 @@ class NoteSerializer(serializers.ModelSerializer):
         read_only_fields = ["share_token", "version", "words", "ai_summary", "ai_summary_at"]
 
     def get_tag_names(self, obj):
+        if _has_prefetch(obj, "tags"):
+            return [t.name for t in obj.tags.all()]
         return list(obj.tags.values_list("name", flat=True))
 
     def get_tag_ids(self, obj):
+        if _has_prefetch(obj, "tags"):
+            return [t.id for t in obj.tags.all()]
         return list(obj.tags.values_list("id", flat=True))
 
     def get_child_count(self, obj):
+        # B6：列表页用 annotate(child_count=...) 预计算；无 annotate 保持原行为
+        cnt = getattr(obj, "child_count", None)
+        if cnt is not None:
+            return cnt
         return obj.children.filter(is_deleted=False).count()
 
     def get_folder_name(self, obj):

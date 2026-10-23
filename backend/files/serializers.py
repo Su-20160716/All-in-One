@@ -5,6 +5,12 @@ from rest_framework import serializers
 from files.models import FileMeta, FileTag, Folder, ShareLink
 
 
+def _has_prefetch(obj, name):
+    """B6：判断 related manager 是否已被 prefetch_related 预取"""
+    cache = getattr(obj, "_prefetched_objects_cache", None)
+    return bool(cache) and name in cache
+
+
 class FolderSerializer(serializers.ModelSerializer):
     file_count = serializers.SerializerMethodField()
     folder_count = serializers.SerializerMethodField()
@@ -75,9 +81,13 @@ class FileMetaSerializer(serializers.ModelSerializer):
         return obj.pdf_url
 
     def get_tag_names(self, obj):
+        if _has_prefetch(obj, "tags"):
+            return [t.name for t in obj.tags.all()]
         return list(obj.tags.values_list("name", flat=True))
 
     def get_tag_ids(self, obj):
+        if _has_prefetch(obj, "tags"):
+            return [t.id for t in obj.tags.all()]
         return list(obj.tags.values_list("id", flat=True))
 
 

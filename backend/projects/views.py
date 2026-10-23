@@ -1,7 +1,8 @@
 """看板视图：项目、看板列、卡片拖拽、子任务、工时、评论、成员、活动、统计、我的任务"""
 from datetime import timedelta
 
-from django.db.models import Count as ModelsCount, Max as ModelsMax, Sum as ModelsSum, Q
+from django.db import transaction
+from django.db.models import Count as ModelsCount, Max as ModelsMax, Prefetch, Sum as ModelsSum, Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -10,6 +11,7 @@ from rest_framework.views import APIView
 
 from accounts.models import User
 from core.models import notify
+from core.pagination import OptionalPageNumberPagination
 from core.validators import as_int
 from projects.models import (
     AcceptanceItem,
@@ -73,22 +75,38 @@ class ProjectListView(APIView):
         keyword = request.query_params.get("search")
         if keyword:
             qs = qs.filter(name__icontains=keyword)
+        # B6：列表页原来每项目 5 次 count（board/card/done + members×2），
+        # 改为一次 annotate 聚合 + prefetch members；
+        # 外层 distinct() 下的 m2m join 用 distinct=True 计数，数值不受成员数膨胀影响
+        qs = qs.annotate(
+            board_count=ModelsCount("boards", distinct=True),
+            card_total=ModelsCount("boards__cards", distinct=True),
+            done_total=ModelsCount("boards__cards", filter=Q(boards__cards__status="done"), distinct=True),
+        ).prefetch_related("members")
+        # B11：可选分页——不带 page 时结构与原来一致
+        pg = OptionalPageNumberPagination()
+        page = pg.paginate_queryset(qs, request)
+        if page is not None:
+            return pg.get_paginated_response(ProjectSerializer(page, many=True).data)
         return Response({"list": ProjectSerializer(qs, many=True).data, "total": qs.count()})
 
     def post(self, request):
         name = (request.data.get("name") or "").strip()
         if not name:
             return Response({"message": "项目名不能为空"}, status=400)
-        project = Project.objects.create(
-            name=name,
-            description=request.data.get("description", ""),
-            color=request.data.get("color", "#0ea5e9"),
-            owner=request.user,
-        )
-        for i, col in enumerate(["待办", "进行中", "已完成"]):
-            Board.objects.create(project=project, name=col, sort_order=i)
-        project.members.add(request.user)
-        _log_activity(project, request.user, "创建了项目", project.name)
+        # B5：项目 + 三个默认看板列 + 成员关联 + 活动流水多表写，整事务提交，
+        # 避免「项目建了但看板列没建」的半成品项目
+        with transaction.atomic():
+            project = Project.objects.create(
+                name=name,
+                description=request.data.get("description", ""),
+                color=request.data.get("color", "#0ea5e9"),
+                owner=request.user,
+            )
+            for i, col in enumerate(["待办", "进行中", "已完成"]):
+                Board.objects.create(project=project, name=col, sort_order=i)
+            project.members.add(request.user)
+            _log_activity(project, request.user, "创建了项目", project.name)
         return Response(ProjectSerializer(project).data, status=201)
 
 
@@ -212,11 +230,31 @@ class BoardListView(APIView):
         project = Project.objects.filter(pk=project_id).first()
         if not project or not _can_access(request.user, project):
             return Response({"message": "项目不存在或无权访问"}, status=404)
-        boards = Board.objects.filter(project=project)
-        result = []
-        for b in boards:
-            cards = TaskCard.objects.filter(board=b)
-            result.append({**BoardSerializer(b).data, "cards": TaskCardSerializer(cards, many=True).data})
+        # B6：原来每列一次 TaskCard 查询、每卡序列化再 10+ 次（assignees/comments/
+        # subtasks/dependencies/acceptance_items/worklogs…）。改为：
+        # 列一次查询 + 卡片一次查询 + 6 个 prefetch，总量与卡片数无关
+        boards = Board.objects.filter(project=project).annotate(
+            card_count_total=ModelsCount("cards")
+        )
+        cards = (
+            TaskCard.objects.filter(board__project=project)
+            .select_related("board")
+            .prefetch_related(
+                Prefetch("dependencies", queryset=CardDependency.objects.select_related("blocked_by")),
+                "acceptance_items",
+                "assignees",
+                "comments",
+                "subtasks",
+                "worklogs",
+            )
+        )
+        by_board = {}
+        for c in cards:
+            by_board.setdefault(c.board_id, []).append(c)
+        result = [
+            {**BoardSerializer(b).data, "cards": TaskCardSerializer(by_board.get(b.id, []), many=True).data}
+            for b in boards
+        ]
         return Response({"project": ProjectSerializer(project).data, "boards": result})
 
     def post(self, request, project_id):

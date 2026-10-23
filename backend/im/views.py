@@ -1,6 +1,6 @@
 """IM 视图：会话管理、成员、成员设置、消息收发、撤回、删除、转发、搜索、未读汇总"""
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
@@ -34,7 +34,18 @@ class SessionListView(APIView):
 
     def get(self, request):
         archived = request.query_params.get("archived")
-        sessions = list(_member_sessions(request.user))
+        # B6：prefetch members（members_info/member_count 共用）+ 最后一条消息
+        # （to_attr 预取，避免每会话一次 order by 查询）
+        sessions = list(
+            _member_sessions(request.user).prefetch_related(
+                "members",
+                Prefetch(
+                    "messages",
+                    queryset=ChatMessage.objects.exclude(is_recalled=True).select_related("sender").order_by("-created_at"),
+                    to_attr="_last_messages",
+                ),
+            )
+        )
         data = SessionSerializer(sessions, many=True, context={"request": request}).data
         # 归档过滤：archived=1 仅归档；默认仅未归档
         if archived == "1":
@@ -230,7 +241,11 @@ class MessageListView(APIView):
         if not s:
             return Response({"message": "会话不存在"}, status=404)
         # 置顶消息区（与历史分开返回）
-        pinned = list(s.messages.filter(is_pinned=True).exclude(deleted_for=request.user).exclude(is_recalled=True).exclude(is_deleted=True).order_by("-created_at"))
+        pinned = list(
+            s.messages.filter(is_pinned=True).exclude(deleted_for=request.user)
+            .exclude(is_recalled=True).exclude(is_deleted=True).order_by("-created_at")
+            .select_related("sender", "reply_to", "reply_to__sender")
+        )
         qs = s.messages.exclude(deleted_for=request.user).exclude(is_deleted=True)
         kw = request.query_params.get("q")
         if kw:
@@ -250,7 +265,9 @@ class MessageListView(APIView):
         before = request.query_params.get("before")
         if before:
             qs = qs.filter(id__lt=as_int(before, field="before"))
-        qs = qs.order_by("-id")[:50]
+        # B6：sender / reply_to / reply_to.sender 全部 select_related，
+        # 避免每条消息 2-3 次 sender 查询
+        qs = qs.select_related("sender", "reply_to", "reply_to__sender").order_by("-id")[:50]
         data = ChatMessageSerializer(list(qs)[::-1], many=True, context={"request": request}).data
         pinned_data = ChatMessageSerializer(pinned, many=True, context={"request": request}).data
         return Response({"list": data, "total": len(data), "pinned": pinned_data})
