@@ -34,6 +34,20 @@ export function withBackendBase(path) {
   return path
 }
 
+/**
+ * D1：API 地址统一收口。
+ *
+ * 生产部署（前端 CF Pages + 后端独立域名）时，`window.open` / `<a :href>` /
+ * 新标签打开这类**不走 axios** 的地址如果是裸 `/api/...` 相对路径，会打到
+ * 前端站点自身然后 404。所有导出生成的 URL 统一走这里补全后端基地址；
+ * 开发环境（API_BASE 为空）原样返回相对路径，Vite 代理行为不变。
+ */
+export function apiUrl(path) {
+  if (!path) return path
+  if (/^(https?:|wss?:|blob:|data:)/.test(path)) return path
+  return API_BASE ? `${API_BASE}${path}` : path
+}
+
 /** 递归遍历接口响应，把以 /media/ /share/ 开头的字符串补全为后端绝对地址 */
 export function rewriteBackendUrls(data, depth = 0) {
   if (depth > 6 || data == null) return data

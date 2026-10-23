@@ -113,8 +113,8 @@ MIDDLEWARE = [
     "core.middleware.OperationLogMiddleware",
 ]
 
-# 生产部署（Render 等）：启用 WhiteNoise 托管静态文件（admin / DRF 页面），
-# 并信任反向代理传来的 HTTPS 头。本地 DEBUG=1 不受影响。
+# 生产部署（ClawCloud Run / CF Pages 等）：启用 WhiteNoise 托管静态文件
+# （admin / DRF 页面），并信任反向代理传来的 HTTPS 头。本地 DEBUG=1 不受影响。
 if not DEBUG:
     MIDDLEWARE.insert(2, "whitenoise.middleware.WhiteNoiseMiddleware")
     STORAGES = {
@@ -219,11 +219,14 @@ MEDIA_ROOT = BASE_DIR / "media"
 
 # 容器部署数据目录（ClawCloud Run 等平台挂载持久卷用）：
 # 设置 DATA_DIR 后，SQLite 数据库与上传的 media 都落在持久卷里，容器重启/重部署不丢。
+# D4：数据库文件只在**当前引擎是 sqlite** 时改 NAME——同时配了 DATABASE_URL
+# （Postgres）时只挪 MEDIA_ROOT，绝不能把 PG 的 NAME 覆盖成 sqlite 路径。
 _DATA_DIR = os.environ.get("DATA_DIR", "").strip()
 if _DATA_DIR:
     _dp = Path(_DATA_DIR)
     _dp.mkdir(parents=True, exist_ok=True)
-    DATABASES["default"]["NAME"] = _dp / "db.sqlite3"
+    if DATABASES["default"]["ENGINE"] == "django.db.backends.sqlite3":
+        DATABASES["default"]["NAME"] = _dp / "db.sqlite3"
     MEDIA_ROOT = _dp / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

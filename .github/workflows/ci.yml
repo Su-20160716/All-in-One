@@ -1,0 +1,62 @@
+# CI：后端静态检查 + 串行冒烟 + 前端构建
+# 触发：push/PR 到 main/master。
+# 设计要点：
+# - 冒烟**串行**执行（同一 job 内顺序跑）——并行会撞 SQLite database is locked
+# - 不跑 manage.py test（Django TestCase 与冒烟脚本双轨制，冒烟是主力）
+# - 前端只 build 验证（不部署）
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  backend:
+    name: 后端 check + 冒烟
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: Django system check
+        run: python manage.py check
+
+      - name: 冒烟（串行——并行会撞 SQLite 锁）
+        run: |
+          python smoke_test.py
+          python extensions_smoke_test.py
+          python learning_smoke_test.py
+          python suite_smoke_test.py
+          python minitools_smoke.py
+
+  frontend:
+    name: 前端构建
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: 安装依赖（npm ci 锁版本）
+        run: npm ci
+
+      - name: 构建
+        run: npm run build

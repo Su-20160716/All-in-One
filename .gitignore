@@ -41,3 +41,8 @@ _archive_temp_*/
 # ---- 工作区私有数据（AI 助手记忆，不上云）----
 .workbuddy/
 .workbuddy-ai/
+
+# ---- IDE 本地配置（不入库）----
+.idea/
+frontend/.idea/
+*.iml

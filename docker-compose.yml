@@ -1,5 +1,11 @@
 # 全能协作平台 —— 一键容器编排
-# 用法：docker compose up -d --build  然后打开 http://localhost
+#
+# 本地开发：docker compose up -d --build  然后打开 http://localhost
+# 生产部署（ClawCloud Run）：平台按环境变量注入配置，DATA_DIR 挂持久卷；
+#   必填 DJANGO_DEBUG=0；可选 DATABASE_URL（不填用 SQLite，放 DATA_DIR）；
+#   变量清单见 .env.example（S3-B1/D5）。
+#
+# 所有环境变量走 ${VAR:-默认值} 形式：本地零配置起，生产按需覆盖。
 services:
   backend:
     build: ./backend
@@ -8,12 +14,23 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # 持久化数据库与上传文件（容器重建不丢失）
-      - ./backend/db.sqlite3:/app/db.sqlite3
-      - ./backend/media:/app/media
+      # 持久化数据库与上传文件（容器重建不丢失）。
+      # 生产：DATA_DIR 指向平台持久卷挂载点（ClawCloud Run 卷）；
+      # 本地：默认落到 ./backend 目录，与既有的 dev 库/媒体共存。
+      - ${DATA_DIR:-./backend}:/data
     environment:
-      DJANGO_DEBUG: "1"
-      DJANGO_ALLOWED_HOSTS: "*"
+      DJANGO_DEBUG: "${DJANGO_DEBUG:-1}"
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:-*}"
+      DJANGO_DATA_DIR: /data
+      # 生产连 Postgres 时注入（不填则 SQLite，库文件落在 /data/db.sqlite3）
+      DATABASE_URL: "${DATABASE_URL:-}"
+      # LLM（不配则全部 AI 能力本地降级，见 core/adapters.py 探测）
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+      LLM_BASE_URL: "${LLM_BASE_URL:-}"
+      LLM_MODEL: "${LLM_MODEL:-}"
+      # 跨域信任（生产填前端域名，多个用逗号分隔）
+      CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:-}"
+      SECRET_KEY: "${SECRET_KEY:-}"
 
   frontend:
     build: ./frontend
@@ -23,3 +40,7 @@ services:
       - "80:80"
     depends_on:
       - backend
+    # 前端构建期变量：指向后端地址（同域部署时留空走 nginx 代理的相对路径）
+    build:
+      args:
+        VITE_API_BASE: "${VITE_API_BASE:-}"

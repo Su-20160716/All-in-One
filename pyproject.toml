@@ -1,0 +1,35 @@
+# =====================================================================
+# 后端工程化配置（S3-B1/D8）
+# ruff 替代 flake8/isort/black 三件套；pytest 作为冒烟之外的补充。
+# 用法见仓库根 Makefile：make lint / make test
+# =====================================================================
+
+[tool.ruff]
+# 与 Django 项目结构对齐：backend/ 下所有 app
+src = ["backend"]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+# E/W：pycodestyle  F：pyflakes  I：isort  B：bugbear（真 bug 风险）
+# UP：pyupgrade    SIM：simplify    C4：comprehensions
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "C4"]
+ignore = [
+    # 项目既有风格：__init__.py 的 re-export 会被判未使用
+    "F401",
+    # E501 由 line-length=120 统一管，长字符串/中文注释不额外炸
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 迁移文件：Django 生成物，风格不管
+"*/migrations/*.py" = ["E", "W", "I"]
+# 冒烟脚本：assert 是测试语义，B011 不管
+"*_smoke*.py" = ["B011", "E402"]
+
+[tool.pytest.ini_options]
+# 冒烟脚本是主力（见 Makefile）；pytest 用于未来的单元测试
+testpaths = ["backend"]
+python_files = ["test_*.py", "*_test.py"]
+# 冒烟脚本不是 pytest 风格（无 test_ 函数），不收集
+norecursedirs = ["venv", "node_modules", "*/migrations/*"]

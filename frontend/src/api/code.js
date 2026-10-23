@@ -6,7 +6,7 @@
  */
 import axios from 'axios'
 import request from './request'
-import { API_URL } from './base'
+import { API_URL, apiUrl } from './base'
 
 // 运行类接口放宽到 60s（后端单次执行上限 30s + 编译时间）
 const RUN_TIMEOUT = 60000
@@ -126,8 +126,8 @@ export const codeApi = {
   },
 
   // ===== 导出 =====
-  exportZipUrl: () => '/api/code/export/zip/',
-  exportFileUrl: (id) => `/api/code/export/file/${id}/`,
+  exportZipUrl: () => apiUrl('/api/code/export/zip/'),
+  exportFileUrl: (id) => apiUrl(`/api/code/export/file/${id}/`),
   exportZip: (data) => request.post('/code/export/zip/', data, { responseType: 'blob' }),
 
   // ===== 每日一题（L5）=====

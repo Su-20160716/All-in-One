@@ -5,12 +5,13 @@
  * 另含两个“前端上报”助手：接口耗时采样上报、运行时异常上报。
  */
 import request from './request'
+import { apiUrl } from './base'
 
 export const corexApi = {
   // F627 后端健康卡
   healthCard: () => request.get('/core/admin/health-card/'),
   // F628 日志导出 CSV（operation / login / exception）
-  logExportUrl: (kind = 'operation') => `/api/core/admin/logs/export/?kind=${kind}`,
+  logExportUrl: (kind = 'operation') => apiUrl(`/api/core/admin/logs/export/?kind=${kind}`),
   // F629 管理命令面板（白名单）
   commands: () => request.get('/core/admin/commands/'),
   runCommand: (name) => request.post('/core/admin/commands/run/', { name }),

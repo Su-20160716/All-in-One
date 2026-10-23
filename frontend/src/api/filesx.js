@@ -3,6 +3,7 @@
  * 只封装新增能力，不改动 src/api/index.js 既有契约。
  */
 import request from './request'
+import { apiUrl } from './base'
 
 export const filesx = {
   // F547 重复文件检测（hash 分组）
@@ -40,7 +41,7 @@ export const filesx = {
   // F563 标签统计与点击过滤
   tagsStats: () => request.get('/files/tags/stats/'),
   // F564 收藏/标签 JSON 导出导入
-  favoritesExportUrl: '/files/favorites/export/',
+  favoritesExportUrl: apiUrl('/files/favorites/export/'),
   favoritesExport: () => request.get('/files/favorites/export/', { responseType: 'blob' }),
   favoritesImport: (payload) => request.post('/files/favorites/import/', { payload }),
 }

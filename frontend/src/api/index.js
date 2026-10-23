@@ -1,4 +1,5 @@
 import request from './request'
+import { apiUrl } from './base'
 
 // ===== 认证 / 用户 =====
 export const authApi = {
@@ -59,7 +60,7 @@ export const fileApi = {
   createText: (data) => request.post('/files/create-text/', data),
   saveText: (id, content) => request.post(`/files/${id}/save-text/`, { content }),
   remove: (id) => request.delete(`/files/${id}/`),
-  downloadUrl: (id) => `/api/files/${id}/download/`,
+  downloadUrl: (id) => apiUrl(`/api/files/${id}/download/`),
   preview: (id) => request.get(`/files/${id}/preview/`),
   batch: (data) => request.post('/files/batch/', data),
   batchDownload: (file_ids) =>
@@ -74,8 +75,8 @@ export const fileApi = {
   starred: () => request.get('/files/starred/'),
   analysis: () => request.get('/files/analysis/'),
   // 多类型在线预览 + Range 流式 + Office 转 PDF
-  rawUrl: (id) => `/api/files/${id}/raw/`,
-  pdfUrl: (id) => `/api/files/${id}/pdf/`,
+  rawUrl: (id) => apiUrl(`/api/files/${id}/raw/`),
+  pdfUrl: (id) => apiUrl(`/api/files/${id}/pdf/`),
   toPdf: (id, force = false) => request.post(`/files/${id}/to-pdf/`, { force }),
   officeCapability: () => request.get('/files/office-capability/'),
   fileTags: () => request.get('/files/tags/'),
@@ -121,8 +122,8 @@ export const noteApi = {
   versionDiff: (id, from, to) =>
     request.get(`/notes/${id}/versions/diff/`, { params: { from, to } }),
   rollback: (id, version) => request.post(`/notes/${id}/rollback/${version}/`, {}),
-  exportUrl: (id) => `/api/notes/${id}/export/`,
-  exportAllUrl: () => '/api/notes/export-all/',
+  exportUrl: (id) => apiUrl(`/api/notes/${id}/export/`),
+  exportAllUrl: () => apiUrl('/api/notes/export-all/'),
   // [[双链]]
   backlinks: (id) => request.get(`/notes/${id}/backlinks/`),
   linkGraph: (limit = 300) => request.get('/notes/graph/', { params: { limit } }),
@@ -236,13 +237,13 @@ export const coreApi = {
   createAnnouncement: (data) => request.post('/core/admin/announcements/', data),
   updateAnnouncement: (id, data) => request.patch(`/core/admin/announcements/${id}/`, data),
   deleteAnnouncement: (id) => request.delete(`/core/admin/announcements/${id}/`),
-  announcementReadersExportUrl: (id) => `/api/core/admin/announcements/${id}/readers/export/`,
+  announcementReadersExportUrl: (id) => apiUrl(`/api/core/admin/announcements/${id}/readers/export/`),
   storageTopUsers: () => request.get('/core/admin/storage/top-users/'),
   backup: () => request.post('/core/admin/backup/', {}),
   logs: (params) => request.get('/core/logs/', { params }),
   myLogs: (params) => request.get('/core/my-logs/', { params }),
   logStats: () => request.get('/core/logs/stats/'),
-  logExportUrl: () => '/api/core/logs/export/',
+  logExportUrl: () => apiUrl('/api/core/logs/export/'),
   search: (q) => request.get('/core/search/', { params: { q } }),
   health: () => request.get('/core/health/'),
   publicSettings: () => request.get('/core/settings/public/'),
@@ -443,7 +444,7 @@ export const searchApi = {
   history: () => request.get('/core/search/history/'),
   clearHistory: () => request.delete('/core/search/history/'),
   hot: () => request.get('/core/search/hot/'),
-  exportUrl: (q) => `/api/core/search/export/?q=${encodeURIComponent(q)}`,
+  exportUrl: (q) => apiUrl(`/api/core/search/export/?q=${encodeURIComponent(q)}`),
 }
 
 // ===== 组织架构 / 数据范围 / 多租户 =====
