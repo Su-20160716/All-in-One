@@ -69,6 +69,12 @@ urlpatterns = [
 
 # 公开共享路径挂在 /share/ 下
 share_urlpatterns = [
+    # 旧路由保留（向后兼容，已发布的外链继续有效）
     path("share/<str:token>/", views.ShareAccessView.as_view(), name="share-access"),
     path("share/<str:token>/download/<int:pk>/", views.ShareDownloadView.as_view(), name="share-download"),
+    # F3：/api/share/* 别名。前端分享页是 history 路由 /share/:token，
+    # 与旧根级 /share/ 混在一起会导致「打开分享链接看到的是 JSON 而不是页面」，
+    # 故 API 统一挪到 /api/share/ 前缀，根级路由仅作兼容保留
+    path("api/share/<str:token>/", views.ShareAccessView.as_view(), name="share-access-api"),
+    path("api/share/<str:token>/download/<int:pk>/", views.ShareDownloadView.as_view(), name="share-download-api"),
 ]

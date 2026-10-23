@@ -245,6 +245,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { projectApi, authApi } from '../../api'
+import { shareUrl as buildShareUrl } from '../../api/base'
 import { useAppStore } from '../../stores/app'
 import { formatTime } from '../../utils/format'
 import Modal from '../../components/Modal.vue'
@@ -488,7 +489,8 @@ async function loadShare() {
 async function genShare() {
   const r = await projectApi.createShare(projectId)
   shareToken.value = r.token
-  shareUrl.value = (location.origin) + r.url
+  // F4：对外链接走 base.js shareUrl()，部署时给出正确的前端站点地址
+  shareUrl.value = buildShareUrl(r.token)
   app.toastMsg('已生成分享链接', 'success')
 }
 function copyShare() { navigator.clipboard?.writeText(shareUrl.value); app.toastMsg('已复制', 'success') }

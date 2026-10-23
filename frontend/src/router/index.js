@@ -17,6 +17,14 @@ const routes = [
     component: () => import('../views/projects/SharedBoard.vue'),
     meta: { public: true, title: '只读看板' },
   },
+  // F3：文件共享落地页（免登录，独立布局）。与 /share/code|board 子路径
+  // 并存不冲突（router 静态段优先）；API 走 /api/share/<token>/。
+  {
+    path: '/share/:token',
+    name: 'file-share',
+    component: () => import('../views/files/SharedFile.vue'),
+    meta: { public: true, title: '共享文件' },
+  },
   {
     path: '/',
     component: () => import('../AppShell.vue'),

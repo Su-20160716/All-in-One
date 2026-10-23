@@ -13,11 +13,24 @@ export const API_URL = `${API_BASE}/api`
 // 媒体文件前缀（后端返回的 /media/... 相对路径需要拼上后端域名）
 export const MEDIA_BASE = API_BASE
 
+// 对外分享链接的前缀（指向前端站点，不是后端 API）。
+// 部署时设置 VITE_PUBLIC_BASE=https://xxx.pages.dev；开发环境取当前 origin。
+export const PUBLIC_BASE =
+  import.meta.env.VITE_PUBLIC_BASE ||
+  (typeof location !== 'undefined' && location.origin ? location.origin : '')
+
+/** 生成对外分享链接（前端 history 路由 /share/:token） */
+export function shareUrl(token) {
+  return `${PUBLIC_BASE}/share/${token}`
+}
+
 /** 给相对路径补全后端基地址；已是绝对地址则原样返回 */
 export function withBackendBase(path) {
   if (!path) return path
   if (/^(https?:|wss?:|data:|blob:)/.test(path)) return path
-  if (path.startsWith('/media/') || path.startsWith('/share/')) return `${API_BASE}${path}`
+  // F4：/share/ 不再补全——那是前端路由，补成后端域名会把页面请求打成 JSON。
+  // 后端 share API 已挪到 /api/share/*，不会与这里混淆。
+  if (path.startsWith('/media/')) return `${API_BASE}${path}`
   return path
 }
 

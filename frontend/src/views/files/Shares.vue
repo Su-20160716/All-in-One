@@ -77,6 +77,7 @@
 import { onMounted, ref } from 'vue'
 import { fileApi } from '../../api'
 import { filesx } from '../../api/filesx'
+import { shareUrl as buildShareUrl } from '../../api/base'
 import { formatTime } from '../../utils/format'
 import { useAppStore } from '../../stores/app'
 import Modal from '../../components/Modal.vue'
@@ -102,8 +103,10 @@ async function loadExpiring() {
     expiring.value = r.list || []
   } catch (e) { expiring.value = [] }
 }
+// F4：复制走 base.js shareUrl()（VITE_PUBLIC_BASE 优先），本地 origin 仅兜底
 function copyUrl(url) {
-  navigator.clipboard?.writeText(`${location.origin}${url}`)
+  const token = String(url || '').replace(/^\/share\//, '').replace(/\/+$/, '')
+  navigator.clipboard?.writeText(token ? buildShareUrl(token) : `${location.origin}${url}`)
   app.toastMsg('链接已复制', 'success')
 }
 function copy(s) { copyUrl(s.url) }

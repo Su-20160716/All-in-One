@@ -64,4 +64,7 @@ urlpatterns = [
 # 公开只读看板分享（免登录），挂在 /share/board/<token>/
 board_share_urlpatterns = [
     path("share/board/<str:token>/", extra_views.BoardSharePublicView.as_view(), name="board-share-public"),
+    # F3：/api/share/board/* 别名——前端不再代理 /share（那是 history 路由），
+    # 公开 API 统一挪到 /api 前缀下；旧根级路由保留兼容已发布外链
+    path("api/share/board/<str:token>/", extra_views.BoardSharePublicView.as_view(), name="board-share-public-api"),
 ]

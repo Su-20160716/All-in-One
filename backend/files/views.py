@@ -1415,7 +1415,7 @@ class ShareAccessView(APIView):
         if link.file:
             fm = link.file
             info = {
-                "type": "file", "name": fm.name, "size": fm.size, "kind": fm.kind,
+                "type": "file", "id": fm.id, "name": fm.name, "size": fm.size, "kind": fm.kind,
                 "permission": link.permission, "can_download": link.permission in ("download", "edit"),
             }
             if fm.kind == "image":

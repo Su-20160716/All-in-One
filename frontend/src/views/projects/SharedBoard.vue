@@ -36,7 +36,7 @@
 import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
-import { API_BASE } from '../../api/base'
+import { API_URL } from '../../api/base'
 
 const route = useRoute()
 const project = ref({})
@@ -46,7 +46,8 @@ const error = ref('')
 
 onMounted(async () => {
   try {
-    const res = await axios.get(`${API_BASE}/share/board/${route.params.token}/`)
+    // F3：走 /api/share/board/*（前端不再代理 /share 前缀）
+    const res = await axios.get(`${API_URL}/share/board/${route.params.token}/`)
     project.value = res.data.project
     boards.value = res.data.boards || []
   } catch (e) {
