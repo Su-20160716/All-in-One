@@ -146,6 +146,9 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
+        # B10：等锁 20s（配合 core/apps.py 的 busy_timeout=20000 / WAL），
+        # 开发期并发请求不再轻易 database is locked；仅 sqlite 分支需要
+        "timeout": 20,
     }
 }
 if os.environ.get("POSTGRES_DB"):

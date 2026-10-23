@@ -5,8 +5,14 @@
 - 笔记保存后 → 重建 [[双链]] 关系 + 解析反向链接
 - 删除后 → 移除索引
 
-注意：所有索引动作都包在 try/except 中，索引失败绝不影响业务写入。
+注意：
+- 所有索引动作都包在 try/except 中，索引失败绝不影响业务写入。
+- B10：索引动作统一走 `transaction.on_commit` 延到事务提交后执行——
+  业务写（如 B5 的 notes 保存事务）不再被全文索引/双链重建拖长持锁时间；
+  事务回滚时也不会留下「库里没有、索引里有」的幽灵记录。
+  无活动事务时 on_commit 立即执行，行为与原来一致。
 """
+from django.db import transaction
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
@@ -18,25 +24,32 @@ def _safe(fn, *args, **kwargs):
         pass
 
 
+def _on_commit(fn, *args, **kwargs):
+    """B10：事务提交后执行索引动作；无事务时立即执行"""
+    transaction.on_commit(lambda: _safe(fn, *args, **kwargs))
+
+
 @receiver(post_save, sender="notes.Note")
 def on_note_saved(sender, instance, **kwargs):
     from core.search import index_document
 
-    _safe(index_document, "note", instance.id, instance.owner_id, instance.title, instance.content,
-          summary=instance.content)
+    _on_commit(
+        index_document, "note", instance.id, instance.owner_id, instance.title, instance.content,
+        summary=instance.content,
+    )
     # 双链：正文变化后重建出链；标题变化后把别的笔记指向本标题的悬浮链接接上
     from notes.links import rebuild_links_for_note, resolve_dangling_links
 
-    _safe(rebuild_links_for_note, instance)
-    _safe(resolve_dangling_links, instance.owner_id, instance.title)
+    _on_commit(rebuild_links_for_note, instance)
+    _on_commit(resolve_dangling_links, instance.owner_id, instance.title)
 
 
 @receiver(post_delete, sender="notes.Note")
 def on_note_deleted(sender, instance, **kwargs):
     from core.search import remove_document
 
-    _safe(remove_document, "note", instance.id)
-    _safe(lambda: __import__("notes.links", fromlist=["x"]).NoteLink.objects.filter(
+    _on_commit(remove_document, "note", instance.id)
+    _on_commit(lambda: __import__("notes.links", fromlist=["x"]).NoteLink.objects.filter(
         source_id=instance.id
     ).delete())
 
@@ -44,7 +57,7 @@ def on_note_deleted(sender, instance, **kwargs):
 @receiver(post_save, sender="files.FileMeta")
 def on_file_saved(sender, instance, **kwargs):
     """文件只在「文本可抽取」且体积合理时建立索引，避免保存时卡顿"""
-    from core.search import can_index, index_document
+    from core.search import can_index
 
     if instance.is_deleted or not can_index(instance.ext):
         return
@@ -59,7 +72,7 @@ def on_file_saved(sender, instance, **kwargs):
         from django.conf import settings as s
         from pathlib import Path
 
-        from core.search import extract_text
+        from core.search import extract_text, index_document
 
         media = Path(s.MEDIA_ROOT)
         abs_path = media / instance.storage_path
@@ -67,22 +80,22 @@ def on_file_saved(sender, instance, **kwargs):
         if text:
             index_document("file", instance.id, instance.owner_id, instance.name, text, summary=text)
 
-    _safe(_do)
+    _on_commit(_do)
 
 
 @receiver(post_delete, sender="files.FileMeta")
 def on_file_deleted(sender, instance, **kwargs):
     from core.search import remove_document
 
-    _safe(remove_document, "file", instance.id)
+    _on_commit(remove_document, "file", instance.id)
 
 
 @receiver(post_save, sender="projects.Project")
 def on_project_saved(sender, instance, **kwargs):
     from core.search import index_document
 
-    _safe(index_document, "project", instance.id, instance.owner_id, instance.name,
-          instance.description or "")
+    _on_commit(index_document, "project", instance.id, instance.owner_id, instance.name,
+               instance.description or "")
 
 
 @receiver(post_save, sender="projects.TaskCard")
@@ -93,7 +106,7 @@ def on_task_saved(sender, instance, **kwargs):
         owner_id = instance.board.project.owner_id
     except Exception:
         owner_id = None
-    _safe(index_document, "task", instance.id, owner_id, instance.title, instance.description or "")
+    _on_commit(index_document, "task", instance.id, owner_id, instance.title, instance.description or "")
 
 
 # ---------- v6 代码工坊：代码文件入全文索引（第 79 条）----------
@@ -107,14 +120,14 @@ def on_code_file_saved(sender, instance, **kwargs):
     from core.search import index_document
 
     title = f"{instance.workspace.name}/{instance.path}" if instance.workspace_id else instance.path
-    _safe(index_document, "code", instance.id, instance.owner_id, title, instance.content or "")
+    _on_commit(index_document, "code", instance.id, instance.owner_id, title, instance.content or "")
 
 
 @receiver(post_delete, sender="code.CodeFile")
 def on_code_file_deleted(sender, instance, **kwargs):
     from core.search import remove_document
 
-    _safe(remove_document, "code", instance.id)
+    _on_commit(remove_document, "code", instance.id)
 
 
 @receiver(post_save, sender="code.CodeSnippet")
@@ -123,12 +136,12 @@ def on_code_snippet_saved(sender, instance, **kwargs):
     from core.search import index_document
 
     body = f"{instance.description}\n{instance.code}"
-    _safe(index_document, "snippet", instance.id, instance.owner_id, instance.title, body,
-          summary=instance.description or instance.code[:200])
+    _on_commit(index_document, "snippet", instance.id, instance.owner_id, instance.title, body,
+               summary=instance.description or instance.code[:200])
 
 
 @receiver(post_delete, sender="code.CodeSnippet")
 def on_code_snippet_deleted(sender, instance, **kwargs):
     from core.search import remove_document
 
-    _safe(remove_document, "snippet", instance.id)
+    _on_commit(remove_document, "snippet", instance.id)

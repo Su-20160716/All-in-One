@@ -142,11 +142,31 @@ class MaintenanceModeMiddleware(MiddlewareMixin):
 class OperationLogMiddleware(MaintenanceModeMiddleware):
     """统一操作日志中间件 + 维护模式 / PAT 鉴权（继承其 process_request）"""
 
+    # B7：只预读小体积 JSON / 表单 body（上限 1MB），大文件分片上传不碰
+    _PREFETCH_MAX_BYTES = 1_000_000
+
     def process_request(self, request):
         denied = pat_authenticate(request)
         if denied is not None:
             return denied
+        # B7：提前把 body 读进 _body 缓存。DRF 视图解析 request.data 时会消费
+        # 底层流并标记 _read_started，之后在 process_response 里读 request.body
+        # 会抛 RawPostDataException，导致操作日志 detail 恒为空；
+        # 这里在读流前预读，视图与日志阶段共用同一份缓存
+        self._prefetch_body(request)
         return super().process_request(request)
+
+    def _prefetch_body(self, request):
+        try:
+            ct = (request.content_type or "").lower()
+            if "json" not in ct and "form-urlencoded" not in ct:
+                return
+            length = int(request.META.get("CONTENT_LENGTH") or 0)
+            if length > self._PREFETCH_MAX_BYTES:
+                return
+            _ = request.body
+        except Exception:
+            pass  # 预读失败不影响主流程，日志降级为无 detail
 
     def process_response(self, request, response):
         try:
@@ -169,7 +189,15 @@ class OperationLogMiddleware(MaintenanceModeMiddleware):
             except Exception:
                 pass
 
-            module = path.strip("/").split("/")[0] if path.strip("/") else "root"
+            # B7：/api/projects/1/boards/ 原来取 parts[0] 恒为 "api"，
+            # 模块分组全是同一值；改为跳过 api 前缀取真实模块名
+            parts = [p for p in path.strip("/").split("/") if p]
+            if len(parts) >= 2 and parts[0] == "api":
+                module = parts[1]
+            elif parts:
+                module = parts[0]
+            else:
+                module = "root"
             action_map = {
                 "POST": "create",
                 "PUT": "update",
