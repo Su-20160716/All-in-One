@@ -428,7 +428,9 @@ def main_ws(info):
           str(r.data.get("content"))[:150])
     # B27 后 code/snippet 也进全文索引，全库搜「协同写入」会被其他模块文档
     # 挤出首页（dev 库累积了历史索引）——加 module=note 精准验证意图，
-    # 顺带覆盖搜索接口的 module 过滤参数
+    # 顺带覆盖搜索接口的 module 过滤参数。
+    # 注意：results[].id 是 object_id（即 Note.id），doc_id 是 SearchDoc 主键；
+    # 曾把断言改成比 doc_id 反而永远挂，比 id 才对。
     r = admin.get("/api/core/search/fulltext/", {"q": "协同写入", "module": "note"})
     check("协同写入内容已进入全文索引",
           r.status_code == 200 and any(h["id"] == info["note_id"] for h in r.data.get("results", [])),

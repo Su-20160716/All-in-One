@@ -1,4 +1,22 @@
-"""统一分页器"""
+"""统一分页器（S2-B1 约定）。
+
+项目内部分页就两个选择，新代码按场景挑，**不要再造第三种**：
+
+1. ``StandardPagination`` —— 标准 DRF 分页（``page`` / ``page_size`` 参数，
+   响应 ``{count, next, previous, results}``）。用于**新建**的、数据量
+   可能很大的列表接口。
+2. ``OptionalPageNumberPagination`` —— 可选分页：不带 ``page`` 时返回
+   完整列表 + 原响应结构（list/total），带 ``page`` 时按标准分页。
+   用于**兼容存量响应结构**的接口（老客户端不传 page，逐字节一致）。
+
+存量约定（勿改，改了炸前端）：
+- ``dataintel`` 套件用手写 ``limit``/``offset`` 参数 + ``{list,total,
+  offset,limit}`` 响应结构，是 v5 既有契约，保持原样。
+- ``settings.REST_FRAMEWORK.DEFAULT_PAGINATION_CLASS`` 为
+  ``StandardPagination``， generic ListAPIView 默认走标准分页。
+
+新增分页相关需求先读本段；要动存量分页行为，先确认前端消费方。
+"""
 from rest_framework.pagination import PageNumberPagination
 
 from django.conf import settings

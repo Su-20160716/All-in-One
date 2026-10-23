@@ -122,7 +122,7 @@ class ShareLinkSerializer(serializers.ModelSerializer):
         model = ShareLink
         fields = [
             "id", "token", "file", "file_name", "folder", "target_type", "permission",
-            "password", "max_downloads", "download_count", "view_count", "is_revoked",
+            "max_downloads", "download_count", "view_count", "is_revoked",
             "is_expired", "has_password", "expire_at", "created_at", "url",
         ]
         read_only_fields = ["token", "download_count", "view_count", "created_at"]

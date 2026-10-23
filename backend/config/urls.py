@@ -8,6 +8,22 @@ from rest_framework_simplejwt.views import TokenVerifyView
 
 from accounts.views import RefreshView  # noqa: E402 —— B12：带 tv claim 校验的刷新视图
 
+# S2-B1：drf-spectacular schema 路由（import 失败时降级为无文档模式，
+# 不影响任何业务路由——装不上 spectacular 只是没有 /api/docs 页面）
+try:
+    from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+except ImportError:  # pragma: no cover —— 未安装 drf-spectacular 的环境
+    class SpectacularAPIView:  # noqa: N801 —— 占位，访问返回 503 提示
+        @classmethod
+        def as_view(cls):
+            from django.http import JsonResponse
+            return lambda request: JsonResponse(
+                {"message": "drf-spectacular 未安装，文档接口不可用"}, status=503
+            )
+
+    class SpectacularSwaggerView(SpectacularAPIView):  # noqa: N801
+        pass
+
 
 def api_root(request):
     """根路径说明。
@@ -52,6 +68,10 @@ urlpatterns = [
     path("api/code/", include("code.urls")),
     path("api/auth/refresh/", RefreshView.as_view(), name="token_refresh"),
     path("api/auth/verify/", TokenVerifyView.as_view(), name="token_verify"),
+    # S2-B1：OpenAPI schema + Swagger UI（只读文档，不影响既有路由匹配顺序——
+    # 所有 /api/ 业务路由在前，这两条路径唯一不会撞车）
+    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
 ]
 
 # 公开共享链接（无需登录）

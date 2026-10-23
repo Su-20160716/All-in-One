@@ -164,7 +164,7 @@ def calendar_event_detail(request, pk):
 @endpoint()
 def calendar_event_update(request, pk):
     """修改日程（F681：改完同样返回重叠提示）。"""
-    e = get_obj(SuiteEvent, pk, request.user)
+    e = get_obj(SuiteEvent, pk, request.user, write=True)
     if p(request, "title") is not None:
         e.title = req_str(request, "title")[:200]
     if p(request, "start_at") is not None:
@@ -189,7 +189,7 @@ def calendar_event_update(request, pk):
 @endpoint()
 def calendar_event_delete(request, pk):
     """删除日程。"""
-    e = get_obj(SuiteEvent, pk, request.user)
+    e = get_obj(SuiteEvent, pk, request.user, write=True)
     e.delete()
     return ok({"deleted": pk})
 

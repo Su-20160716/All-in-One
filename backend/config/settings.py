@@ -75,6 +75,8 @@ INSTALLED_APPS = [
     "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "channels",
+    # S2-B1：OpenAPI 文档（缺失时 manage.py check 不报错，仅 /api/docs 不可用）
+    "drf_spectacular",
     # 业务应用
     "core",
     "accounts",
@@ -269,6 +271,9 @@ REST_FRAMEWORK = {
         "user": "1000/min",
         "anon": "100/min",
     },
+    # S2-B1：drf-spectacular OpenAPI schema（/api/schema/ 输出，
+    # /api/docs/ 内嵌 Swagger UI）。仅文档用途，不改动任何接口行为。
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
 
 # JWT
@@ -285,6 +290,17 @@ FILE_CHUNK_SIZE_MB = int(os.environ.get("FILE_CHUNK_SIZE_MB", "5"))
 
 # 分页大小上限
 PAGE_SIZE_MAX = 100
+
+# S2-B1：drf-spectacular 配置
+SPECTACULAR_SETTINGS = {
+    "TITLE": "全能协作平台 API",
+    "DESCRIPTION": "看板 / 网盘 / 笔记 / IM / 学习中心 / 代码工坊等模块的 REST 接口文档",
+    "VERSION": "6.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    # 项目大量裸 APIView（手写 Response），serializer 推断不全会 warning——
+    # 这些是文档完整度提示，不是错误；需要逐个补 @extend_schema 时再处理
+    "DISABLE_DRF_WARNINGS": False,
+}
 
 # 回收站保留天数（到期可由清理任务清除）
 TRASH_KEEP_DAYS = int(os.environ.get("TRASH_KEEP_DAYS", "30"))
@@ -333,3 +349,18 @@ if _extra_body:
 # ---------------------------------------------------------------------------
 SOFFICE_PATH = os.environ.get("SOFFICE_PATH", "")
 OFFICE_CONVERT_TIMEOUT = int(os.environ.get("OFFICE_CONVERT_TIMEOUT", "120"))
+
+# ---------------------------------------------------------------------------
+# 缓存（S2-B1）
+# 默认 LocMemCache：单进程部署（当前 ClawCloud 单实例）零依赖可用；
+# 多实例部署时把 backend 换成 django.core.cache.backends.redis.RedisCache
+# 并配 CONNECTION（与 Channels 共用同一 Redis），保证各实例间缓存一致。
+# 目前缓存对象：公开站点设置（public site settings，低频变更）。
+# ---------------------------------------------------------------------------
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "allinone-default",
+        "TIMEOUT": 300,
+    }
+}

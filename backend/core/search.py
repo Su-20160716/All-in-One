@@ -21,6 +21,7 @@ import math
 import os
 import re
 from collections import Counter
+from datetime import datetime
 
 from django.conf import settings
 
@@ -425,7 +426,20 @@ def search(query: str, owner_ids, modules=None, limit: int = 20, offset: int = 0
     for doc_id, hits in matched.items():
         scores[doc_id] *= 1 + 0.25 * (len(hits) - 1)
 
-    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    # S2-B1：同分 tiebreaker——更新时间新的排前。
+    # BM25 对「多篇内容相同的文档」会给出完全相同的分数（典型场景：
+    # 协同回写/模板生成的同文笔记），原先同分顺序取决于 DB 返回顺序
+    # 不可控，新写入的文档可能被历史同分文档挤出首页。加 recency
+    # tiebreaker 后同分文档新的在前，检索结果更符合直觉。
+    ts_map = dict(
+        SearchDoc.objects.filter(id__in=list(scores)[:5000])
+        .values_list("id", "updated_at")
+    )
+    ranked = sorted(
+        scores.items(),
+        key=lambda kv: (kv[1], ts_map.get(kv[0]) or datetime.min),
+        reverse=True,
+    )
 
     # ---------------- 语法过滤：精确短语 / 排除词（F662） ----------------
     phrase_fallback = False

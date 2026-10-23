@@ -509,8 +509,15 @@ class PublicSiteSettingView(APIView):
     ]
 
     def get(self, request):
-        qs = SiteSetting.objects.filter(key__in=self.PUBLIC_KEYS)
-        return Response({"settings": {s.key: s.value for s in qs}})
+        # S2-B1：公开设置走 300s 缓存（高频请求、低频变更），
+        # 管理员保存后 AdminSiteSettingView.post 主动失效
+        from core.site_cache import get_public_settings
+
+        def _load():
+            qs = SiteSetting.objects.filter(key__in=self.PUBLIC_KEYS)
+            return {s.key: s.value for s in qs}
+
+        return Response({"settings": get_public_settings(_load)})
 
 
 class AdminSiteSettingView(APIView):
@@ -531,6 +538,10 @@ class AdminSiteSettingView(APIView):
                 obj.save(update_fields=["value", "updated_at"])
             else:
                 SiteSetting.objects.create(key=key, value=str(value))
+        # S2-B1：保存后立即失效公开设置缓存，下次读取回源（改完马上生效）
+        from core.site_cache import invalidate_public_settings
+
+        invalidate_public_settings()
         return Response({"message": "站点设置已保存"})
 
 

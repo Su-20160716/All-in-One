@@ -1,4 +1,5 @@
 """看板视图：项目、看板列、卡片拖拽、子任务、工时、评论、成员、活动、统计、我的任务"""
+import logging
 from datetime import timedelta
 
 from django.db import transaction
@@ -8,6 +9,8 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+logger = logging.getLogger(__name__)
 
 from accounts.models import User
 from core.models import notify
@@ -47,6 +50,18 @@ def _can_access(user, project):
 
 def _log_activity(project, user, action, target=""):
     ProjectActivity.objects.create(project=project, user=user, action=action, target=target)
+
+
+def _push_board_event(project_id, action, **data):
+    """S2-B1：看板/卡片变动 WS 广播（on_commit 延后，回滚不广播；失败不影响主流程）"""
+    def _emit():
+        try:
+            from ws_app.events import notify_board_event
+            notify_board_event(project_id, action, data)
+        except Exception:
+            logger.exception("S2-B1：看板事件广播失败 action=%s", action)
+
+    transaction.on_commit(_emit)
 
 
 def _card_of(user, pk):
@@ -338,6 +353,8 @@ class CardListView(APIView):
                 if u.id != request.user.id:
                     notify(u, f"你被分配了新任务「{card.title}」", category="project", link=f"/projects/{board.project_id}")
         _log_activity(board.project, request.user, "创建了任务", card.title)
+        # S2-B1：新卡片广播（项目成员多端同步看板）
+        _push_board_event(board.project_id, "card.created", card_id=card.id, board_id=board.id)
         return Response(TaskCardSerializer(card).data, status=201)
 
 
@@ -385,6 +402,9 @@ class CardDetailView(APIView):
             ]))
         card.save()
         _log_activity(card.board.project, request.user, "更新了任务", card.title)
+        # S2-B1：卡片变更广播（拖拽换列/改状态/改指派都会走到）
+        _push_board_event(card.board.project_id, "card.updated",
+                          card_id=card.id, board_id=card.board_id)
         return Response(TaskCardSerializer(card).data)
 
     def delete(self, request, pk):
@@ -394,6 +414,8 @@ class CardDetailView(APIView):
         title, project = card.title, card.board.project
         card.delete()
         _log_activity(project, request.user, "删除了任务", title)
+        # S2-B1：卡片删除广播
+        _push_board_event(project.id, "card.deleted", card_id=pk)
         return Response({"message": "任务已删除"})
 
 
@@ -408,8 +430,10 @@ class CardBatchView(APIView):
             return Response({"message": "项目不存在或无权访问"}, status=404)
         qs = TaskCard.objects.filter(id__in=[as_int(x, field="card_ids") for x in ids], board__project=project)
         action = request.data.get("action")
+        # S2-B1：批量操作统一广播一次（细分 action 供前端按需刷新）
         if action == "delete":
             n = qs.delete()[0]
+            _push_board_event(project.id, "card.batch", batch_action="delete", count=n)
             return Response({"message": f"已删除 {n} 个任务"})
         if action == "status":
             v = request.data.get("status")
@@ -417,15 +441,19 @@ class CardBatchView(APIView):
             if v == "done":
                 update["completed_at"] = timezone.now()
             n = qs.update(**update)
+            _push_board_event(project.id, "card.batch", batch_action="status", count=n)
             return Response({"message": f"已更新 {n} 个任务状态"})
         if action == "priority":
             n = qs.update(priority=request.data.get("priority", "medium"))
+            _push_board_event(project.id, "card.batch", batch_action="priority", count=n)
             return Response({"message": f"已更新 {n} 个任务优先级"})
         if action == "move":
             board = Board.objects.filter(pk=request.data.get("board_id"), project=project).first()
             if not board:
                 return Response({"message": "目标列不存在"}, status=404)
             n = qs.update(board=board)
+            _push_board_event(project.id, "card.batch", batch_action="move", count=n,
+                              board_id=board.id)
             return Response({"message": f"已移动 {n} 个任务"})
         if action == "assignees":
             users = User.objects.filter(id__in=request.data.get("user_ids") or [])

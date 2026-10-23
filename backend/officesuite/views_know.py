@@ -54,7 +54,7 @@ def faq_list(request):
 @endpoint()
 def faq_update(request, pk):
     """编辑 FAQ。"""
-    f = get_obj(FaqEntry, pk, request.user)
+    f = get_obj(FaqEntry, pk, request.user, write=True)
     if p(request, "title") is not None:
         f.title = req_str(request, "title")[:200]
     if p(request, "answer") is not None:
@@ -68,7 +68,7 @@ def faq_update(request, pk):
 @endpoint()
 def faq_delete(request, pk):
     """删除 FAQ。"""
-    f = get_obj(FaqEntry, pk, request.user)
+    f = get_obj(FaqEntry, pk, request.user, write=True)
     f.delete()
     return ok({"deleted": pk})
 
@@ -155,7 +155,7 @@ def policy_detail(request, pk):
 @endpoint()
 def policy_update(request, pk):
     """修订制度（版本自动 +0.1 可覆盖）。"""
-    d = get_obj(PolicyDoc, pk, request.user)
+    d = get_obj(PolicyDoc, pk, request.user, write=True)
     if p(request, "title") is not None:
         d.title = req_str(request, "title")[:200]
     if p(request, "content") is not None:
@@ -203,7 +203,7 @@ def policy_ack_list(request, pk):
 @endpoint()
 def policy_delete(request, pk):
     """删除制度文档。"""
-    d = get_obj(PolicyDoc, pk, request.user)
+    d = get_obj(PolicyDoc, pk, request.user, write=True)
     d.delete()
     return ok({"deleted": pk})
 
@@ -248,7 +248,7 @@ def template_detail(request, pk):
 @endpoint()
 def template_update(request, pk):
     """编辑模板。"""
-    t = get_obj(DocTemplate, pk, request.user)
+    t = get_obj(DocTemplate, pk, request.user, write=True)
     if p(request, "title") is not None:
         t.title = req_str(request, "title")[:200]
     if p(request, "content") is not None:
@@ -262,7 +262,7 @@ def template_update(request, pk):
 @endpoint()
 def template_delete(request, pk):
     """删除模板。"""
-    t = get_obj(DocTemplate, pk, request.user)
+    t = get_obj(DocTemplate, pk, request.user, write=True)
     t.delete()
     return ok({"deleted": pk})
 
@@ -356,7 +356,7 @@ def wiki_detail(request, pk):
 @endpoint()
 def wiki_update(request, pk):
     """编辑 wiki（自动记修订版本）。"""
-    w = get_obj(WikiPage, pk, request.user)
+    w = get_obj(WikiPage, pk, request.user, write=True)
     changed = False
     if p(request, "title") is not None:
         w.title = req_str(request, "title")[:200]
@@ -380,7 +380,7 @@ def wiki_update(request, pk):
 @endpoint()
 def wiki_delete(request, pk):
     """删除 wiki 页（连带子页）。"""
-    w = get_obj(WikiPage, pk, request.user)
+    w = get_obj(WikiPage, pk, request.user, write=True)
     w.delete()
     return ok({"deleted": pk})
 
@@ -396,7 +396,7 @@ def wiki_revisions(request, pk):
 @endpoint()
 def wiki_move(request, pk):
     """移动页面：换父页或调排序（不允许把自己挂到自己的后代）。"""
-    w = get_obj(WikiPage, pk, request.user)
+    w = get_obj(WikiPage, pk, request.user, write=True)
     new_parent = None
     if p(request, "parent_id") is not None:
         new_parent_id = int(req_num(request, "parent_id", minimum=1))
@@ -567,7 +567,7 @@ def minutes_detail(request, pk):
 @endpoint()
 def minutes_update(request, pk):
     """更新纪要（可发布）。"""
-    m = get_obj(MeetingMinutes, pk, request.user)
+    m = get_obj(MeetingMinutes, pk, request.user, write=True)
     if p(request, "title") is not None:
         m.title = req_str(request, "title")[:200]
     if p(request, "content") is not None:
@@ -586,7 +586,7 @@ def minutes_update(request, pk):
 @endpoint()
 def minutes_delete(request, pk):
     """删除纪要。"""
-    m = get_obj(MeetingMinutes, pk, request.user)
+    m = get_obj(MeetingMinutes, pk, request.user, write=True)
     m.delete()
     return ok({"deleted": pk})
 
@@ -632,7 +632,7 @@ def minutes_action_items(request, pk):
 @endpoint()
 def minutes_action_items_toggle(request, pk):
     """F692 标记行动项完成/未完成（按 line_no），返回最新完成率。"""
-    m = get_obj(MeetingMinutes, pk, request.user)
+    m = get_obj(MeetingMinutes, pk, request.user, write=True)
     line_no = int(req_num(request, "line_no", minimum=1))
     items = (m.data or {}).get("action_items") or {}
     if isinstance(items, list):
@@ -768,7 +768,7 @@ def form_detail(request, pk):
 @endpoint()
 def form_update(request, pk):
     """编辑表单（截止/标题/字段）。"""
-    f = get_obj(CollectForm, pk, request.user)
+    f = get_obj(CollectForm, pk, request.user, write=True)
     if p(request, "title") is not None:
         f.title = req_str(request, "title")[:200]
     if p(request, "fields") is not None:
@@ -785,7 +785,7 @@ def form_update(request, pk):
 @endpoint()
 def form_delete(request, pk):
     """删除表单（连带填写记录）。"""
-    f = get_obj(CollectForm, pk, request.user)
+    f = get_obj(CollectForm, pk, request.user, write=True)
     f.delete()
     return ok({"deleted": pk})
 
@@ -880,7 +880,7 @@ def announcement_detail(request, pk):
 @endpoint()
 def announcement_update(request, pk):
     """编辑公告。"""
-    a = get_obj(DeptAnnouncement, pk, request.user)
+    a = get_obj(DeptAnnouncement, pk, request.user, write=True)
     if p(request, "title") is not None:
         a.title = req_str(request, "title")[:200]
     if p(request, "content") is not None:
@@ -928,7 +928,7 @@ def announcement_readers(request, pk):
 @endpoint()
 def announcement_delete(request, pk):
     """删除公告。"""
-    a = get_obj(DeptAnnouncement, pk, request.user)
+    a = get_obj(DeptAnnouncement, pk, request.user, write=True)
     a.delete()
     return ok({"deleted": pk})
 
@@ -1047,7 +1047,7 @@ def poll_reopen(request, pk):
 @endpoint()
 def poll_delete(request, pk):
     """删除投票（连带选票）。"""
-    poll = get_obj(Poll, pk, request.user)
+    poll = get_obj(Poll, pk, request.user, write=True)
     poll.delete()
     return ok({"deleted": pk})
 
@@ -1113,7 +1113,7 @@ def ticket_detail(request, pk):
 @endpoint()
 def ticket_assign(request, pk):
     """指派处理人。"""
-    t = get_obj(HelpTicket, pk, request.user)
+    t = get_obj(HelpTicket, pk, request.user, write=True)
     if t.status == "resolved":
         raise ValueError("已解决的工单无需指派")
     t.assignee_name = req_str(request, "assignee")[:60]
@@ -1127,7 +1127,7 @@ def ticket_assign(request, pk):
 @endpoint()
 def ticket_reply(request, pk):
     """回复工单。"""
-    t = get_obj(HelpTicket, pk, request.user)
+    t = get_obj(HelpTicket, pk, request.user, write=True)
     content = req_str(request, "content")
     replies = list((t.data or {}).get("replies", []))
     replies.append({"by": request.user.username,
@@ -1144,7 +1144,7 @@ def ticket_reply(request, pk):
 @endpoint()
 def ticket_resolve(request, pk):
     """解决工单（记录解决方案）。"""
-    t = get_obj(HelpTicket, pk, request.user)
+    t = get_obj(HelpTicket, pk, request.user, write=True)
     if t.status == "resolved":
         raise ValueError("工单已是解决状态")
     t.status = "resolved"
@@ -1157,7 +1157,7 @@ def ticket_resolve(request, pk):
 @endpoint()
 def ticket_reopen(request, pk):
     """重开工单（解决后仍可重开）。"""
-    t = get_obj(HelpTicket, pk, request.user)
+    t = get_obj(HelpTicket, pk, request.user, write=True)
     if t.status != "resolved":
         raise ValueError("仅已解决的工单可重开")
     t.status = "in_progress"
@@ -1169,7 +1169,7 @@ def ticket_reopen(request, pk):
 @endpoint()
 def ticket_priority(request, pk):
     """调整优先级。"""
-    t = get_obj(HelpTicket, pk, request.user)
+    t = get_obj(HelpTicket, pk, request.user, write=True)
     if t.status == "resolved":
         raise ValueError("已解决的工单不再调整优先级")
     prio = req_str(request, "priority")
@@ -1210,7 +1210,7 @@ def ticket_stats(request):
 @endpoint()
 def ticket_rate(request, pk):
     """F684 满意度评分：工单关闭（resolved）后 1–5 星 + 留言，可重复改评。"""
-    t = get_obj(HelpTicket, pk, request.user)
+    t = get_obj(HelpTicket, pk, request.user, write=True)
     if t.status != "resolved":
         raise ValueError("工单关闭（已解决）后才能评分")
     raw = req_num(request, "rating", minimum=1, maximum=5)

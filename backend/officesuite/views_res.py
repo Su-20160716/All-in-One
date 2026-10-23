@@ -55,7 +55,7 @@ def meeting_room_list(request):
 @endpoint()
 def meeting_room_update(request, pk):
     """编辑会议室信息或启停。"""
-    r = get_obj(MeetingRoom, pk, request.user)
+    r = get_obj(MeetingRoom, pk, request.user, write=True)
     if p(request, "name") is not None:
         r.name = req_str(request, "name")[:100]
     if p(request, "capacity") is not None:
@@ -73,7 +73,7 @@ def meeting_room_update(request, pk):
 @endpoint()
 def meeting_room_delete(request, pk):
     """删除会议室（连带其预订）。"""
-    r = get_obj(MeetingRoom, pk, request.user)
+    r = get_obj(MeetingRoom, pk, request.user, write=True)
     r.delete()
     return ok({"deleted": pk})
 
@@ -101,7 +101,7 @@ def meeting_book(request):
     F682：支持 duration_minutes（15/30/60 模板）——未传 end_at 时按它计算；
     F686：冲突时 ValueError → 400，同时带回同时段已有预约清单供提示。
     """
-    room = get_obj(MeetingRoom, int(req_num(request, "room_id", minimum=1)), request.user)
+    room = get_obj(MeetingRoom, int(req_num(request, "room_id", minimum=1)), request.user, write=True)
     if not room.active:
         raise ValueError("该会议室已停用")
     start = parse_dt(req_str(request, "start_at"), "start_at")
@@ -144,7 +144,7 @@ def meeting_book(request):
 @endpoint()
 def meeting_booking_cancel(request, pk):
     """取消预订（本人或超管）。"""
-    b = get_obj(RoomBooking, pk, request.user)
+    b = get_obj(RoomBooking, pk, request.user, write=True)
     if b.owner_id != request.user.id and not request.user.is_superuser:
         raise ValueError("只能取消自己的预订")
     if b.status != "booked":
@@ -262,7 +262,7 @@ def asset_list(request):
 @endpoint()
 def asset_update(request, pk):
     """编辑资产基础信息。"""
-    a = get_obj(Asset, pk, request.user)
+    a = get_obj(Asset, pk, request.user, write=True)
     if p(request, "title") is not None:
         a.title = req_str(request, "title")[:200]
     if p(request, "category") is not None:
@@ -278,7 +278,7 @@ def asset_update(request, pk):
 @endpoint()
 def asset_delete(request, pk):
     """报废/删除资产（仅 idle 可删）。"""
-    a = get_obj(Asset, pk, request.user)
+    a = get_obj(Asset, pk, request.user, write=True)
     if a.status == "held":
         raise ValueError("资产在持有人手中，请先归还再删除")
     a.delete()
@@ -288,7 +288,7 @@ def asset_delete(request, pk):
 @endpoint()
 def asset_assign(request, pk):
     """领用/分配资产给某人。"""
-    a = get_obj(Asset, pk, request.user)
+    a = get_obj(Asset, pk, request.user, write=True)
     if a.status == "held":
         raise ValueError(f"资产当前在 {a.holder_name or '他人'} 手中")
     holder_name = req_str(request, "holder_name")
@@ -303,7 +303,7 @@ def asset_assign(request, pk):
 @endpoint()
 def asset_return(request, pk):
     """归还资产。"""
-    a = get_obj(Asset, pk, request.user)
+    a = get_obj(Asset, pk, request.user, write=True)
     if a.status != "held":
         raise ValueError("资产未在借出状态")
     a.status = "idle"
@@ -376,7 +376,7 @@ def vehicle_list(request):
 @endpoint()
 def vehicle_update(request, pk):
     """编辑车辆 / 停用启用。"""
-    v = get_obj(Vehicle, pk, request.user)
+    v = get_obj(Vehicle, pk, request.user, write=True)
     if p(request, "plate") is not None:
         v.plate = req_str(request, "plate")[:20]
     if p(request, "model_name") is not None:
@@ -395,7 +395,7 @@ def vehicle_book(request):
 
     F686：返回同车辆同时段的已有申请作为冲突提示（不阻断，等审批裁决）。
     """
-    v = get_obj(Vehicle, int(req_num(request, "vehicle_id", minimum=1)), request.user)
+    v = get_obj(Vehicle, int(req_num(request, "vehicle_id", minimum=1)), request.user, write=True)
     if not v.active:
         raise ValueError("该车辆已停用")
     use_at = parse_dt(req_str(request, "use_at"), "use_at")
@@ -432,7 +432,7 @@ def vehicle_book(request):
 @endpoint()
 def vehicle_booking_approve(request, pk):
     """审批用车（通过/驳回由 action 决定）。"""
-    b = get_obj(VehicleBooking, pk, request.user)
+    b = get_obj(VehicleBooking, pk, request.user, write=True)
     if b.status != "pending":
         raise ValueError(f"当前状态 {b.status} 不可审批")
     action = req_str(request, "action")
@@ -447,7 +447,7 @@ def vehicle_booking_approve(request, pk):
 @endpoint()
 def vehicle_booking_cancel(request, pk):
     """取消自己的用车申请。"""
-    b = get_obj(VehicleBooking, pk, request.user)
+    b = get_obj(VehicleBooking, pk, request.user, write=True)
     if b.owner_id != request.user.id:
         raise ValueError("只能取消自己的申请")
     if b.status not in ("pending", "approved"):
@@ -508,7 +508,7 @@ def supplies_item_restock(request, pk):
 @endpoint()
 def supplies_apply(request):
     """领用物品（库存不足直接拒绝）。"""
-    it = get_obj(SupplyItem, int(req_num(request, "item_id", minimum=1)), request.user)
+    it = get_obj(SupplyItem, int(req_num(request, "item_id", minimum=1)), request.user, write=True)
     qty = int(req_num(request, "qty", minimum=1, maximum=9999))
     if it.stock < qty:
         raise ValueError(f"库存不足：当前 {it.stock}，需 {qty}")
@@ -526,7 +526,7 @@ def supplies_apply(request):
 @endpoint()
 def supplies_apply_cancel(request, pk):
     """取消领用（回滚库存）。"""
-    a = get_obj(SupplyApply, pk, request.user)
+    a = get_obj(SupplyApply, pk, request.user, write=True)
     if a.status != "done":
         raise ValueError("该领用已处理过")
     a.status = "cancelled"
@@ -593,7 +593,7 @@ def visitor_list(request):
 @endpoint()
 def visitor_update(request, pk):
     """修改访客信息。"""
-    v = get_obj(VisitorRecord, pk, request.user)
+    v = get_obj(VisitorRecord, pk, request.user, write=True)
     if p(request, "visitor_name") is not None:
         v.visitor_name = req_str(request, "visitor_name")[:60]
     if p(request, "company") is not None:
@@ -609,7 +609,7 @@ def visitor_update(request, pk):
 @endpoint()
 def visitor_checkin(request, pk):
     """访客到访确认。"""
-    v = get_obj(VisitorRecord, pk, request.user)
+    v = get_obj(VisitorRecord, pk, request.user, write=True)
     if v.status not in ("registered",):
         raise ValueError("仅已登记状态可签到")
     v.status = "checked_in"
@@ -622,7 +622,7 @@ def visitor_checkin(request, pk):
 @endpoint()
 def visitor_checkout(request, pk):
     """访客离开。"""
-    v = get_obj(VisitorRecord, pk, request.user)
+    v = get_obj(VisitorRecord, pk, request.user, write=True)
     if v.status != "checked_in":
         raise ValueError("仅已签到状态可签退")
     v.status = "left"
@@ -634,7 +634,7 @@ def visitor_checkout(request, pk):
 @endpoint()
 def visitor_delete(request, pk):
     """删除访客记录。"""
-    v = get_obj(VisitorRecord, pk, request.user)
+    v = get_obj(VisitorRecord, pk, request.user, write=True)
     v.delete()
     return ok({"deleted": pk})
 
@@ -688,7 +688,7 @@ def mailroom_list(request):
 @endpoint()
 def mailroom_pickup(request, pk):
     """领取包裹。"""
-    m = get_obj(MailParcel, pk, request.user)
+    m = get_obj(MailParcel, pk, request.user, write=True)
     if m.status != "pending":
         raise ValueError("该包裹已领取或取消")
     m.status = "picked"

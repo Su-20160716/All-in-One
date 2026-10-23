@@ -99,6 +99,14 @@ class ChatMessage(models.Model):
         verbose_name = "消息"
         verbose_name_plural = "消息"
         ordering = ["created_at"]
+        # S2-B1：消息列表恒为 session 过滤 + id 倒序取最近 N 条
+        # （MessageListView order_by("-id")[:50]，WS 重连补拉同模式）。
+        # created_at 与 id 单调性一致但索引选 id：查询条件就是 id，且
+        # created_at 允许并发同值。标注待实测。
+        indexes = [
+            models.Index(fields=["session", "-id"],
+                         name="chatmsg_session_id_idx"),
+        ]
 
     def __str__(self):
         return f"{self.sender} @ {self.created_at:%H:%M}"

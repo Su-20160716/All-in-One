@@ -23,6 +23,8 @@ from pathlib import Path
 
 from django.conf import settings
 
+from core import adapters
+
 # 需要经 LibreOffice 转换的格式（转 PDF 后可预览 / 可抽取文本）
 CONVERTIBLE_EXTS = {
     "doc", "docx", "xls", "xlsx", "xlsm", "ppt", "pptx", "odt", "ods", "odp", "rtf", "wps", "et", "dps",
@@ -91,14 +93,14 @@ def convert_to_pdf(abs_path: str, ext: str = "", out_dir: str | None = None) -> 
     """
     ext = (ext or os.path.splitext(abs_path)[1].lstrip(".")).lower()
     if not abs_path or not os.path.exists(abs_path):
-        return {"ok": False, "path": None, "code": "SOURCE_MISSING", "message": "源文件不存在"}
+        return adapters.degraded("SOURCE_MISSING", "源文件不存在", path=None)
     if not can_convert(ext):
-        return {"ok": False, "path": None, "code": "UNSUPPORTED_FORMAT",
-                "message": f"不支持转换 .{ext} 格式（仅支持 {', '.join(sorted(CONVERTIBLE_EXTS))}）"}
+        return adapters.degraded("UNSUPPORTED_FORMAT",
+                               f"不支持转换 .{ext} 格式（仅支持 {', '.join(sorted(CONVERTIBLE_EXTS))}）", path=None)
 
     soffice = find_soffice()
     if not soffice:
-        return {"ok": False, "path": None, "code": "LIBREOFFICE_NOT_FOUND", "message": INSTALL_HINT}
+        return adapters.degraded("LIBREOFFICE_NOT_FOUND", INSTALL_HINT, path=None)
 
     target_dir = Path(out_dir or (Path(settings.MEDIA_ROOT) / "converted"))
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -121,11 +123,10 @@ def convert_to_pdf(abs_path: str, ext: str = "", out_dir: str | None = None) -> 
         )
     except subprocess.TimeoutExpired:
         _cleanup(profile)
-        return {"ok": False, "path": None, "code": "TIMEOUT",
-                "message": f"转换超时（>{timeout}s），文档可能过大或格式复杂"}
+        return adapters.degraded("TIMEOUT", f"转换超时（>{timeout}s），文档可能过大或格式复杂", path=None)
     except Exception as exc:  # pragma: no cover
         _cleanup(profile)
-        return {"ok": False, "path": None, "code": "CONVERT_FAILED", "message": f"调用 LibreOffice 失败：{exc}"}
+        return adapters.degraded("CONVERT_FAILED", f"调用 LibreOffice 失败：{exc}", path=None)
     finally:
         _cleanup(profile)
 
@@ -144,8 +145,8 @@ def convert_to_pdf(abs_path: str, ext: str = "", out_dir: str | None = None) -> 
     detail = ""
     if proc.stderr:
         detail = proc.stderr.decode("utf-8", errors="ignore")[:300]
-    return {"ok": False, "path": None, "code": "CONVERT_FAILED",
-            "message": ("LibreOffice 未能生成 PDF" + (f"：{detail}" if detail else ""))}
+    return adapters.degraded("CONVERT_FAILED",
+                               "LibreOffice 未能生成 PDF" + (f"：{detail}" if detail else ""), path=None)
 
 
 def _cleanup(path: Path):
@@ -162,3 +163,7 @@ def relative_media_path(abs_path: str) -> str:
         return str(Path(abs_path).relative_to(Path(settings.MEDIA_ROOT))).replace(os.sep, "/")
     except Exception:
         return ""
+
+
+# S2-B1：向统一适配器注册表登记 LibreOffice 探测（health 接口一处看全）
+adapters.register_probe("libreoffice", soffice_status)

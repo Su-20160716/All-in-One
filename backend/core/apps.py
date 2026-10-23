@@ -10,6 +10,19 @@ class CoreConfig(AppConfig):
         # 注册「保存即索引 + 双链重建」信号
         from core import signals  # noqa: F401
 
+        # S2-B1：触发外部依赖探测注册（import 副作用）。
+        # files.office / assistant.llm 尾部各自 register_probe；
+        # code.apps.ready 注册 sandbox。任何单个适配器 import 失败
+        # 不影响其它探测与启动（可降级原则）。
+        for mod in ("files.office", "assistant.llm"):
+            try:
+                __import__(mod)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "S2-B1：适配器探测注册失败 module=%s", mod
+                )
+
         # B10：SQLite 开启 WAL + busy_timeout（仅 sqlite 分支）。
         # WAL 让读写不再互斥（冒烟三连跑、开发时前后端并行请求不再撞
         # database is locked）；busy_timeout 与 settings 的 timeout=20 双保险。

@@ -11,8 +11,23 @@ def notify_file_event(user_id: int, action: str, payload: dict):
 
 
 def notify_board_event(project_id: int, action: str, payload: dict):
-    """看板变动 → 推送（保留扩展点）"""
-    push_to_user(project_id, "board_event", {"action": action, **payload})
+    """看板变动 → 推送给项目全体成员（owner + members）。
+
+    历史实现误把 project_id 当 user_id 传 push_to_user，消息发到
+    user_<project_id> 组——没有任何用户会加入该组，广播等于静默丢弃。
+    这里按项目成员逐个投递到各自的 user_<id> 个人频道。
+    """
+    from projects.models import Project
+
+    project = Project.objects.filter(pk=project_id).first()
+    if not project:
+        return
+    member_ids = set(project.members.values_list("id", flat=True))
+    member_ids.add(project.owner_id)
+    event = {"action": action, "project_id": project_id, **payload}
+    for uid in member_ids:
+        if uid:
+            push_to_user(uid, "board_event", event)
 
 
 def notify_chat_message(session_id: int, payload: dict):

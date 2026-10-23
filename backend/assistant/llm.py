@@ -20,6 +20,7 @@ import urllib.request
 
 from django.conf import settings
 
+from core import adapters
 from core.search import term_freq, tokenize
 
 
@@ -364,3 +365,18 @@ def heuristic_grade(question: str, reference: str, user_answer: str, qtype: str 
         "missing_points": miss[:8],
         "coverage": round(coverage, 2),
     }
+
+
+# S2-B1：登记 LLM 探测（是否配置 Key + 探活不真发请求，避免 health 卡网络）
+def _llm_probe():
+    configured = is_configured()
+    return {
+        "available": configured,
+        "code": "OK" if configured else "NOT_CONFIGURED",
+        "provider": "llm" if configured else "local",
+        "model": getattr(settings, "LLM_MODEL", "") if configured else "local-extractive",
+        "base_url": getattr(settings, "LLM_BASE_URL", "") if configured else "",
+    }
+
+
+adapters.register_probe("llm", _llm_probe)

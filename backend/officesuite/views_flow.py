@@ -88,7 +88,7 @@ def approval_detail(request, pk):
 @endpoint()
 def approval_approve(request, pk):
     """通过审批。"""
-    r = get_obj(ApprovalRequest, pk, request.user)
+    r = get_obj(ApprovalRequest, pk, request.user, write=True)
     if r.status != "pending":
         raise ValueError(f"当前状态 {r.status} 不可审批")
     r.status = "approved"
@@ -100,7 +100,7 @@ def approval_approve(request, pk):
 @endpoint()
 def approval_reject(request, pk):
     """驳回审批（必须给理由）。"""
-    r = get_obj(ApprovalRequest, pk, request.user)
+    r = get_obj(ApprovalRequest, pk, request.user, write=True)
     if r.status != "pending":
         raise ValueError(f"当前状态 {r.status} 不可审批")
     reason = req_str(request, "reason")
@@ -113,7 +113,7 @@ def approval_reject(request, pk):
 @endpoint()
 def approval_cancel(request, pk):
     """撤回自己的审批单。"""
-    r = get_obj(ApprovalRequest, pk, request.user)
+    r = get_obj(ApprovalRequest, pk, request.user, write=True)
     if r.owner_id != request.user.id:
         raise ValueError("只能撤回自己提交的审批")
     if r.status != "pending":
@@ -127,7 +127,7 @@ def approval_cancel(request, pk):
 @endpoint()
 def approval_comment(request, pk):
     """给审批单追加评论（不动状态）。"""
-    r = get_obj(ApprovalRequest, pk, request.user)
+    r = get_obj(ApprovalRequest, pk, request.user, write=True)
     text = req_str(request, "text")
     flow_event(r, "comment", request.user, text)
     r.save()
@@ -144,7 +144,7 @@ def approval_events(request, pk):
 @endpoint()
 def approval_urge(request, pk):
     """催办：给审批单打上催办标记并计数。"""
-    r = get_obj(ApprovalRequest, pk, request.user)
+    r = get_obj(ApprovalRequest, pk, request.user, write=True)
     if r.status != "pending":
         raise ValueError("只有待审单可以催办")
     urges = int((r.data or {}).get("urge_count", 0)) + 1
@@ -200,7 +200,7 @@ def seal_mine(request):
 @endpoint()
 def seal_approve(request, pk):
     """审批用印（通过/驳回）。"""
-    s = get_obj(SealApply, pk, request.user)
+    s = get_obj(SealApply, pk, request.user, write=True)
     action = opt_str(request, "action", "approve")
     if s.status != "pending":
         raise ValueError("该申请已处理")
@@ -288,7 +288,7 @@ def expense_detail(request, pk):
 @endpoint()
 def expense_approve(request, pk):
     """审批通过（主管环节）。"""
-    e = get_obj(ExpenseReport, pk, request.user)
+    e = get_obj(ExpenseReport, pk, request.user, write=True)
     if e.status != "pending":
         raise ValueError("该报销单不在待审状态")
     e.status = "approved"
@@ -300,7 +300,7 @@ def expense_approve(request, pk):
 @endpoint()
 def expense_reject(request, pk):
     """驳回报销（必填理由）。"""
-    e = get_obj(ExpenseReport, pk, request.user)
+    e = get_obj(ExpenseReport, pk, request.user, write=True)
     if e.status != "pending":
         raise ValueError("该报销单不在待审状态")
     reason = req_str(request, "reason")
@@ -313,7 +313,7 @@ def expense_reject(request, pk):
 @endpoint()
 def expense_pay(request, pk):
     """财务打款（approved → paid）。"""
-    e = get_obj(ExpenseReport, pk, request.user)
+    e = get_obj(ExpenseReport, pk, request.user, write=True)
     if e.status != "approved":
         raise ValueError("仅审批通过的报销单可打款")
     e.status = "paid"
@@ -393,7 +393,7 @@ def travel_detail(request, pk):
 @endpoint()
 def travel_approve(request, pk):
     """审批差旅（通过/驳回）。"""
-    t = get_obj(TravelApply, pk, request.user)
+    t = get_obj(TravelApply, pk, request.user, write=True)
     action = opt_str(request, "action", "approve")
     if t.status != "pending":
         raise ValueError("该申请已处理")
@@ -406,7 +406,7 @@ def travel_approve(request, pk):
 @endpoint()
 def travel_cancel(request, pk):
     """取消自己的差旅申请。"""
-    t = get_obj(TravelApply, pk, request.user)
+    t = get_obj(TravelApply, pk, request.user, write=True)
     if t.owner_id != request.user.id:
         raise ValueError("只能取消自己的申请")
     if t.status not in ("pending", "approved"):
@@ -488,7 +488,7 @@ def contract_detail(request, pk):
 @endpoint()
 def contract_update_status(request, pk):
     """更新合同状态（active/fulfilled/terminated/expired）。"""
-    c = get_obj(Contract, pk, request.user)
+    c = get_obj(Contract, pk, request.user, write=True)
     status = req_str(request, "status")
     if status not in ("active", "fulfilled", "terminated", "expired"):
         raise ValueError("status 支持 active/fulfilled/terminated/expired")
@@ -532,7 +532,7 @@ def contract_stats(request):
 @endpoint()
 def contract_payments(request, pk):
     """回款计划维护（整体替换或追加）。"""
-    c = get_obj(Contract, pk, request.user)
+    c = get_obj(Contract, pk, request.user, write=True)
     mode = opt_str(request, "mode", "append")
     incoming = p(request, "payments")
     if not isinstance(incoming, list):
@@ -550,7 +550,7 @@ def contract_payments(request, pk):
 @endpoint()
 def contract_delete(request, pk):
     """删除合同（仅所有者）。"""
-    c = get_obj(Contract, pk, request.user)
+    c = get_obj(Contract, pk, request.user, write=True)
     if c.owner_id != request.user.id:
         raise ValueError("仅合同创建人可删除")
     cid, title = c.id, c.title

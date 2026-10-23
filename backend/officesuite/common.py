@@ -9,14 +9,59 @@ from core.scoping import can_write, is_visible
 
 from devtools.common import fail, ok
 
-# 按模型的写策略（模型名 -> callable(user, obj) -> bool）。
-# 默认 owner-only；审批/报销/合同这类「审批人也要写」的对象在此登记，
-# 避免一刀切把合法业务流程干废。后续新增协作对象在这里扩展即可。
-WRITE_POLICIES = {}
+
+def _is_admin(user) -> bool:
+    """管理员通行：超管或 staff（数据范围再宽也不是写权限，见 scoping.py 注释）。"""
+    return bool(getattr(user, "is_superuser", False) or getattr(user, "is_staff", False))
+
+
+def _name_hit(user, name) -> bool:
+    """展示名匹配：审批人/处理人字段存的是展示名，兼容 username/display_name。"""
+    if not name:
+        return False
+    uid = getattr(user, "id", None)
+    names = {getattr(user, "username", ""), getattr(user, "display_name", "")}
+    names.discard("")
+    return name in names
+
+
+def _approver_policy(user, obj) -> bool:
+    """审批流：owner + data.approver 指名 + 管理员。状态维度（pending 才可流转）
+    由各视图自己校验，这里只做身份维度。"""
+    if _is_admin(user):
+        return True
+    if obj.owner_id == getattr(user, "id", None):
+        return True
+    return _name_hit(user, (obj.data or {}).get("approver", ""))
+
+
+def _assignee_policy(user, obj) -> bool:
+    """工单：owner + 被指派人（assignee_name 展示名）+ 管理员。"""
+    if _is_admin(user):
+        return True
+    if obj.owner_id == getattr(user, "id", None):
+        return True
+    return _name_hit(user, getattr(obj, "assignee_name", ""))
+
+
+# S2-B1：按模型细化写策略（模型名 -> callable(user, obj) -> bool）。
+# 未登记的模型仍走 core.scoping.can_write（owner-only，管理员在
+# can_write_obj 里统一放行），行为与 S1 的严格写权限一致；
+# 审批/工单这类「审批人、被指派人也要写」的对象在此登记。
+WRITE_POLICIES = {
+    "ApprovalRequest": _approver_policy,
+    "SealApply": _approver_policy,
+    "ExpenseReport": _approver_policy,
+    "TravelApply": _approver_policy,
+    "Contract": _approver_policy,
+    "HelpTicket": _assignee_policy,
+}
 
 
 def can_write_obj(user, obj):
-    """对象级写权限：优先查 WRITE_POLICIES，未登记则按 owner 判定。"""
+    """对象级写权限：管理员通行 → WRITE_POLICIES 定制 → owner 判定。"""
+    if _is_admin(user):
+        return True
     policy = WRITE_POLICIES.get(obj.__class__.__name__)
     if policy is not None:
         return bool(policy(user, obj))

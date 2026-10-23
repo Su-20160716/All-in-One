@@ -48,7 +48,7 @@ def duty_schedule_list(request):
 @endpoint()
 def duty_schedule_delete(request, pk):
     """删除排班表（连带班次）。"""
-    s = get_obj(DutySchedule, pk, request.user)
+    s = get_obj(DutySchedule, pk, request.user, write=True)
     s.delete()
     return ok({"deleted": pk})
 
@@ -93,7 +93,7 @@ def duty_shift_list(request):
 @endpoint()
 def duty_shift_swap(request, pk):
     """换班：把自己的班让给他人。"""
-    sh = get_obj(DutyShift, pk, request.user)
+    sh = get_obj(DutyShift, pk, request.user, write=True)
     if sh.swapped_to:
         raise ValueError("该班次已换出")
     to = req_str(request, "swap_to")[:60]
@@ -107,7 +107,7 @@ def duty_shift_swap(request, pk):
 @endpoint()
 def duty_shift_delete(request, pk):
     """删除班次。"""
-    sh = get_obj(DutyShift, pk, request.user)
+    sh = get_obj(DutyShift, pk, request.user, write=True)
     sh.delete()
     return ok({"deleted": pk})
 
@@ -177,7 +177,7 @@ def _get_swap_request(pk, user):
 @endpoint()
 def duty_swap_request_create(request):
     """发起换班申请：把我的某个班次让给 to_name，等对方确认后才生效。"""
-    sh = get_obj(DutyShift, int(req_num(request, "shift_id", minimum=1)), request.user)
+    sh = get_obj(DutyShift, int(req_num(request, "shift_id", minimum=1)), request.user, write=True)
     if sh.swapped_to:
         raise ValueError("该班次已换出")
     if sh.member_name != request.user.username and not request.user.is_superuser:
@@ -308,7 +308,7 @@ def timesheet_list(request):
 @endpoint()
 def timesheet_update(request, pk):
     """修改自己的工时（仅 submitted 状态）。"""
-    t = get_obj(TimesheetEntry, pk, request.user)
+    t = get_obj(TimesheetEntry, pk, request.user, write=True)
     if t.owner_id != request.user.id:
         raise ValueError("只能修改自己的工时")
     if t.status != "submitted":
@@ -328,7 +328,7 @@ def timesheet_update(request, pk):
 @endpoint()
 def timesheet_delete(request, pk):
     """删除自己的工时记录。"""
-    t = get_obj(TimesheetEntry, pk, request.user)
+    t = get_obj(TimesheetEntry, pk, request.user, write=True)
     if t.owner_id != request.user.id:
         raise ValueError("只能删除自己的工时")
     t.delete()
@@ -338,7 +338,7 @@ def timesheet_delete(request, pk):
 @endpoint()
 def timesheet_approve(request, pk):
     """主管确认工时（数据范围可见即可确认）。"""
-    t = get_obj(TimesheetEntry, pk, request.user)
+    t = get_obj(TimesheetEntry, pk, request.user, write=True)
     if t.status != "submitted":
         raise ValueError("该记录不在待确认状态")
     action = req_str(request, "action")
@@ -462,7 +462,7 @@ def training_detail(request, pk):
 @endpoint()
 def training_update(request, pk):
     """编辑培训信息。"""
-    s = get_obj(TrainingSession, pk, request.user)
+    s = get_obj(TrainingSession, pk, request.user, write=True)
     if p(request, "topic") is not None:
         s.topic = req_str(request, "topic")[:200]
     if p(request, "trainer") is not None:
@@ -478,7 +478,7 @@ def training_update(request, pk):
 @endpoint()
 def training_delete(request, pk):
     """删除培训（连带报名）。"""
-    s = get_obj(TrainingSession, pk, request.user)
+    s = get_obj(TrainingSession, pk, request.user, write=True)
     s.delete()
     return ok({"deleted": pk})
 
@@ -584,7 +584,7 @@ def recognition_like(request, pk):
 @endpoint()
 def recognition_delete(request, pk):
     """删除表彰（发布者或超管）。"""
-    r = get_obj(RecognitionRecord, pk, request.user)
+    r = get_obj(RecognitionRecord, pk, request.user, write=True)
     if r.owner_id != request.user.id and not request.user.is_superuser:
         raise ValueError("仅发布者可删除")
     r.delete()
@@ -673,7 +673,7 @@ def standup_today(request):
 @endpoint()
 def standup_update(request, pk):
     """更新自己的站会内容。"""
-    s = get_obj(StandupEntry, pk, request.user)
+    s = get_obj(StandupEntry, pk, request.user, write=True)
     if s.owner_id != request.user.id:
         raise ValueError("只能更新自己的站会")
     if p(request, "yesterday") is not None:
@@ -689,7 +689,7 @@ def standup_update(request, pk):
 @endpoint()
 def standup_delete(request, pk):
     """删除站会记录（本人或超管）。"""
-    s = get_obj(StandupEntry, pk, request.user)
+    s = get_obj(StandupEntry, pk, request.user, write=True)
     if s.owner_id != request.user.id and not request.user.is_superuser:
         raise ValueError("仅本人可删除")
     s.delete()
@@ -779,7 +779,7 @@ def okr_objective_detail(request, pk):
 @endpoint()
 def okr_objective_update(request, pk):
     """编辑目标标题/周期/描述。"""
-    o = get_obj(Objective, pk, request.user)
+    o = get_obj(Objective, pk, request.user, write=True)
     if p(request, "title") is not None:
         o.title = req_str(request, "title")[:200]
     if p(request, "period") is not None:
@@ -793,7 +793,7 @@ def okr_objective_update(request, pk):
 @endpoint()
 def okr_objective_delete(request, pk):
     """删除目标（连带 KR）。"""
-    o = get_obj(Objective, pk, request.user)
+    o = get_obj(Objective, pk, request.user, write=True)
     o.delete()
     return ok({"deleted": pk})
 
@@ -925,7 +925,7 @@ def decision_detail(request, pk):
 @endpoint()
 def decision_update(request, pk):
     """更新议题背景与候选方案（未定论前）。"""
-    d = get_obj(DecisionRecord, pk, request.user)
+    d = get_obj(DecisionRecord, pk, request.user, write=True)
     if d.status == "decided":
         raise ValueError("已定论的决策不可修改背景")
     if p(request, "context") is not None:
@@ -941,7 +941,7 @@ def decision_update(request, pk):
 @endpoint()
 def decision_decide(request, pk):
     """定论：从候选中选择并记录理由。"""
-    d = get_obj(DecisionRecord, pk, request.user)
+    d = get_obj(DecisionRecord, pk, request.user, write=True)
     if d.status != "open":
         raise ValueError("该决策已定论或关闭")
     choice = req_str(request, "choice")[:200]
@@ -957,7 +957,7 @@ def decision_decide(request, pk):
 @endpoint()
 def decision_delete(request, pk):
     """删除决策记录。"""
-    d = get_obj(DecisionRecord, pk, request.user)
+    d = get_obj(DecisionRecord, pk, request.user, write=True)
     d.delete()
     return ok({"deleted": pk})
 
@@ -1024,7 +1024,7 @@ def todo_list(request):
 @endpoint()
 def todo_update(request, pk):
     """编辑待办。"""
-    t = get_obj(TodoItem, pk, request.user)
+    t = get_obj(TodoItem, pk, request.user, write=True)
     if p(request, "title") is not None:
         t.title = req_str(request, "title")[:200]
     if p(request, "priority") is not None:
@@ -1067,7 +1067,7 @@ def todo_reopen(request, pk):
 @endpoint()
 def todo_delete(request, pk):
     """删除待办。"""
-    t = get_obj(TodoItem, pk, request.user)
+    t = get_obj(TodoItem, pk, request.user, write=True)
     t.delete()
     return ok({"deleted": pk})
 

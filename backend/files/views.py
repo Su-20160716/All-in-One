@@ -17,6 +17,7 @@ import zipfile
 from datetime import timedelta
 
 from django.conf import settings
+from django.contrib.auth.hashers import make_password
 from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.http import FileResponse, HttpResponse, StreamingHttpResponse
@@ -189,6 +190,22 @@ def _visibility_state(fm):
             "url": f"/share/{l.token}",
         } for l in shares[:20]],
     }
+
+
+def _push_file_event(user_id, action, **data):
+    """S2-B1：文件变动 WS 广播（on_commit 延后到事务提交后，回滚不广播）。
+
+    广播失败只记日志不影响主流程——WS 是增值通道，不是正确性依赖。
+    前端 app store 订阅 file_event 后可在其它标签页同步文件列表。
+    """
+    def _emit():
+        try:
+            from ws_app.events import notify_file_event
+            notify_file_event(user_id, action, data)
+        except Exception:
+            logger.exception("S2-B1：文件事件广播失败 action=%s", action)
+
+    transaction.on_commit(_emit)
 
 
 def _record_visibility(fm, user, note="", action=""):
@@ -604,6 +621,8 @@ class UploadCompleteView(APIView):
         transaction.on_commit(
             lambda: shutil.rmtree(_safe_join(MEDIA, chunk.temp_dir), ignore_errors=True)
         )
+        # S2-B1：上传完成广播（多标签页/多端同步文件列表）
+        _push_file_event(request.user.id, "uploaded", file_id=fm.id, name=fm.name)
         payload = {"message": "上传完成", "file": FileMetaSerializer(fm).data}
         # F557 重名自动改名：把最终名称回传给前端提示
         if fm.name != chunk.filename:
@@ -667,6 +686,8 @@ class FileDetailView(APIView):
         if fields:
             fields.append("updated_at")
             fm.save(update_fields=fields)
+        # S2-B1：重命名/移动/星标变更广播
+        _push_file_event(request.user.id, "updated", file_id=fm.id, name=fm.name)
         return Response(FileMetaSerializer(fm).data)
 
     def delete(self, request, pk):
@@ -677,6 +698,8 @@ class FileDetailView(APIView):
         fm.deleted_at = timezone.now()
         fm.origin_folder_id = fm.folder_id
         fm.save(update_fields=["is_deleted", "deleted_at", "origin_folder_id"])
+        # S2-B1：删除广播（移入回收站）
+        _push_file_event(request.user.id, "deleted", file_id=fm.id)
         return Response({"message": "已移入回收站"})
 
 
@@ -1336,7 +1359,9 @@ class ShareLinkCreateView(APIView):
             created_by=request.user,
             permission=permission,
             expire_at=expire_at,
-            password=password[:64],
+            # S2-B1：密码 hash 存储（make_password 自带盐值，同密码不同链接
+            # 哈希也不同，撞库无法横向比对）；留空表示无密码
+            password=make_password(password[:64]) if password else "",
             max_downloads=mlimit,
         )
         if link.file:
@@ -1378,7 +1403,9 @@ class ShareLinkDetailView(APIView):
                 return Response({"message": "权限值非法"}, status=400)
             link.permission = request.data["permission"]
         if "password" in request.data:
-            link.password = request.data["password"] or ""
+            # S2-B1：密码 hash 存储；留空/显式空串 = 清除密码
+            pw = request.data["password"] or ""
+            link.password = make_password(pw[:64]) if pw else ""
         if "max_downloads" in request.data:
             v = request.data["max_downloads"]
             try:

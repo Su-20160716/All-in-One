@@ -15,6 +15,7 @@ download/edit 分享链接」，既不校验请求带来的 token，也不校验
 4. 下载场景还要看权限与次数上限
 5. 计数用 F() 原子自增，并发下不会突破 max_downloads
 """
+from django.contrib.auth.hashers import check_password
 from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework.response import Response
@@ -61,7 +62,7 @@ def validate_link(link, password="", for_download=False):
         raise ShareAccessError("链接不存在或已失效", status=404)
     if link.expire_at and link.expire_at < timezone.now():
         raise ShareAccessError("链接已过期", status=410)
-    if link.password and str(password or "") != link.password:
+    if link.password and not check_password(str(password or ""), link.password):
         # 401 + need_password 让前端弹密码框
         raise ShareAccessError("请输入访问密码", status=401, extra={"need_password": True})
     if for_download:

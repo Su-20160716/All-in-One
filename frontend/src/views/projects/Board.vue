@@ -242,7 +242,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { projectApi, authApi } from '../../api'
 import { shareUrl as buildShareUrl } from '../../api/base'
@@ -333,7 +333,13 @@ function matchCards(b) {
   })
 }
 
+// S2-B1：看板实时事件去抖时间戳——本地写操作都会走 load()，
+// 距上次 load 1.5s 内的 WS 回弹视为「自己刚操作过」直接忽略，
+// 避免本地操作→后端广播→前端再刷新的回环。
+let lastLocalBoardWrite = 0
+
 async function load() {
+  lastLocalBoardWrite = Date.now()
   try {
     const r = await projectApi.board(projectId)
     project.value = r.project
@@ -568,5 +574,16 @@ async function revokeShare() {
     app.toastMsg('已撤销', 'success')
   } catch (e) { app.toastMsg(e?.message || '撤销分享失败', 'error') }
 }
-onMounted(load)
+// S2-B1：订阅看板实时事件（项目成员多端同步卡片创建/更新/删除/批量）
+let offBoardEvent = null
+onMounted(() => {
+  load()
+  offBoardEvent = app.onBoardEvent((type, data) => {
+    // 本地操作已各自刷新，这里只处理「非本人触发」的远端事件；
+    // 事件 data 不带操作者信息，用「距上次本地刷新 <1.5s 则跳过」避免
+    // 自己操作引发的回弹刷新（F5 已修 reverse，这里沿用同一保守策略）
+    if (Date.now() - lastLocalBoardWrite > 1500) load()
+  })
+})
+onBeforeUnmount(() => offBoardEvent?.())
 </script>

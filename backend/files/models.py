@@ -65,6 +65,13 @@ class FileMeta(models.Model):
         verbose_name = "文件元数据"
         verbose_name_plural = "文件元数据"
         ordering = ["-created_at"]
+        # S2-B1：文件列表恒为 owner + is_deleted=False 过滤 + created_at 倒序
+        # （FileListView / 回收站 / 全局搜索三处同模式）。单例用户场景收益有限，
+        # 标注待实测：数据量过万后用 EXPLAIN QUERY PLAN 验证命中后再决定去留。
+        indexes = [
+            models.Index(fields=["owner", "is_deleted", "-created_at"],
+                         name="files_owner_del_created_idx"),
+        ]
 
     def __str__(self):
         return self.name
@@ -168,7 +175,10 @@ class ShareLink(models.Model):
     folder = models.ForeignKey(Folder, on_delete=models.CASCADE, null=True, blank=True, related_name="share_links", verbose_name="文件夹")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="share_links", verbose_name="创建者")
     permission = models.CharField(max_length=16, choices=PERMISSION_CHOICES, default="view", verbose_name="权限")
-    password = models.CharField(max_length=64, blank=True, verbose_name="访问密码(明文仅演示)")
+    # S2-B1：访问密码改为 Django password hash 存储（原为明文）。
+    # max_length 128 容纳 PBKDF2 格式（pbkdf2_sha256$600000$<salt>$<hash> ≈ 78 字符）；
+    # 存量明文由数据迁移 files/migrations/00XX_hash_share_passwords 批量转换。
+    password = models.CharField(max_length=128, blank=True, verbose_name="访问密码(hash)")
     expire_at = models.DateTimeField(null=True, blank=True, verbose_name="过期时间")
     max_downloads = models.IntegerField(null=True, blank=True, verbose_name="下载次数上限")
     download_count = models.IntegerField(default=0, verbose_name="下载次数")

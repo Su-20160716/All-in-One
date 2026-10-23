@@ -77,6 +77,13 @@ class TaskCard(models.Model):
         verbose_name = "任务卡片"
         verbose_name_plural = "任务卡片"
         ordering = ["sort_order", "id"]
+        # S2-B1：看板视图按 board 批量取卡片并按 sort_order 排序
+        # （BoardListView 每列一查、拖拽换序按 board 过滤）。owner 维度被
+        # board__project 间接覆盖，不单独入索引。标注待实测。
+        indexes = [
+            models.Index(fields=["board", "sort_order"],
+                         name="taskcard_board_sort_idx"),
+        ]
 
     def __str__(self):
         return self.title

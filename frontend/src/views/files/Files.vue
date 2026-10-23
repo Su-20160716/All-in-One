@@ -766,6 +766,8 @@ async function openPreview(f) {
 
 // F2：objectURL 生命周期管理——切换/关闭/卸载都必须释放
 let mediaRevoke = null
+// S2-B1：文件实时事件退订函数（onFileEvent 返回的 cleanup）
+let offFileEvent = null
 function releaseMedia() {
   if (mediaRevoke) {
     mediaRevoke()
@@ -1063,6 +1065,15 @@ onMounted(() => {
   loadZoom()
   loadFolders(); loadFiles(); loadFileTags(); loadFolderTemplates()
   window.addEventListener('keydown', onKeydown)
+  // S2-B1：订阅文件实时事件（多标签页/多端同步）——上传/删除/更新后静默刷新
+  offFileEvent = app.onFileEvent((type, data) => {
+    if (data?.action === 'uploaded' || data?.action === 'deleted' || data?.action === 'updated') {
+      loadFiles()
+    }
+  })
 })
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  offFileEvent?.()
+})
 </script>

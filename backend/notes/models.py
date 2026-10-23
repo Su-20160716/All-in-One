@@ -58,6 +58,13 @@ class Note(models.Model):
         verbose_name = "笔记"
         verbose_name_plural = "笔记"
         ordering = ["-is_pinned", "-updated_at"]
+        # S2-B1：笔记列表恒为 owner + is_deleted=False 过滤 + updated_at 倒序
+        # （NoteListView / 回收站 / 搜索三处同模式；is_pinned 在前但为布尔低基数，
+        # 不进索引，由排序阶段处理）。标注待实测，理由同 FileMeta 索引注释。
+        indexes = [
+            models.Index(fields=["owner", "is_deleted", "-updated_at"],
+                         name="notes_owner_del_updated_idx"),
+        ]
 
     def __str__(self):
         return self.title
