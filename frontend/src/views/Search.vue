@@ -170,6 +170,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { searchApi } from '../api'
 import { useAppStore } from '../stores/app'
+import { describeDownloadError, downloadWithAuth } from '../utils/download'
 
 const app = useAppStore()
 const router = useRouter()
@@ -380,9 +381,13 @@ async function clearHist() {
   try { await searchApi.clearHistory() } catch (e) {}
   history.value = []
 }
-function exportCsv() {
-  const url = searchApi.exportUrl(q.value.trim())
-  window.open(url, '_blank')
+// F2：导出接口要 JWT，window.open 裸 URL 会 401，改带鉴权下载
+async function exportCsv() {
+  try {
+    await downloadWithAuth(searchApi.exportUrl(q.value.trim()), `搜索结果-${q.value.trim()}.csv`)
+  } catch (e) {
+    app.toastMsg(await describeDownloadError(e), 'error')
+  }
 }
 
 onMounted(() => { loadStats(); loadHistory(); loadHot() })

@@ -23,7 +23,7 @@
       <input v-model="filters.ip" class="input w-32" placeholder="IP" @keyup.enter="load" />
       <button class="btn-primary" @click="load">查询</button>
       <button class="btn-outline" @click="reset">重置</button>
-      <a class="btn-outline ml-auto" :href="exportUrl">⬇ 导出 CSV</a>
+      <button class="btn-outline ml-auto" @click="exportCsv">⬇ 导出 CSV</button>
     </div>
 
     <div class="grid grid-cols-4 gap-3" v-if="logStats.total != null">
@@ -59,18 +59,26 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { coreApi } from '../../api'
 import { formatTime } from '../../utils/format'
+import { describeDownloadError, downloadWithAuth } from '../../utils/download'
+import { useAppStore } from '../../stores/app'
 
+const app = useAppStore()
 const logs = ref([])
 const filters = reactive({ username: '', module: '', action: '', ip: '', start: '', end: '', target: '', result: '' })
 const logStats = ref({})
 const modules = ['accounts', 'files', 'notes', 'projects', 'im', 'tools', 'dashboard', 'core']
 const actions = ['create', 'update', 'delete', 'read', 'login', 'logout', 'upload', 'download', 'share', 'move', 'restore', 'other']
 const topModules = computed(() => (logStats.value.by_module || []).slice(0, 3))
-const exportUrl = computed(() => {
+// F2：导出接口要 JWT，裸 href 会 401，改走带鉴权下载
+async function exportCsv() {
   const p = new URLSearchParams()
   Object.entries(filters).forEach(([k, v]) => v && p.set(k, v))
-  return `/api/core/logs/export/?${p.toString()}`
-})
+  try {
+    await downloadWithAuth(`/core/logs/export/?${p.toString()}`, '操作日志.csv')
+  } catch (e) {
+    app.toastMsg(await describeDownloadError(e), 'error')
+  }
+}
 function actionClass(a) {
   return { create: 'bg-emerald-50 text-emerald-600', delete: 'bg-rose-50 text-rose-600', update: 'bg-sky-50 text-sky-600' }[a] || ''
 }

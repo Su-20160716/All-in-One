@@ -119,7 +119,7 @@
               <button v-if="f.previewable" class="btn-ghost px-2 text-[12px]" @click="openPreview(f)">
                 {{ f.kind === 'text' ? '预览' : '查看' }}
               </button>
-              <a :href="fileApi.downloadUrl(f.id)" class="btn-ghost px-2 text-[12px]">下载</a>
+              <button class="btn-ghost px-2 text-[12px]" @click="downloadOne(f)">下载</button>
               <button class="btn-ghost px-2 text-[12px]" @click="openShare(f)">分享</button>
               <button class="btn-ghost px-2 text-[12px]" @click="openVisibility(f)">可见性</button>
               <button class="btn-ghost px-2 text-[12px]" @click="editDesc(f)">备注</button>
@@ -248,28 +248,30 @@
                     :disabled="converting" @click="convertToPdf">
               {{ converting ? '转换中…' : '转换为 PDF 预览' }}
             </button>
-            <a :href="fileApi.downloadUrl(previewing.id)" class="btn-ghost px-2 text-[12px]">下载</a>
+            <button class="btn-ghost px-2 text-[12px]" @click="downloadOne(previewing)">下载</button>
           </div>
         </div>
 
+        <!-- F2：媒体源走带 JWT 的 objectURL（裸 URL 不带令牌会 401） -->
         <div v-if="previewing.preview_type === 'image'" class="flex justify-center overflow-auto">
-          <img :src="fileApi.rawUrl(previewing.id)" class="max-h-[55vh] rounded-control object-contain transition-transform"
+          <img v-if="mediaUrl" :src="mediaUrl" class="max-h-[55vh] rounded-control object-contain transition-transform"
                :style="{ transform: 'scale(' + zoom / 100 + ')' }" />
+          <div v-else class="py-10 text-[12px] text-ink-400">媒体加载中…</div>
         </div>
 
         <video v-else-if="previewing.preview_type === 'video'" controls preload="metadata"
                class="max-h-[55vh] w-full rounded-control bg-black">
-          <source :src="fileApi.rawUrl(previewing.id)" />
+          <source v-if="mediaUrl" :src="mediaUrl" />
           您的浏览器不支持视频播放，请下载后观看。
         </video>
 
         <audio v-else-if="previewing.preview_type === 'audio'" controls
                class="w-full rounded-control">
-          <source :src="fileApi.rawUrl(previewing.id)" />
+          <source v-if="mediaUrl" :src="mediaUrl" />
         </audio>
 
         <iframe v-else-if="previewing.preview_type === 'pdf' || previewState.preview_url"
-                :src="previewState.preview_url || fileApi.pdfUrl(previewing.id)"
+                :src="previewState.preview_url || mediaUrl"
                 class="h-[55vh] w-full rounded-control border border-ink-100"></iframe>
 
         <pre v-else-if="previewing.preview_type === 'text'"
@@ -394,8 +396,10 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { fileApi } from '../../api'
 import request from '../../api/request'
 import { filesx } from '../../api/filesx'
+import { shareUrl as buildShareUrl } from '../../api/base'
 import { useAppStore } from '../../stores/app'
 import { formatTime, fileIcon, fileTypeMeta } from '../../utils/format'
+import { describeDownloadError, downloadWithAuth, loadMediaObjectUrl, saveBlob } from '../../utils/download'
 import Modal from '../../components/Modal.vue'
 
 const app = useAppStore()
@@ -450,6 +454,8 @@ const shareResult = ref(null)
 const previewing = ref(null)
 const previewState = ref({})
 const previewContent = ref('')
+// F2：媒体预览的 objectURL（带 JWT 拉取后本地引用）
+const mediaUrl = ref('')
 const converting = ref(false)
 const officeHint = ref('')
 const exifInfo = ref(null)
@@ -667,13 +673,8 @@ async function confirmMove() {
 async function batchDownload() {
   try {
     const blob = await fileApi.batchDownload([...selected.value])
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = '打包下载.zip'
-    a.click()
-    URL.revokeObjectURL(url)
-  } catch (e) { app.toastMsg(e.message, 'error') }
+    saveBlob(blob, '打包下载.zip')
+  } catch (e) { app.toastMsg(await describeDownloadError(e), 'error') }
 }
 function closeText() { showText.value = false; editingText.value = null; textName.value = ''; textContent.value = '' }
 
@@ -734,10 +735,23 @@ async function parseExif(rawUrl) {
 }
 
 async function openPreview(f) {
+  releaseMedia()
   previewing.value = f
-  previewState.value = { preview_url: f.preview_type === 'pdf' ? fileApi.pdfUrl(f.id) : '' }
+  previewState.value = { preview_url: '' }
   previewContent.value = ''
   exifInfo.value = null
+  // F2：图片/视频/音频/PDF 的直链都要 JWT，改走 blob objectURL
+  if (['image', 'video', 'audio', 'pdf'].includes(f.preview_type)) {
+    try {
+      const m = await loadMediaObjectUrl(
+        f.preview_type === 'pdf' ? fileApi.pdfUrl(f.id) : fileApi.rawUrl(f.id),
+      )
+      mediaUrl.value = m.url
+      mediaRevoke = m.revoke
+    } catch (e) {
+      app.toastMsg(await describeDownloadError(e), 'error')
+    }
+  }
   if (f.preview_type === 'text') {
     const r = await fileApi.preview(f.id)
     previewContent.value = r.content || ''
@@ -746,15 +760,37 @@ async function openPreview(f) {
     previewState.value = r
     if (!r.office_available) officeHint.value = r.office_hint || ''
   } else if (f.preview_type === 'image') {
-    parseExif(fileApi.rawUrl(f.id))
+    parseExif(mediaUrl.value)
   }
 }
 
+// F2：objectURL 生命周期管理——切换/关闭/卸载都必须释放
+let mediaRevoke = null
+function releaseMedia() {
+  if (mediaRevoke) {
+    mediaRevoke()
+    mediaRevoke = null
+  }
+  mediaUrl.value = ''
+}
+onBeforeUnmount(releaseMedia)
+
 function closePreview() {
+  releaseMedia()
   previewing.value = null
   previewState.value = {}
   previewContent.value = ''
   exifInfo.value = null
+}
+
+// F2：带 JWT 下载（裸 <a href> 不带令牌会 401）
+async function downloadOne(f) {
+  if (!f) return
+  try {
+    await downloadWithAuth(fileApi.downloadUrl(f.id), f.name)
+  } catch (e) {
+    app.toastMsg(await describeDownloadError(e), 'error')
+  }
 }
 
 async function convertToPdf() {
@@ -801,7 +837,9 @@ async function createShare() {
   navigator.clipboard?.writeText(shareUrl())
   app.toastMsg('链接已复制', 'success')
 }
-const shareUrl = () => shareResult.value ? `${location.origin}/share/${shareResult.value.token}` : ''
+// F4：对外链接统一走 base.js 的 shareUrl()（VITE_PUBLIC_BASE + /share/:token），
+// 不再本地拼 location.origin，部署到 CF Pages 时也能给出正确地址
+const shareUrl = () => shareResult.value ? buildShareUrl(shareResult.value.token) : ''
 function pickFiles() { fileInput.value?.click() }
 async function onFilePicked(e) {
   const list = Array.from(e.target.files || [])
@@ -860,15 +898,9 @@ async function exportCsv() {
     if (kindFilter.value) params.kind = kindFilter.value
     if (activeFileTag.value) params.tag = activeFileTag.value
     if (quickFilter.value === 'starred') params.star = 1
-    const blob = await request.get(filesx.exportCsvUrl(params), { responseType: 'blob' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = '文件清单.csv'
-    a.click()
-    URL.revokeObjectURL(url)
+    await downloadWithAuth(filesx.exportCsvUrl(params), '文件清单.csv')
     app.toastMsg('已导出 CSV', 'success')
-  } catch (e) { app.toastMsg(e.message || '导出失败', 'error') }
+  } catch (e) { app.toastMsg(await describeDownloadError(e), 'error') }
 }
 
 // F553 图片分辨率批量徽章（后端计算并缓存，失败静默降级）
@@ -994,14 +1026,9 @@ async function openTagStats() {
 async function exportFavJson() {
   try {
     const blob = await filesx.favoritesExport()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = '收藏与标签.json'
-    a.click()
-    URL.revokeObjectURL(url)
+    saveBlob(blob, '收藏与标签.json')
     app.toastMsg('已导出收藏与标签 JSON', 'success')
-  } catch (e) { app.toastMsg(e.message || '导出失败', 'error') }
+  } catch (e) { app.toastMsg(await describeDownloadError(e), 'error') }
 }
 function pickFavJson() { favInput.value?.click() }
 async function onFavPicked(e) {

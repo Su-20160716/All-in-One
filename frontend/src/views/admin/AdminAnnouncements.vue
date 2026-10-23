@@ -37,8 +37,8 @@
             <td class="td">{{ fmt(a.created_at) }}</td>
             <td class="td whitespace-nowrap">
               <button class="btn-ghost px-2 text-[12px]" @click="togglePin(a)">{{ a.is_pinned ? '取消置顶' : '置顶' }}</button>
-              <!-- #73 导出已读名单 -->
-              <a class="btn-ghost px-2 text-[12px] text-brand-600" :href="readersExportUrl(a.id)">导出已读</a>
+              <!-- #73 导出已读名单（F2：接口要 JWT，改带鉴权下载） -->
+              <button class="btn-ghost px-2 text-[12px] text-brand-600" @click="exportReaders(a)">导出已读</button>
               <button class="btn-danger px-2 text-[12px]" @click="remove(a)">删除</button>
             </td>
           </tr>
@@ -52,6 +52,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { coreApi } from '../../api'
 import { formatTime } from '../../utils/format'
+import { describeDownloadError, downloadWithAuth } from '../../utils/download'
 import { useAppStore } from '../../stores/app'
 
 const app = useAppStore()
@@ -59,7 +60,14 @@ const list = ref([])
 const form = reactive({ title: '', content: '', level: 'info', is_pinned: false, is_published: true, scheduled_at: '', expires_at: '' })
 const fmt = formatTime
 const levelName = (l) => ({ info: '普通', important: '重要', urgent: '紧急' }[l])
-const readersExportUrl = (id) => `/api/core/admin/announcements/${id}/readers/export/`
+// F2：已读名单导出走带 JWT 的 blob 下载
+async function exportReaders(a) {
+  try {
+    await downloadWithAuth(`/core/admin/announcements/${a.id}/readers/export/`, `已读名单-${a.title}.csv`)
+  } catch (e) {
+    app.toastMsg(await describeDownloadError(e), 'error')
+  }
+}
 function statusName(s) {
   return { draft: '草稿', scheduled: '定时', published: '已发布', expired: '已过期' }[s] || s
 }

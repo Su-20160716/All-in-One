@@ -753,6 +753,7 @@ import { aiApi, noteApi } from '../../api'
 import { notex } from '../../api/notex'
 import { useAppStore } from '../../stores/app'
 import { formatTime } from '../../utils/format'
+import { describeDownloadError, saveBlob } from '../../utils/download'
 import { NoteCollab } from '../../utils/collab'
 import Modal from '../../components/Modal.vue'
 
@@ -1186,11 +1187,8 @@ async function exportSelected() {
   if (!exportIds.value.size) { app.toastMsg('请先勾选要导出的笔记（编辑器标题前的复选框）', 'error'); return }
   try {
     const blob = await noteApi.exportSelected({ note_ids: [...exportIds.value], format: 'zip' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url; a.download = 'notes_selected.zip'; a.click()
-    URL.revokeObjectURL(url)
-  } catch (e) { app.toastMsg(e.message || '导出失败', 'error') }
+    saveBlob(blob, 'notes_selected.zip')
+  } catch (e) { app.toastMsg(await describeDownloadError(e), 'error') }
 }
 
 // ================= F565–F582 笔记知识库新增能力 =================
