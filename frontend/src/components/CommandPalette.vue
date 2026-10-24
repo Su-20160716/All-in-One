@@ -40,10 +40,9 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-const emit = defineEmits(['new-note', 'upload-file'])
 const router = useRouter()
 const open = ref(false)
 const query = ref('')
@@ -54,8 +53,8 @@ const COMMANDS = [
   { key: 'search', icon: '🔍', label: '全局搜索', hint: '/search', action: () => router.push('/search') },
   { key: 'ai', icon: '🤖', label: '打开 AI 助手', hint: '/ai', action: () => router.push('/ai') },
   { key: 'notes', icon: '📝', label: '笔记知识库', hint: '/notes', action: () => router.push('/notes') },
-  { key: 'new-note', icon: '✨', label: '新建笔记', hint: '快捷动作', action: () => { emit('new-note'); router.push('/notes') } },
-  { key: 'upload', icon: '📤', label: '上传文件', hint: '快捷动作', action: () => { emit('upload-file'); router.push('/files') } },
+  { key: 'new-note', icon: '✨', label: '新建笔记', hint: '/notes', action: () => router.push('/notes') },
+  { key: 'upload', icon: '📤', label: '上传文件', hint: '/files', action: () => router.push('/files') },
   { key: 'files', icon: '📁', label: '文件管理', hint: '/files', action: () => router.push('/files') },
   { key: 'code', icon: '💻', label: '代码工坊', hint: '/code', action: () => router.push('/code') },
   { key: 'learning', icon: '📚', label: '学习中心', hint: '/learning', action: () => router.push('/learning') },
@@ -71,9 +70,14 @@ const filtered = computed(() => {
   if (!q) return COMMANDS
   return COMMANDS.filter(c => c.label.toLowerCase().includes(q) || c.hint.toLowerCase().includes(q))
 })
+// 搜索词变化后高亮复位，避免旧 pickedIdx 越界导致无高亮
+watch(query, () => { pickedIdx.value = 0 })
 
 function move(d) {
-  pickedIdx.value = (pickedIdx.value + d + filtered.value.length) % filtered.value.length
+  // F24：空结果时 (x + d + 0) % 0 = NaN，会让 pickedIdx 变 NaN，必须挡掉
+  const n = filtered.value.length
+  if (!n) return
+  pickedIdx.value = (pickedIdx.value + d + n) % n
 }
 function run(item) {
   if (!item) return

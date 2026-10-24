@@ -26,7 +26,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { useUserStore } from '../stores/user'
@@ -92,5 +92,36 @@ async function loadImUnread() {
   } catch (e) { /* ignore */ }
 }
 
-onMounted(loadImUnread)
+// F26：徽标此前只在挂载时拉一次，收到新消息也不变。改为 WS 聊天事件驱动 + 400ms 去抖
+// （消息洪水时不会把 unread-total 接口打爆）。
+let unreadTimer = null
+let offChat = null
+function scheduleUnreadRefresh() {
+  if (unreadTimer) return
+  unreadTimer = setTimeout(() => {
+    unreadTimer = null
+    loadImUnread()
+  }, 400)
+}
+
+onMounted(() => {
+  loadImUnread()
+  offChat = app.onChat(scheduleUnreadRefresh)
+})
+
+// 进出 /im 时未读数会变（读消息即清零），路由一变更补一次
+watch(
+  () => route.path,
+  (to, from) => {
+    if (String(to).startsWith('/im') || String(from || '').startsWith('/im')) scheduleUnreadRefresh()
+  }
+)
+
+onBeforeUnmount(() => {
+  if (offChat) offChat()
+  if (unreadTimer) {
+    clearTimeout(unreadTimer)
+    unreadTimer = null
+  }
+})
 </script>

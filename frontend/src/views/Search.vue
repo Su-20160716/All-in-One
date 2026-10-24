@@ -167,13 +167,14 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { searchApi } from '../api'
 import { useAppStore } from '../stores/app'
 import { describeDownloadError, downloadWithAuth } from '../utils/download'
 
 const app = useAppStore()
 const router = useRouter()
+const route = useRoute()
 const q = ref('')
 const module = ref('')
 const results = ref([])
@@ -362,6 +363,11 @@ async function reindex() {
 function openResult(r) {
   const route = { note: '/notes', file: '/files', project: '/projects', task: '/projects' }[r.module]
   if (!route) return
+  // F23：文件结果带关键词跳转（Files 页消费 ?q= 直接定位）；笔记无本地搜索框保持模块跳转
+  if (r.module === 'file') {
+    router.push(`/files?q=${encodeURIComponent(r.title)}`)
+    return
+  }
   if (r.module === 'note') app.toastMsg(`已定位到笔记模块：《${r.title}》`, 'success')
   router.push(route)
 }
@@ -390,5 +396,13 @@ async function exportCsv() {
   }
 }
 
-onMounted(() => { loadStats(); loadHistory(); loadHot() })
+onMounted(() => {
+  loadStats(); loadHistory(); loadHot()
+  // F23：从 Topbar 全局搜索带 ?q= 跳入时自动执行搜索（原来落空白页要手输）
+  const q0 = route.query.q
+  if (q0) {
+    q.value = String(q0)
+    doSearch()
+  }
+})
 </script>

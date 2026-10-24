@@ -393,6 +393,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { fileApi } from '../../api'
 import request from '../../api/request'
 import { filesx } from '../../api/filesx'
@@ -404,6 +405,7 @@ import { sha1File } from '../../utils/sha1'
 import Modal from '../../components/Modal.vue'
 
 const app = useAppStore()
+const route = useRoute()
 const folders = ref([])
 const files = ref([])
 const currentFolder = ref(null)
@@ -1072,7 +1074,15 @@ function onKeydown(e) {
 onMounted(() => {
   loadPrefs()
   loadZoom()
-  loadFolders(); loadFiles(); loadFileTags(); loadFolderTemplates()
+  loadFolders(); loadFileTags(); loadFolderTemplates()
+  // F23：从全局搜索带 ?q= 跳入时填充关键词并直接搜索（原来只落模块首页，不定位）
+  const q = route.query.q
+  if (q) {
+    keyword.value = String(q)
+    loadFiles()
+  } else {
+    loadFiles()
+  }
   window.addEventListener('keydown', onKeydown)
   // S2-B1：订阅文件实时事件（多标签页/多端同步）——上传/删除/更新后静默刷新
   offFileEvent = app.onFileEvent((type, data) => {

@@ -1971,7 +1971,7 @@ async function saveRunPreset() {
     localStorage.setItem('code-preset', String(res.id))
     app.toastMsg?.('预设已保存', 'success')
   } catch (e) {
-    app.toastMsg?.(e?.response?.data?.error || '保存预设失败', 'error')
+    app.toastMsg?.(e?.message || '保存预设失败', 'error')
   }
 }
 
@@ -2070,7 +2070,7 @@ async function toggleSnippetFav(s) {
     await loadSnippets()
     app.toastMsg?.(s.is_favorite ? '已收藏 ★' : '已取消收藏', 'success')
   } catch (e) {
-    app.toastMsg?.(e?.response?.data?.error || '操作失败', 'error')
+    app.toastMsg?.(e?.message || '操作失败', 'error')
   }
 }
 
@@ -2083,7 +2083,7 @@ async function moveSnippetToFolder(s) {
     await loadSnippets()
     app.toastMsg?.(folder ? `已归入「${folder}」` : '已移出分组', 'success')
   } catch (e) {
-    app.toastMsg?.(e?.response?.data?.error || '操作失败', 'error')
+    app.toastMsg?.(e?.message || '操作失败', 'error')
   }
 }
 
@@ -2208,7 +2208,7 @@ async function doCreateWs() {
     await loadWorkspace(res.id)
     app.toastMsg?.('工作区已创建')
   } catch (e) {
-    app.toastMsg?.(e?.response?.data?.error || e?.message || '创建失败')
+    app.toastMsg?.(e?.message || '创建失败')
   }
 }
 
@@ -2301,7 +2301,7 @@ async function doAiReview() {
     if (data.suggestions?.length) msgs.push('建议：' + data.suggestions.join('；'))
     window.alert('🤖 AI 代码评审\n\n' + msgs.join('\n'))
   } catch (e) {
-    app.toastMsg?.(e?.response?.data?.error || '评审失败', 'error')
+    app.toastMsg?.(e?.message || '评审失败', 'error')
   } finally {
     reviewing.value = false
   }
@@ -2317,7 +2317,7 @@ async function doCreateFile() {
     await openFile({ id: res.id })
     app.toastMsg?.('文件已创建')
   } catch (e) {
-    app.toastMsg?.(e?.response?.data?.error || '创建失败')
+    app.toastMsg?.(e?.message || '创建失败')
   }
 }
 
@@ -2456,7 +2456,7 @@ async function doRun() {
       }).then((r) => { hints.value = r.hints || [] }).catch(() => {})
     }
   } catch (e) {
-    output.stderr = e?.response?.data?.error || e?.message || '运行失败'
+    output.stderr = e?.message || '运行失败'
     output.status = 'error'
     output.tab = 'stderr'
   } finally {
@@ -2497,7 +2497,7 @@ async function runJudge() {
     await loadLeaderboard()
     app.toastMsg?.(`判题完成：${verdictLabel(res.verdict)}（${res.passed}/${res.total}）`)
   } catch (e) {
-    app.toastMsg?.(e?.response?.data?.error || '判题失败')
+    app.toastMsg?.(e?.message || '判题失败')
   } finally {
     running.value = false
   }
@@ -2774,7 +2774,7 @@ async function runAi(action) {
     }
     if (res.note) app.toastMsg?.(res.note)
   } catch (e) {
-    aiResult.value = e?.response?.data?.error || e?.message || 'AI 调用失败'
+    aiResult.value = e?.message || 'AI 调用失败'
     aiIsCode.value = false
   } finally {
     aiBusy.value = false

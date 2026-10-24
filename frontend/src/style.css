@@ -36,6 +36,15 @@
   --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
 }
 
+/* F22：品牌主色可定制——后台设置 primary_color 由 App.vue applyBranding 写入
+   :root 的 --brand-color，此前没有任何地方消费它。用 @theme inline 把最显眼的
+   brand-500/600 锚到该变量（默认值与原色阶一致，未定制时行为逐字节不变）。
+   50-400/700-900 浅深色阶保持静态：单色值无法可靠派生九级色阶。 */
+@theme inline {
+  --color-brand-500: var(--brand-color, #0ea5e9);
+  --color-brand-600: var(--brand-color, #0284c7);
+}
+
 /* Tailwind 4：被 @apply 复用的基类必须用 @utility 定义（v3 的 components layer 类不再可被 @apply） */
 @utility btn {
   @apply inline-flex items-center justify-center gap-1.5 rounded-control px-3 py-1.5 text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;

@@ -41,7 +41,14 @@
       </div>
       <div class="flex flex-wrap gap-2">
         <div v-for="(q, qi) in quickLinks" :key="q.url" class="group flex items-center">
-          <RouterLink :to="q.url" class="btn-outline text-[12px]">
+          <!-- F25：http(s) 开头按外链处理，用原生 a + 新窗口；内部路径才走 RouterLink -->
+          <component
+            :is="isExternalUrl(q.url) ? 'a' : RouterLink"
+            v-bind="isExternalUrl(q.url)
+              ? { href: q.url, target: '_blank', rel: 'noopener noreferrer' }
+              : { to: q.url }"
+            class="btn-outline text-[12px]"
+          >
             <span v-if="pickingFor !== qi" class="cursor-pointer" @click.prevent.stop="openEmojiPicker(qi)">
               {{ q.icon || '🔗' }}
             </span>
@@ -50,7 +57,7 @@
               <option v-for="e in EMOJIS" :key="e" :value="e">{{ e }}</option>
             </select>
             {{ q.label }}
-          </RouterLink>
+          </component>
           <button v-if="editingQuick" class="ml-1 text-rose-400" @click="removeQuick(q)">×</button>
         </div>
         <div v-if="editingQuick" class="flex items-center gap-1">
@@ -62,7 +69,7 @@
             <option v-for="e in EMOJIS" :key="e" :value="e">{{ e }}</option>
           </select>
           <input v-model="newQuick.label" class="input w-20 text-[12px]" placeholder="名称" />
-          <input v-model="newQuick.url" class="input w-28 text-[12px]" placeholder="路径" />
+          <input v-model="newQuick.url" class="input w-28 text-[12px]" placeholder="路径或网址" />
           <button class="btn-primary text-[12px]" @click="addQuick">添加</button>
         </div>
       </div>
@@ -341,7 +348,7 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 import { useUserStore } from '../stores/user'
 import { useAppStore } from '../stores/app'
 import { coreApi, dashApi, noteApi } from '../api'
@@ -508,6 +515,17 @@ const defaultQuicks = [
   { icon: '🔍', label: '搜索', url: '/search' },
 ]
 const quickLinks = ref(JSON.parse(localStorage.getItem('quick_links') || 'null') || defaultQuicks)
+// F25：快捷入口允许填外链。RouterLink 会把 "https://x" 当成站内路径拼到 #/ 后面，必须分流。
+const isExternalUrl = (url) => /^https?:\/\//i.test(String(url || '').trim())
+function normalizeQuickUrl(raw) {
+  const u = String(raw || '').trim()
+  if (!u) return ''
+  if (/^https?:\/\//i.test(u)) return u
+  if (u.startsWith('/')) return u
+  // 形如 www.example.com / example.com 的裸域名补 https，其余按站内路径处理
+  if (/^[\w-]+(\.[\w-]+)+([/?#].*)?$/.test(u)) return 'https://' + u
+  return '/' + u
+}
 const EMOJIS = ['📁', '📝', '📋', '💬', '🔍', '🏠', '📊', '🗓️', '✉️', '🧮',
                 '🌐', '✨', '🧹', '📚', '🎵', '🎨', '📅', '✅', '❤️', '⭐',
                 '🔥', '💡', '🚀', '📌', '📈', '📉', '🗂️', '🗃️', '🕒', '🎯']
@@ -525,7 +543,9 @@ function setIcon(target, emoji) {
 function saveQuick() { localStorage.setItem('quick_links', JSON.stringify(quickLinks.value)) }
 function addQuick() {
   if (!newQuick.label || !newQuick.url) return
-  quickLinks.value.push({ icon: newQuick.icon || '🔗', label: newQuick.label, url: newQuick.url })
+  const url = normalizeQuickUrl(newQuick.url)
+  if (!url) return
+  quickLinks.value.push({ icon: newQuick.icon || '🔗', label: newQuick.label, url })
   newQuick.label = ''; newQuick.url = ''; newQuick.icon = '🔗'
   saveQuick()
 }

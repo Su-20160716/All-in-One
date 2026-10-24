@@ -3,6 +3,7 @@ import { createPinia } from 'pinia'
 import App from './App.vue'
 import router from './router'
 import { useAppStore } from './stores/app'
+import { useUserStore } from './stores/user'
 import { reportClientError } from './api/corex'
 import './style.css'
 
@@ -39,5 +40,15 @@ function reportError(err, source) {
 }
 app.config.errorHandler = (err, vm, info) => reportError(err, `vue:${info}`)
 window.addEventListener('unhandledrejection', (e) => reportError(e.reason, 'unhandledrejection'))
+
+// F20：request.js 刷新令牌后只写了 localStorage 并派发 auth:token 事件，
+// 这里接住它同步进 Pinia——否则 store 里的 token 停留在刷新前的旧值，
+// WS 重连、路由守卫等读 store.token 的地方都会用过期的令牌。
+// App.vue 的 watch(() => user.token, syncWs) 会顺势用新令牌重建实时通道。
+const userStore = useUserStore()
+window.addEventListener('auth:token', (e) => {
+  const access = e.detail?.access
+  if (access && userStore.token !== access) userStore.token = access
+})
 
 app.mount('#app')

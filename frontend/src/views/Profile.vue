@@ -571,7 +571,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { authApi } from '../api'
 import { authxApi } from '../api/authx'
@@ -823,6 +823,19 @@ async function loadPublicProfile() {
     pubLoading.value = false
   }
 }
+
+// F26：/u/a → /u/b 是同一条路由换 params，组件被复用不会重新挂载，必须监听参数变化重拉
+watch(
+  () => route.params.username,
+  (name, prev) => {
+    if (!publicMode.value || !name || name === prev) return
+    pub.value = null
+    pubError.value = ''
+    followBusy.value = false
+    loadPublicProfile()
+  }
+)
+
 async function toggleFollowPub() {
   if (!pub.value) return
   if (!user.loggedIn) { router.push('/login'); return }

@@ -16,11 +16,11 @@
           <template v-if="results.total">
             <div v-if="results.files.length" class="search-group">
               <div class="group-title">文件</div>
-              <RouterLink v-for="f in results.files" :key="'f' + f.id" :to="'/files'" class="search-item">📄 {{ f.name }}</RouterLink>
+              <RouterLink v-for="f in results.files" :key="'f' + f.id" :to="'/files?q=' + encodeURIComponent(f.name)" class="search-item">📄 {{ f.name }}</RouterLink>
             </div>
             <div v-if="results.notes.length" class="search-group">
               <div class="group-title">笔记</div>
-              <RouterLink v-for="n in results.notes" :key="'n' + n.id" :to="'/notes'" class="search-item">📝 {{ n.title }}</RouterLink>
+              <RouterLink v-for="n in results.notes" :key="'n' + n.id" :to="'/search?q=' + encodeURIComponent(n.title)" class="search-item">📝 {{ n.title }}</RouterLink>
             </div>
             <div v-if="results.projects.length" class="search-group">
               <div class="group-title">项目</div>
@@ -55,7 +55,13 @@
             </div>
           </div>
           <div class="max-h-80 overflow-y-auto">
-            <div v-for="n in app.notifications" :key="n.id" class="border-b border-ink-50 px-3 py-2 text-[12px]" :class="n.is_read ? 'text-ink-400' : 'bg-brand-50/40 text-ink-700'">
+            <div
+              v-for="n in app.notifications"
+              :key="n.id"
+              class="cursor-pointer border-b border-ink-50 px-3 py-2 text-[12px] hover:bg-ink-50"
+              :class="n.is_read ? 'text-ink-400' : 'bg-brand-50/40 text-ink-700'"
+              @click="openNotify(n)"
+            >
               <div class="flex items-center justify-between">
                 <span class="font-medium">{{ n.title }}</span>
                 <span class="tag">{{ categoryName(n.category) }}</span>
@@ -87,7 +93,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { onBeforeUnmount, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '../stores/user'
 import { useAppStore } from '../stores/app'
@@ -130,6 +136,14 @@ function toggleNotify() {
 async function readAll() {
   await app.markAllRead()
 }
+// F23：通知可点击——未读先标已读，再按 link 跳转（站内路径 push，http(s) 外链新开页）
+async function openNotify(n) {
+  if (!n.is_read) await app.markOneRead(n)
+  const link = n.link || ''
+  if (!link) return
+  if (/^https?:\/\//i.test(link)) window.open(link, '_blank', 'noopener')
+  else router.push(link)
+}
 async function clearRead() {
   await coreApi.deleteNotifications({ scope: 'read' })
   app.fetchNotifications()
@@ -138,6 +152,8 @@ async function logout() {
   await user.logout()
   router.push('/login')
 }
+// F23：搜索防抖 timer 卸载时清理，避免组件销毁后回调再触发
+onBeforeUnmount(() => clearTimeout(timer))
 </script>
 
 <style scoped>

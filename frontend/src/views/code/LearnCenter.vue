@@ -96,7 +96,7 @@ async function submitDaily() {
     loadDailyHistory()
     if (overview.value) loadOverview()
   } catch (e) {
-    app.toastMsg?.(e?.response?.data?.error || e?.message || '提交失败')
+    app.toastMsg?.(e?.message || '提交失败')
   } finally {
     dailyBusy.value = false
   }
@@ -191,7 +191,7 @@ async function generatePath() {
     await loadPaths()
     openPath(res.id)
   } catch (e) {
-    app.toastMsg?.(e?.response?.data?.error || e?.message || '生成失败')
+    app.toastMsg?.(e?.message || '生成失败')
   } finally {
     genBusy.value = false
   }
@@ -284,7 +284,7 @@ async function submitChallenge() {
     app.toastMsg?.(res.accepted ? '挑战成功 🎉' : `未通过：${verdictLabel(res.verdict)}`)
     loadArena()
   } catch (e) {
-    app.toastMsg?.(e?.response?.data?.error || e?.message || '提交失败')
+    app.toastMsg?.(e?.message || '提交失败')
   } finally {
     arenaBusy.value = false
   }

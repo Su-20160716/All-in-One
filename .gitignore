@@ -19,6 +19,8 @@ backend/*.log
 # ---- Node / 前端 ----
 frontend/node_modules/
 frontend/dist/
+# 本机 Avast 会拦 esbuild 在系统 Temp 里删临时文件，构建时把 TMP 指到项目内这个目录
+frontend/.esbuild-tmp/
 
 # ---- 临时文件 / 调试产物 ----
 *.tmp
