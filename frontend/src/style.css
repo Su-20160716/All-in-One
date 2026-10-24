@@ -1,6 +1,48 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* 暗色模式（class 策略，F11 依赖）：在 <html> 上加 .dark 类即切换 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 设计令牌：原 tailwind.config.js 迁移至 @theme（Tailwind 4 的配置即 CSS） */
+@theme {
+  /* 中性色 slate + 单一强调色 sky，符合 B 端控制台规范 */
+  --color-brand-50: #f0f9ff;
+  --color-brand-100: #e0f2fe;
+  --color-brand-200: #bae6fd;
+  --color-brand-300: #7dd3fc;
+  --color-brand-400: #38bdf8;
+  --color-brand-500: #0ea5e9;
+  --color-brand-600: #0284c7;
+  --color-brand-700: #0369a1;
+  --color-brand-800: #075985;
+  --color-brand-900: #0c4a6e;
+  --color-ink-50: #f8fafc;
+  --color-ink-100: #f1f5f9;
+  --color-ink-200: #e2e8f0;
+  --color-ink-300: #cbd5e1;
+  --color-ink-400: #94a3b8;
+  --color-ink-500: #64748b;
+  --color-ink-600: #475569;
+  --color-ink-700: #334155;
+  --color-ink-800: #1e293b;
+  --color-ink-900: #0f172a;
+  /* 圆角角色：只有可点的东西才是圆的 */
+  --radius-control: 6px;
+  --radius-card: 10px;
+  --radius-pill: 9999px;
+  --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-pop: 0 10px 30px rgba(15, 23, 42, 0.14);
+  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+}
+
+/* Tailwind 4：被 @apply 复用的基类必须用 @utility 定义（v3 的 components layer 类不再可被 @apply） */
+@utility btn {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-control px-3 py-1.5 text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+}
+@utility tag {
+  @apply inline-flex items-center rounded-pill bg-ink-100 px-2 py-0.5 text-[11px] text-ink-600;
+}
 
 @layer base {
   html {
@@ -22,9 +64,6 @@
 }
 
 @layer components {
-  .btn {
-    @apply inline-flex items-center justify-center gap-1.5 rounded-control px-3 py-1.5 text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
-  }
   .btn-primary {
     @apply btn bg-brand-600 text-white hover:bg-brand-700;
   }
@@ -42,9 +81,6 @@
   }
   .card {
     @apply rounded-card border border-ink-100 bg-white shadow-card;
-  }
-  .tag {
-    @apply inline-flex items-center rounded-pill bg-ink-100 px-2 py-0.5 text-[11px] text-ink-600;
   }
   .tag-brand {
     @apply tag bg-brand-50 text-brand-700;
