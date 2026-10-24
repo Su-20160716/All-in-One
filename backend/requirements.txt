@@ -29,7 +29,8 @@ python-dotenv>=1.0
 
 # ===== v4.1 新增：免费云部署（Render + Neon Postgres）=====
 daphne>=4.0            # ASGI 服务器（channels 4.x 的可选依赖，生产启动命令直接调 daphne，必须显式安装）
-psycopg2-binary>=2.9   # PostgreSQL 驱动（本地 SQLite 环境装了也无害）
+psycopg2-binary>=2.9   # PostgreSQL 驱动（保底：psycopg 缺失时 Django 回退到它）
+psycopg[binary]>=3.2   # PostgreSQL 驱动 v3（Django 4.2+ 优先使用，本地 SQLite 环境装了也无害）
 whitenoise>=6.6        # 生产环境静态文件托管（仅 DEBUG=0 时启用）
 
 # ===== S2-B1：OpenAPI 文档（可选依赖，缺失时 /api/docs 降级为 503 提示，不影响业务）=====
