@@ -1,11 +1,14 @@
-# 全能协作平台 · 功能清单（v6.0.0）
+# 全能协作平台 · 功能清单（v8.0.0）
 
-技术栈：Django 5 + DRF + Channels(WebSocket) + SimpleJWT ｜ Vue3 + Vite + TailwindCSS + Pinia + CodeMirror 6
+技术栈：Django 5.2 + DRF 3.18 + Channels 4.3 + SimpleJWT 5.5 + drf-spectacular ｜ Vue3.5 + Vite 7 + TailwindCSS 4 + Pinia 3 + CodeMirror 6
+
+> **当前实测规模（以 `scripts/stats.py` 输出为准，2026-10-24）**：16 个 app · **1518 条路由叶子** · 145 个模型 · 41 个前端页面 · 49 条前端路由 · 代码约 9.1 万行（后端 71,591 / 前端 19,819）。
+> 下文各版本条目里的数字是**当时**的交付快照，用于横向对比版本体量；要"现在到底多少"，跑 `python scripts/stats.py`。
 - v2：共 **177 项后端能力（143 个业务接口 + 34 个在线工具）** 与 **20 个前端页面**。
 - **v3 全新方向「学习中心」：新增 100 项功能 = 编程学习 30 项 + K12 学科 30 项 + 学习工具 40 个，另加 9 个前端页面与 6 张个人学习数据表（不改动既有业务模块，仅新增独立 app `learning` 并在 settings/根路由/前端菜单做必要装配）。**
 - **v4 平台能力补全：新增 11 大横切能力 = 多类型在线预览 · Office→PDF · 全文搜索(中文分词+BM25) · Yjs 实时协同 · `[[双链]]` · 数据行级权限 · 组织架构/部门 · 多租户 · LLM 聊天助手 · 笔记 AI 问答/摘要 · AI 出题与批改；新增独立 app `assistant` 与 `core/scoping.py`，并新增 3 个前端页面（全文搜索 / AI 助手 / 组织架构）。**
-- **v5 三大能力域（目录驱动）：新增 3 个独立 app（`devtools` / `dataintel` / `officesuite`），共 **76 个子系统 + 501 个接口**（devtools 27 子系统 154 接口 · dataintel 20 子系统 114 接口 · officesuite 29 子系统 233 接口），三域 catalog 全量返回接口明细（路径 + 方法）供前端动态渲染；前端一份 `DomainExplorer` 组件驱动三个域的浏览与调试，新增 3 个页面（总 26→29 个）。**
-- **v6 代码工坊（2026-09-19）：新增独立 app `code`，落地 100 项能力 = 编辑内核 22 + 执行沙箱 20 + 智能化 22 + 协作工程化 22 + 竞技教学 14；新增 **15 张表 · 104 个登录接口 + 2 个公开接口 · 3 个前端页面**（代码工坊 / 代码学习中心 / 分享代码）。编辑器内核为 CodeMirror 6，执行走进程级沙箱 + 可降级适配器，AI 全程支持本地降级。**
+- **v5 三大能力域（目录驱动）：新增 3 个独立 app（`devtools` / `dataintel` / `officesuite`），共 **76 个子系统 + 518 个接口**（devtools 27 子系统 154 接口 · dataintel 20 子系统 114 接口 · officesuite 29 子系统 250 接口），三域 catalog 全量返回接口明细（路径 + 方法）供前端动态渲染；前端一份 `DomainExplorer` 组件驱动三个域的浏览与调试，新增 3 个页面（总 26→29 个）。**
+- **v6 代码工坊（2026-09-19）：新增独立 app `code`，落地 100 项能力 = 编辑内核 22 + 执行沙箱 20 + 智能化 22 + 协作工程化 22 + 竞技教学 14；新增 **15 张表 · 110 个登录接口 + 2 个公开接口 · 3 个前端页面**（代码工坊 / 代码学习中心 / 分享代码）。编辑器内核为 CodeMirror 6，执行走进程级沙箱 + 可降级适配器，AI 全程支持本地降级。**
 
 ## 一、后端接口计数（业务自有，共 143 个）
 
@@ -239,7 +242,7 @@ LearningProgress 学习进度、SnippetBookmark 代码收藏、WordbookItem 生�
 - **排障实录（2026-09-13）**：前端 axios 全局超时 60s < 后端 `LLM_TIMEOUT` 90s，大模型响应慢时前端先报 `timeout of 60000ms exceeded`；已把 `aiApi` 中走大模型的 6 个 POST 放宽到 180s（`AI_TIMEOUT`），普通接口维持全局 60s。
 - NIM 的 `deepseek-v4-flash-0731` / `deepseek-v4-pro-0813` 实测持续挂起（>100s 无响应，关 thinking 同样），默认模型改为 `nvidia/nemotron-3-super-120b-a12b`（关闭思考实测 ~1-4s）；新增 `LLM_EXTRA_BODY`（JSON 字符串，透传合并进 `/chat/completions` 请求体，用于厂商专属开关，解析失败自动忽略不影响启动）。
 
-# 九、v5 新增：三大能力域（目录驱动，76 子系统 + 501 接口）
+# 九、v5 新增：三大能力域（目录驱动，76 子系统 + 518 接口）
 
 > 设计原则（沿用 v4 约定并加强）：三域全部**只增不改**（不动任何既有接口契约）；所有计算类接口统一 `endpoint` 装饰器兜底——ValueError→400、其余异常→422（结构化 `{"ok":false,"error":...}`，**绝不 500**）；外部依赖缺失一律可降级（AI 走本地实现、导出走 CSV 兜底）；行级权限继续收口在 `core/scoping.py`。
 > 三个域的 `/catalog/` 目录接口（GET）返回 `domain / domain_name / subsystems / subsystem_count / endpoint_count`，并在 v5 收尾时**新增 `endpoints` 明细字段**（`[{path, methods}]`，从 urlpatterns 反射还原每个路径的真实 GET/POST）——前端据此目录驱动渲染，后端加接口无需改前端。
@@ -283,7 +286,7 @@ LearningProgress 学习进度、SnippetBookmark 代码收藏、WordbookItem 生�
 
 合计 114（含目录）。亮点：数据集 CRUD + 行级导入查询、pivot/groupby/filter-expr、t 检验/卡方/比例区间、移动平均/指数平滑/线性趋势/季节朴素/分解、线性/多项式/logit 回归、kmeans/层次/DBSCAN/肘部、zscore/IQR/MAD/LOF、分词/关键词/情感/摘要/实体/相似度/可读性、simhash、cosine/knn/质心、AI 对话/翻译/改写/分类/抽取（本地降级）、A/B 分流+显著性、留存矩阵、分层/系统/Bootstrap 抽样、haversine/geohash/多边形/ETA、自动洞察叙述。
 
-## 9.3 officesuite 办公套件（29 子系统 · 233 接口，5 大家族）
+## 9.3 officesuite 办公套件（29 子系统 · 250 接口，5 大家族）
 
 - **流程域 flow（41）**：approval 通用审批 12（模板/提交/我的已发/待我处理/统计/详情/同意/驳回/撤回/评论/流转记录/催办，已批准单全员可见、其余仅 owner 与超管）；seal 用印 6；expense 报销 8（提交/台账/统计/CSV 导出/详情/批/驳/付款）；travel 差旅 7；contract 合同 8（台账/到期预警/回款）。
 - **资源域 res（45）**：meeting 会议室 10（房间管理/预订/冲突检查 availability/我的预订/统计）；asset 固定资产 9；vehicle 车辆 7；supplies 办公用品 7；visitor 访客 7；mailroom 快递代收 5。
@@ -291,7 +294,7 @@ LearningProgress 学习进度、SnippetBookmark 代码收藏、WordbookItem 生�
 - **知识域 know（71）**：faq 7；policy 制度 7（确认回执/确认名单）；template 模板 7（分类/渲染）；wiki 团队 Wiki 9（树/修订/移动带环检测）；minutes 会议纪要 7（行动项）；formcollect 收集表 8（填报/entries/导出）；announcement 部门公告 8（置顶/已读名单）；poll 投票 9（我的票/结果/开关）；helpdesk 工单 9（指派/回复/解决/重开/优先级）。
 - **日历域 calendar（9）**：共享日程（事件 CRUD/今日与本周 agenda/RSVP/出席名单）+ 目录 1。
 
-合计 233。行级权限对无 owner 字段的模型（TrainingEnrollment/KeyResult）显式实现 `_get_enrollment` 等规则，不走 `scope_queryset`（避免 FieldError）。
+合计 250（v5 交付时为 233，后续版本在流程/人员/知识域继续加接口）。行级权限对无 owner 字段的模型（TrainingEnrollment/KeyResult）显式实现 `_get_enrollment` 等规则，不走 `scope_queryset`（避免 FieldError）。
 
 ## 9.4 前端接入（目录驱动，页面 26→29）
 
@@ -302,12 +305,12 @@ LearningProgress 学习进度、SnippetBookmark 代码收藏、WordbookItem 生�
 
 ## 9.5 v5 验证结果（2026-09-14 全绿）
 
-- **v5 套件冒烟 `suite_smoke_test.py`**：12 轮迭代收敛，**通过 537 / 失败 0**（覆盖 501 接口 + 36 个深度断言：权限矩阵、wiki 环检测、留存矩阵、降级 4xx 结构化等）。
+- **v5 套件冒烟 `suite_smoke_test.py`**：12 轮迭代收敛，**通过 537 / 失败 0**（覆盖当时 501 接口，现三域合计 518 + 36 个深度断言：权限矩阵、wiki 环检测、留存矩阵、降级 4xx 结构化等）。
 - **四套串行回归**（防 SQLite `database is locked`）：`smoke_test.py` v2 160✓/0✗、`learning_smoke_test.py` v3 81✓/0✗、`extensions_smoke_test.py` v4 EXIT:0、`suite_smoke_test.py` v5 537✓/0✗；`manage.py check` EXIT:0。
 - **catalog 端到端（APIClient 全链路）**：devtools 27 子系统/153 明细、dataintel 20/113、officesuite 29/232，方法反射与真实行为一致（GET 抽测 200），合计 498 明细 + 3 目录 = 501。
 - **前端 `vite build`**：170 模块构建成功（DomainExplorer 7.63 kB / gzip 3.79 kB），EXIT:0。
 
-# 十、v6 新增：代码工坊（15 表 + 104 接口 + 2 公开接口 + 3 页面）
+# 十、v6 新增：代码工坊（15 表 + 110 接口 + 2 公开接口 + 3 页面）
 
 > **定位**：把「写代码 / 跑代码 / 学代码」这件事整个搬进平台，做成一个自包含的在线 IDE + 教学系统。
 > **设计原则**（沿用 v4/v5 约定）：`code` 为**独立 app，只增不改**——不动任何既有接口契约，仅在 `settings.INSTALLED_APPS`、根路由、前端菜单做必要装配；全部计算类接口走 `devtools/common.py` 的 `endpoint` 装饰器兜底（ValueError→400、其余→422，**绝不 500**）；外部依赖缺失一律**可降级**（无 LLM 密钥走本地实现、无运行时返回结构化 `RUNTIME_NOT_FOUND`，前端置灰而非崩溃）；行级权限统一走 `core/scoping.py`。
@@ -332,7 +335,7 @@ LearningProgress 学习进度、SnippetBookmark 代码收藏、WordbookItem 生�
 
 ## 10.3 接口清单（104 登录接口 + 2 公开接口）
 
-路由定义在 `code/urls.py`，采用 `SUBSYSTEMS`（供前端目录页渲染）+ `VIEWS`（路由串 → 视图函数显式映射，避免手写 path 出错）双表结构，结尾 `_EXPECTED = 104` **契约断言**防止无声破坏。
+路由定义在 `code/urls.py`，采用 `SUBSYSTEMS`（供前端目录页渲染）+ `VIEWS`（路由串 → 视图函数显式映射，避免手写 path 出错）双表结构，结尾 `_EXPECTED = 110` **契约断言**防止无声破坏。
 
 | 子系统 | 接口 | 说明 |
 |---|---:|---|
@@ -421,12 +424,13 @@ LearningProgress 学习进度、SnippetBookmark 代码收藏、WordbookItem 生�
 
 ---
 
-# 十一、v7 新增：100 项模块增强 + 320 个迷你工具（2026-09-25）
+# 十一、v7 新增：100 项模块增强 + 374 个迷你工具（2026-09-25）
 
 > v7.0：落地《可快速落地的100项功能清单》全部 100 项模块增强，覆盖 11 个模块。
 > v7.1：新建独立 app minitools，目录驱动 catalog + 纯函数 run，批量落地 320 个纯函数工具（19 大家族），前端复用 DomainExplorer 动态渲染。
+> **v8（2026-10-01）在此基础上再扩 7 个家族 54 个工具 → 26 家族 374 工具 / 375 条路由，见 docs/12。**
 
-## 11.1 minitools 迷你工具箱（320 工具 · 19 家族 · 321 URL）
+## 11.1 minitools 迷你工具箱（374 工具 · 26 家族 · 375 URL）
 
 独立 Django app minitools，挂载 /api/minitools/，全部无状态纯函数，不落库不调外部 API。前端 DomainExplorer 一份组件驱动。
 
@@ -455,7 +459,7 @@ v7.1 追加 110 工具（10 新家族，已与 devtools/dataintel/officesuite/to
 
 新增约 12 张表：FileTag、CardLabel、BoardShare、QuickReply、KeywordAlert、Badge、InviteCode、ActiveSession、SearchQueryLog；新增字段若干（Note.is_archived、Message.reply_to/is_pinned、Conversation.is_archived、User.tags/dnd、Announcement.scheduled_at/expires_at、FileMeta.tags/favorite_group）。
 
-新增接口：minitools 321 + files 7 + notes 5 + projects 6 + im 8 + accounts 10 + core 6 + assistant 3 + code 1 + officesuite 2。code 路由断言 104→105，officesuite 233→235。
+新增接口：minitools 375（含 catalog）+ files 7 + notes 5 + projects 6 + im 8 + accounts 10 + core 6 + assistant 3 + code 1 + officesuite 17（v5 的 233 → 250）。code 路由断言已到 110（`code/urls.py::_EXPECTED`），minitools 断言 375。
 
 ## 11.4 v7 验证结果（2026-09-25 全绿）
 
@@ -470,7 +474,7 @@ v7.1 追加 110 工具（10 新家族，已与 devtools/dataintel/officesuite/to
 | minitools v7 smoke | catalog 19子系统/321接口，32/32工具通过 |
 | minitools v7.1 smoke | 99/99新工具通过，无500 |
 | npm run build | 成功（3.87s） |
-| 后端总URL数 | 1707 |
+| 后端总URL数 | 1518（`scripts/stats.py` 口径：路由叶子，不含 Django admin；v7 时手数为 1707，含重复计数） |
 
 说明：冒烟全部串行执行；admin密码曾漂移已重置为admin123；ECharts未安装，图表改用SVG；#86/#91/#93为部分实现，核心接口就绪。
 

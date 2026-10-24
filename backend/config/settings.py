@@ -221,13 +221,21 @@ MEDIA_ROOT = BASE_DIR / "media"
 # 设置 DATA_DIR 后，SQLite 数据库与上传的 media 都落在持久卷里，容器重启/重部署不丢。
 # D4：数据库文件只在**当前引擎是 sqlite** 时改 NAME——同时配了 DATABASE_URL
 # （Postgres）时只挪 MEDIA_ROOT，绝不能把 PG 的 NAME 覆盖成 sqlite 路径。
-_DATA_DIR = os.environ.get("DATA_DIR", "").strip()
+# 变量名兼容：docker-compose 注入的是 DJANGO_DATA_DIR（带前缀更不容易撞名），
+# 裸机部署习惯写 DATA_DIR，两者都认，避免"env 填了但卷没挂上"的静默失效。
+_DATA_DIR = (os.environ.get("DATA_DIR") or os.environ.get("DJANGO_DATA_DIR") or "").strip()
 if _DATA_DIR:
     _dp = Path(_DATA_DIR)
     _dp.mkdir(parents=True, exist_ok=True)
     if DATABASES["default"]["ENGINE"] == "django.db.backends.sqlite3":
         DATABASES["default"]["NAME"] = _dp / "db.sqlite3"
     MEDIA_ROOT = _dp / "media"
+
+# DEBUG=0 时 Django 不挂 MEDIA_URL 路由（urls.py 里被 DEBUG 门控）。
+# 单容器 / 平台直连场景没有 Nginx 帮忙吐 media，此时把 SERVE_MEDIA 设为 1，
+# 由 Django 直接服务 MEDIA_ROOT（性能一般但能跑通上传-访问闭环）。
+# 已经用 Nginx/Caddy 反代 /media/ 的部署保持默认 0，别让 Django 抢这活。
+SERVE_MEDIA = os.environ.get("SERVE_MEDIA", "0") == "1"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -307,8 +315,8 @@ SPECTACULAR_SETTINGS = {
 
 # 回收站保留天数（到期可由清理任务清除）
 TRASH_KEEP_DAYS = int(os.environ.get("TRASH_KEEP_DAYS", "30"))
-# 平台版本
-PLATFORM_VERSION = "5.0.0"
+# 平台版本（与 README / FEATURES 标题 / docs/12 对齐：v8 = 迷你工具箱扩到 26 家族 374 工具）
+PLATFORM_VERSION = "8.0.0"
 
 # ---------------------------------------------------------------------------
 # 多租户 / 行级数据权限

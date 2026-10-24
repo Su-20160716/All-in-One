@@ -63,7 +63,8 @@ git add -A && git commit -m "ClawCloud 容器部署配置" && git push
 | `DJANGO_DEBUG` | `0` | 生产必须 |
 | `DJANGO_SECRET_KEY` | 随便一长串乱码 | 自己编 50 位以上 |
 | `DJANGO_ALLOWED_HOSTS` | `*` | ClawCloud 域名不定，用 * |
-| `DATA_DIR` | `/app/data` | **关键**：SQLite 和 media 落进持久卷 |
+| `DATA_DIR` | `/app/data` | **关键**：SQLite 和 media 落进持久卷（也认别名 `DJANGO_DATA_DIR`，两者取其一） |
+| `SERVE_MEDIA` | `1` | **关键**：`DEBUG=0` 时 Django 默认不挂 `/media/` 路由，这里没 Nginx，必须开这个开关，否则上传成功但打开图片 404 |
 | `SEED_ADMIN_USERNAME` | 你的管理员名 | 不设则 admin |
 | `SEED_ADMIN_PASSWORD` | **强密码** | 不设则 admin123，公网上等于裸奔 |
 | `CORS_ALLOWED_ORIGINS` | `https://xxx.pages.dev` | 前端部署完回填 |
@@ -75,6 +76,26 @@ git add -A && git commit -m "ClawCloud 容器部署配置" && git push
 |---|---|
 | Capacity | `1` G |
 | Mount Path | `/app/data` |
+
+> **`DATA_DIR` 到底做了什么**（`config/settings.py`）：
+> - 引擎是 SQLite 时：`DATABASES.default.NAME = $DATA_DIR/db.sqlite3`
+> - 无论什么引擎：`MEDIA_ROOT = $DATA_DIR/media`（上传的文件、头像、缩略图都在这）
+> - 目录不存在会自动 `mkdir`
+> - 一旦填了 `DATABASE_URL` 接 Postgres，**只挪 MEDIA_ROOT，不会把 PG 的库名覆盖成 sqlite 路径**（这条有专门的判断，别删）
+>
+> 所以持久卷必须同时容纳 `db.sqlite3` 和 `media/`——挂 `1G` 起步，文件多了再扩。
+
+### 媒体文件为什么需要 `SERVE_MEDIA=1`
+
+`config/urls.py` 里的 `/media/` 路由被 `DEBUG` 门控：开发时 Django 自己吐文件，生产（`DEBUG=0`）默认不挂。
+Render/docker-compose 场景前面有 Nginx 反代 `/media/`，所以没事；**ClawCloud 只跑后端一个容器，没有 Nginx**，
+不开 `SERVE_MEDIA` 就会「上传成功、数据库有记录、点开图片 404」。
+
+| 部署形态 | `/media/` 谁服务 | 需要 SERVE_MEDIA |
+|---|---|---|
+| 本地开发（DEBUG=1） | Django 自带 static 视图 | 不需要 |
+| docker-compose（前端 Nginx 反代） | Nginx | 保持 0 |
+| **ClawCloud Run 单容器** | Django（本文场景） | **必须 1** |
 
 ### Advanced（如有）
 无额外 Command（Dockerfile 里已写好启动流程）。

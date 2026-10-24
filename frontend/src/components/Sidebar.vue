@@ -4,7 +4,7 @@
       <div class="grid h-8 w-8 place-items-center rounded-control bg-brand-600 text-[15px] font-bold text-white">A</div>
       <div>
         <div class="text-[14px] font-semibold text-white">全能协作平台</div>
-        <div class="text-[11px] text-ink-500">All-in-One v5.0</div>
+        <div class="text-[11px] text-ink-500">All-in-One v8.0</div>
       </div>
     </div>
     <nav class="flex-1 space-y-0.5 overflow-y-auto px-2 py-2">

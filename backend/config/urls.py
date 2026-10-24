@@ -91,3 +91,14 @@ urlpatterns += code_public_urlpatterns
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+elif getattr(settings, "SERVE_MEDIA", False):
+    # DEBUG=0 但部署环境没有 Nginx/Caddy 反代 /media/ 时（ClawCloud Run 单容器最常见），
+    # 用 SERVE_MEDIA=1 让 Django 直接吐 MEDIA_ROOT，否则「上传成功但访问 404」。
+    # 注意：不能复用上面那个 static() 助手——它在 DEBUG=False 时直接返回 []（源码里的门控），
+    # 所以这里手挂 django.views.static.serve。
+    from django.urls import re_path
+    from django.views.static import serve as _serve_media
+
+    urlpatterns += [
+        re_path(r"^media/(?P<path>.*)$", _serve_media, {"document_root": settings.MEDIA_ROOT}),
+    ]

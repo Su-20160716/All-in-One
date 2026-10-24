@@ -144,7 +144,36 @@
 - 认证：Cookie 或 URL 携带 token（AuthMiddlewareStack）
 - 协议见 docs/02 第 3.3 节
 
-# v5 三大能力域 `/api/devtools` `/api/dataintel` `/api/officesuite`（76 子系统 · 501 接口）
+# 学习中心 `/api/learning`（v3 · 5 个一级入口 · 132 条可访问路由）
+
+> `learning/urls.py` 里有 92 条 `path()` 声明，`school/` 与 `prog/` 下还有二级 include，展开后共 **132 条路由**（`scripts/stats.py` 口径）。一级入口：`school`（K12 学科与知识树）、`prog`（编程语言广场 / 刷题 / 竞技）、`study`（我的学习：番茄钟、计划、成就）、`tools`（学习工具目录 + 运行）、`search`（学习域内搜索）。
+
+| 接口 | 说明 |
+|---|---|
+| `/api/learning/school/knowledge/` | 知识树；返回 `total_points` 等统计（学习首页统计卡片的数据源，前端不再写死 1500） |
+| `/api/learning/prog/lang-catalog/` | 编程语言目录，返回 `{total, list}` |
+| `/api/learning/tools/catalog/` · `/tools/run/` | 学习工具目录与统一运行入口 |
+| `/api/learning/search/` | 学习域内搜索 |
+
+# AI 助手 `/api/assistant`（v4 · 26 接口）
+
+> 全部接口**优先走 `_call_llm()`，未配置 `LLM_API_KEY` 时本地降级**——降级是真正可用的实现，不是占位符（见 `assistant/llm.py`）。
+
+| 分组 | 接口 |
+|---|---|
+| 状态 | `/status/` |
+| 笔记智能 | `/notes/<pk>/summarize/`、`/notes/<pk>/ask/`、`/auto-tag/`、`/polish/` |
+| 对话 | `/chat/`、`/ask/`、`/conversations/`（列表 / 详情 / 分支 / 导出）、`/prompts/`（列表 / 详情） |
+| 写作 | `/translate/`、`/names/`、`/weekly-report/`、`/agenda/`、`/email-draft/`、`/social-copy/`、`/math-explain/`、`/daily-digest/` |
+| 教学 | `/questions/generate/`、`/questions/grade/` |
+| 其它 | `/commands/`、`/input-feedback/` |
+
+# 迷你工具箱 `/api/minitools`（v7/v8 · 26 家族 · 375 接口）
+
+> 目录驱动：`/api/minitools/catalog/` 返回 26 家族 × 374 个纯函数工具，`/api/minitools/run/` 统一执行（`{tool, ok, result}`）。
+> **`minitools/urls.py` 末尾有 `assert len(urlpatterns) == 375`**——加工具必须同步改这个断言，否则启动即失败。
+
+# v5 三大能力域 `/api/devtools` `/api/dataintel` `/api/officesuite`（76 子系统 · 518 接口）
 
 > v5 全部接口走统一约定：JWT 鉴权（`IsAuthenticated`）；响应 `{"ok":true,"data":...}` / `{"ok":false,"error":"..."}`；`endpoint` 装饰器兜底 ValueError→400、其余→422，**绝不 500**；除目录外默认 POST（`@endpoint()`），GET-only 接口在目录明细中标为 GET。完整子系统 × 接口清单见根 `FEATURES.md` 第 9 章。
 
@@ -154,7 +183,7 @@
 |---|---|
 | /api/devtools/catalog/ | `{domain, domain_name, subsystems:[{key,name,endpoints,url_prefix}], subsystem_count:27, endpoint_count:154, endpoints:[{path,methods}]}` |
 | /api/dataintel/catalog/ | 同构，subsystem_count:20，endpoint_count:114 |
-| /api/officesuite/catalog/ | 同构，subsystem_count:29，endpoint_count:233 |
+| /api/officesuite/catalog/ | 同构，subsystem_count:29，endpoint_count:250 |
 
 `endpoints` 为接口明细（路径 pattern + 真实方法，从 urlpatterns 反射导出，不含目录自身），前端 `DomainExplorer.vue` 据此目录驱动渲染与调试。
 
@@ -166,14 +195,14 @@ URL 形如 `/api/devtools/{子系统}/{动作}/`：text/str/md/json/log/encode/r
 
 URL 形如 `/api/dataintel/{子系统}/{动作}/`：dataset（create/list/detail/delete/rows-import/rows-query，数据落库 SQLite）；profile/transform/calc 吃 `rows`（对象数组）+ 参数；stats/forecast/regress/cluster/outlier 吃数值数组（`a`/`b`/`y`）；nlp/textmine/vector 吃 `text` 或数值向量；ai 8 个接口未配 `LLM_API_KEY` 时本地降级；chart 输出直喂 ECharts 的 series 结构；abtest/cohort/sampling/geo/insight 各成体系。
 
-## officesuite（29 子系统 · 233 接口，5 家族）
+## officesuite（29 子系统 · 250 接口，5 家族）
 
 URL 形如 `/api/officesuite/{子系统}/{动作}/`：flow 41（approval/seal/expense/travel/contract）、res 45（meeting/asset/vehicle/supplies/visitor/mailroom）、people 66（duty/timesheet/training/recognition/standup/okr/decision/todobox）、know 71（faq/policy/template/wiki/minutes/formcollect/announcement/poll/helpdesk）、calendar 9 + 目录 1。行级权限：owner 类查询走 `core/scoping.py` 数据范围；无 owner 字段的模型（报名记录/KR）用显式规则收口；已批准审批单全员可见（审批透明）。
 
-# 代码工坊 `/api/code`（19 子系统 · 104 接口 + 2 公开接口）
+# 代码工坊 `/api/code`（19 子系统 · 110 接口 + 2 公开接口）
 
 > v6 新增独立 app `code`。全部登录接口走 `IsAuthenticated`，响应约定与 v5 三域一致：`{"ok":true,"data":...}` / `{"ok":false,"error":"..."}`，`endpoint` 装饰器兜底 ValueError→400、其余→422，**绝不 500**。
-> 路由定义在 `code/urls.py`，`SUBSYSTEMS`（前端目录渲染）+ `VIEWS`（路由串 → 视图函数显式映射）双表结构，结尾 `_EXPECTED = 104` 契约断言。
+> 路由定义在 `code/urls.py`，`SUBSYSTEMS`（前端目录渲染）+ `VIEWS`（路由串 → 视图函数显式映射）双表结构，结尾 `_EXPECTED = 110` 契约断言。
 > 目录接口 `GET /api/code/catalog/` 返回 `{domain, subsystems:[{key,name,endpoints,url_prefix}], subsystem_count, endpoint_count, endpoints:[{path,methods}]}`。
 
 ## meta 元信息（4）
