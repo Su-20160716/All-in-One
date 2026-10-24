@@ -6,10 +6,10 @@
         <h2 class="text-[20px] font-semibold">学习中心</h2>
         <p class="mt-1 text-[13px] text-white/85">10 种编程语言 · 小学 / 初中 / 高中全学科资料 · 40 个学习工具，一站式自学与备考</p>
         <div class="mt-4 flex flex-wrap gap-2">
-          <span class="rounded-pill bg-white/15 px-3 py-1 text-[12px]">编程语言 {{ stats.langs }} 种</span>
-          <span class="rounded-pill bg-white/15 px-3 py-1 text-[12px]">知识点 {{ stats.points }}+</span>
-          <span class="rounded-pill bg-white/15 px-3 py-1 text-[12px]">学习工具 {{ stats.tools }} 个</span>
-          <span class="rounded-pill bg-white/15 px-3 py-1 text-[12px]">公式 {{ stats.formulas }} 条</span>
+          <span class="rounded-pill bg-white/15 px-3 py-1 text-[12px]">编程语言 {{ stats.langs ?? '--' }} 种</span>
+          <span class="rounded-pill bg-white/15 px-3 py-1 text-[12px]">知识点 {{ stats.points ?? '--' }}+</span>
+          <span class="rounded-pill bg-white/15 px-3 py-1 text-[12px]">学习工具 {{ stats.tools ?? '--' }} 个</span>
+          <span class="rounded-pill bg-white/15 px-3 py-1 text-[12px]">公式 {{ stats.formulas ?? '--' }} 条</span>
           <span class="rounded-pill bg-white/15 px-3 py-1 text-[12px]">题库持续更新</span>
         </div>
       </div>
@@ -181,7 +181,8 @@ const dailyKnowledge = computed(() => {
 })
 const langName = (k) => langs.value.find((l) => l.key === k)?.name || k
 
-const stats = ref({ langs: 10, points: 1500, tools: 40, formulas: 60 })
+// F12：统计全部来自接口（langs/tools/formulas/knowledge），失败保留 null 由模板显示空态
+const stats = ref({ langs: null, points: null, tools: null, formulas: null })
 const langs = ref([])
 const daily = ref(null)
 const dailyLang = ref('')
@@ -211,11 +212,14 @@ async function loadRecommend() {
   recReason.value = data.reason
 }
 async function loadStats() {
-  const [l, t, f] = await Promise.all([learnApi.langCatalog(), learnApi.toolCatalog(), learnApi.formulas()])
-  stats.value.langs = l.total
-  stats.value.tools = t.total
-  stats.value.formulas = f.total
-  langs.value = l.list
+  // 单项失败不影响其他统计（保持 null → 模板显示 "--"）
+  const [l, t, f, k] = await Promise.allSettled([
+    learnApi.langCatalog(), learnApi.toolCatalog(), learnApi.formulas(), learnApi.knowledgeTree(),
+  ])
+  if (l.status === 'fulfilled') { stats.value.langs = l.value.total; langs.value = l.value.list }
+  if (t.status === 'fulfilled') stats.value.tools = t.value.total
+  if (f.status === 'fulfilled') stats.value.formulas = f.value.total
+  if (k.status === 'fulfilled') stats.value.points = k.value.total_points
 }
 
 // F542 全局搜索

@@ -78,7 +78,6 @@ export const codeApi = {
   outline: (data) => request.post('/code/outline/', data),
   complexity: (data) => request.post('/code/complexity/', data),
   quality: (data) => request.post('/code/quality/', data),
-  flow: (data) => request.post('/code/flow/', data),
   similarity: (data) => request.post('/code/similarity/', data),
   secretScan: (data) => request.post('/code/secret-scan/', data),
   refactorHints: (data) => request.post('/code/refactor-hints/', data),
@@ -100,8 +99,6 @@ export const codeApi = {
   createComment: (fileId, data) => request.post(`/code/files/${fileId}/comments/create/`, data),
   resolveComment: (fileId, cid) => request.post(`/code/files/${fileId}/comments/${cid}/resolve/`, {}),
   deleteComment: (fileId, cid) => request.post(`/code/files/${fileId}/comments/${cid}/delete/`, {}),
-  collabState: (fileId) => request.get(`/code/files/${fileId}/collab/`),
-  collabWs: (fileId) => request.get(`/code/files/${fileId}/collab/ws/`),
 
   // ===== 分享 =====
   shares: () => request.get('/code/shares/'),
@@ -162,14 +159,10 @@ export const codeApi = {
   learnOverview: () => request.get('/code/learn/overview/'),
 
   // ===== 工程化（L4）=====
-  blame: (fileId, maxLines = 2000) =>
-    request.get(`/code/blame/${fileId}/`, { params: { max_lines: maxLines } }),
   todos: (params = {}) => request.get('/code/todos/', { params }),
   diff: (data) => request.post('/code/diff/', data),
   insights: (workspace = null) =>
     request.get('/code/insights/', { params: workspace ? { workspace } : {} }),
-  contributors: (workspace = null) =>
-    request.get('/code/contributors/', { params: workspace ? { workspace } : {} }),
   versionSideBySide: (fileId, vid) =>
     request.get(`/code/files/${fileId}/versions/${vid}/side-by-side/`),
 

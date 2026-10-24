@@ -260,7 +260,7 @@
     <div class="card p-5">
       <h2 class="text-[15px] font-semibold text-ink-800">账号与数据</h2>
       <div class="mt-3 flex flex-wrap gap-2">
-        <button class="btn-outline text-[12px]" @click="exportData">导出我的数据（JSON · {{ exportCount }} 个模块）</button>
+        <button class="btn-outline text-[12px]" @click="exportData">导出我的数据（JSON · {{ exportCount ?? '--' }} 个模块）</button>
         <span class="tag">存储配额 {{ user.profile?.storage_quota_mb || 512 }} MB</span>
         <!-- F614 注销申请（7 天冷静期，可撤销） -->
         <button class="btn-outline text-[12px]" @click="requestDeactivate">申请注销（7 天冷静期）</button>
@@ -586,7 +586,7 @@ const router = useRouter()
 const route = useRoute()
 const avatarInput = ref(null)
 const username = ref('')
-const exportCount = ref(17)
+const exportCount = ref(null)
 const form = reactive({ nickname: '', email: '', phone: '', bio: '', tags: [], dnd_start: '', dnd_end: '' })
 const tagsInput = ref('')
 const pwd = reactive({ old_password: '', new_password: '', confirm: '' })
@@ -758,6 +758,13 @@ async function exportData() {
   const a = document.createElement('a')
   a.href = url; a.download = 'my-data.json'; a.click()
   URL.revokeObjectURL(url)
+}
+// F13：模块数改为动态获取（与导出同一接口/公式，初始 null 显示 "--"，失败静默）
+async function loadExportCount() {
+  try {
+    const data = await authApi.exportData()
+    exportCount.value = Math.max(1, Object.keys(data || {}).length - 3)
+  } catch { /* 接口失败时保持 null，按钮显示 -- */ }
 }
 async function deactivate() {
   const pw = prompt('注销后账号将被禁用，如需继续请输入登录密码：')
@@ -1027,6 +1034,7 @@ onMounted(() => {
   loadOnboarding()
   loadPrefs()
   loadFollows('following')
+  loadExportCount()
   loadTokens()
   loadContacts()
   loadAvatarHistory()

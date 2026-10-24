@@ -231,7 +231,7 @@
     </Modal>
 
     <!-- 多类型在线预览：图片 / 视频 / 音频 / PDF / 文本 / Office（转 PDF 后内嵌） -->
-    <Modal :show="!!previewing" :title="previewing?.name" width="max-w-3xl" @close="closePreview">
+    <Modal :show="!!previewing" :title="previewing?.name" width="768px" @close="closePreview">
       <div v-if="previewing" class="space-y-3">
         <div class="flex flex-wrap items-center gap-2 text-[12px] text-ink-500">
           <span class="tag">{{ previewLabel }}</span>
@@ -400,6 +400,7 @@ import { shareUrl as buildShareUrl } from '../../api/base'
 import { useAppStore } from '../../stores/app'
 import { formatTime, fileIcon, fileTypeMeta } from '../../utils/format'
 import { describeDownloadError, downloadWithAuth, loadMediaObjectUrl, saveBlob } from '../../utils/download'
+import { sha1File } from '../../utils/sha1'
 import Modal from '../../components/Modal.vue'
 
 const app = useAppStore()
@@ -855,8 +856,16 @@ async function uploadOne(file, idx) {
   uploadName.value = file.name
   uploadProgress.value = 0
   try {
+    // F14：先算真实 sha1 让秒传真正生效（后端 uploadInit 按 sha1+owner 命中已存在文件）。
+    // 计算失败（极端环境）降级为空串——后端按无秒传处理，只是少一个优化。
+    let sha1 = ''
+    try {
+      sha1 = await sha1File(file)
+    } catch {
+      sha1 = ''
+    }
     const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE))
-    const init = await fileApi.uploadInit({ filename: file.name, folder_id: currentFolder.value, file_size: file.size, chunk_size: CHUNK_SIZE, total_chunks: totalChunks, sha1: '' })
+    const init = await fileApi.uploadInit({ filename: file.name, folder_id: currentFolder.value, file_size: file.size, chunk_size: CHUNK_SIZE, total_chunks: totalChunks, sha1 })
     if (init.sec_pass) {
       if (idx != null) uploadQueue.value[idx] = { ...uploadQueue.value[idx], progress: 100, status: 'done' }
       app.toastMsg('秒传成功', 'success'); return

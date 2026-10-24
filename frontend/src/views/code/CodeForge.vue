@@ -958,7 +958,7 @@
         </div>
         <div>
           <div class="mb-0.5 font-semibold text-ink-900">已有能力</div>
-          <div>版本历史与回滚 · 行级评论 · Yjs 实时协同 · 判题与排行榜 · 代码片段库 · 全文检索 · 涉密扫描 · 代码查重 · 复杂度与质量评分 · 流程图抽取 · 分享链接 · 代码归属统计 · TODO 聚合 · 工程洞察 · 每日一题 · 成就徽章 · 错题本 · 学习路径</div>
+          <div>版本历史与回滚 · 行级评论 · 判题与排行榜 · 代码片段库 · 全文检索 · 涉密扫描 · 代码查重 · 复杂度与质量评分 · 分享链接 · TODO 聚合 · 工程洞察 · 每日一题 · 成就徽章 · 错题本 · 学习路径</div>
         </div>
       </div>
     </Modal>
@@ -1428,7 +1428,6 @@ const aiSource = ref('')
 const aiIsCode = ref(false)
 const aiBusy = ref(false)
 
-const sectionfindingsPlaceholder = null
 const secretFindings = ref([])
 
 const snippets = ref([])
@@ -2324,13 +2323,9 @@ async function doCreateFile() {
 
 async function openFile(node) {
   if (!node?.id) return
-  // 已在标签中 → 直接切换
-  const exist = tabs.value.find((t) => t.id === node.id)
-  if (exist) {
-    activeFileId.value = node.id
-  } else {
-    activeFileId.value = node.id
-  }
+  // F17：两个分支原本做的都是同一件事（切换 activeFileId），合并；
+  // 是否新开标签由下方 tabs 查找决定
+  activeFileId.value = node.id
   try {
     const res = await codeApi.file(node.id)
     activeFile.value = res

@@ -69,7 +69,7 @@
           {{ mode === 'login' ? '还没有账号？' : '已有账号？' }}
           <button class="font-medium text-brand-600 hover:underline" @click="toggle">{{ mode === 'login' ? '立即注册' : '去登录' }}</button>
         </div>
-        <div class="mt-4 rounded-control bg-ink-50 px-3 py-2 text-[11px] text-ink-400">
+        <div v-if="isDev" class="mt-4 rounded-control bg-ink-50 px-3 py-2 text-[11px] text-ink-400">
           演示账号：admin / admin123（管理员）· 也可注册新账号
         </div>
       </div>
@@ -87,6 +87,8 @@ import { useAppStore } from '../stores/app'
 const router = useRouter()
 const user = useUserStore()
 const app = useAppStore()
+// F13：演示账号提示仅开发环境显示（生产构建 import.meta.env.DEV 为 false）
+const isDev = import.meta.env.DEV
 const mode = ref('login')
 const loading = ref(false)
 const error = ref('')
