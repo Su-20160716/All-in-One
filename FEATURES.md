@@ -57,14 +57,12 @@ JSON 格式化、时间戳、UUID、随机密码、哈希(MD5/SHA 系列)、Base
 ## 六、启动方式（PowerShell）
 
 ```powershell
-# 后端（HTTP）
-cd C:\Users\banna\Desktop\web\backend
-.\venv\Scripts\python.exe manage.py runserver
-# WebSocket（可选，另开窗口）
-.\venv\Scripts\python.exe -m daphne -b 127.0.0.1 -p 8000 config.asgi:application
+# 后端（HTTP + WebSocket 由 Channels 的 runserver 一并承载）
+cd C:\Users\banna\Desktop\banna\web\backend
+.\venv\Scripts\python.exe manage.py runserver   # 项目自带 backend/venv 为 Python 3.13
 
 # 前端
-cd C:\Users\banna\Desktop\web\frontend
+cd C:\Users\banna\Desktop\banna\web\frontend
 npm run dev
 ```
 

@@ -12,8 +12,9 @@
 
 ```powershell
 cd backend
-python -m venv venv
-.\venv\Scripts\pip install -r requirements.txt
+# 需要 Python 3.13；项目已自带 backend/venv（Python 3.13，依赖已装），直接用即可
+# 仅当从零重建 venv 时才需：python -m venv venv（确保 python 指向 3.13）
+.\venv\Scripts\pip install -r requirements.lock   # 仅首次 / 重建时需要
 .\venv\Scripts\python manage.py migrate
 .\venv\Scripts\python manage.py seed          # 初始化角色/权限/管理员
 .\venv\Scripts\python manage.py runserver 8000

@@ -271,7 +271,7 @@
 
 ## 3.1 技术栈与目录
 
-- **后端**：Django 5 + DRF + Channels(WebSocket) + SimpleJWT。**运行环境统一用 Desktop 外的 `C:\Users\banna\.conda\envs\banna`（Python 3.11.16 + Django 5.2.17）**。`backend\venv`（py311）位于 Desktop 树下，其 SQLite **文件**写会被本机安全策略拦截，**不要用来跑服务**（见 1.3·B1）；4 个派生目录（`venv311` / `venv311f` / `venv311n` / `venv314`）已于 2026-09-30 删除。
+- **后端**：Django 5 + DRF + Channels(WebSocket) + SimpleJWT。**运行环境用项目自带的 `backend\venv`（Python 3.13，依赖已装）**：直接 `backend\venv\Scripts\python.exe manage.py runserver` 即可，无需额外 conda 环境、无需 PYTHONPATH。**4 个派生目录（`venv311` / `venv311f` / `venv311n` / `venv314`）已于 2026-09-30 删除**；历史文档里的 `C:\Users\banna\.conda\envs\banna` 环境本机已不存在，切勿照抄。
 - **前端**：Vue 3 + Vite + TailwindCSS + Pinia + Vue Router + CodeMirror 6。
 - **后端 app（16 个）**：`accounts` 账号、`core` 通用中心、`files` 文件、`notes` 笔记、`projects` 项目看板、`im` 即时消息、`dashboard` 工作台、`tools` 在线小工具、`learning` 学习中心、`assistant` AI 助手、`devtools` 开发者工具箱、`dataintel` 数据智能、`officesuite` 办公套件、`code` 代码工坊、`minitools` 迷你工具、`ws_app` WebSocket 装配。
 - 挂载前缀统一在 `backend/config/urls.py`：`/api/auth/`、`/api/files/`、`/api/notes/`、`/api/projects/`、`/api/im/`、`/api/tools/`、`/api/dashboard/`、`/api/core/`、`/api/learning/`、`/api/assistant/`、`/api/devtools/`、`/api/minitools/`、`/api/dataintel/`、`/api/officesuite/`、`/api/code/`（共 **15** 条 HTTP 前缀；第 16 个 app `ws_app` 只做 ASGI/WebSocket 装配，不挂 HTTP 前缀）。
@@ -279,14 +279,14 @@
 ## 3.2 启动方式（PowerShell）
 
 ```powershell
-# 后端 HTTP（默认 8000）—— 必须用 Desktop 外的 banna 解释器（backend\venv 在 Desktop 树下、SQLite 文件写被拦截，见 1.3·B1）
-cd C:\Users\banna\Desktop\web\backend
-C:\Users\banna\.conda\envs\banna\python.exe manage.py runserver 8000
-# WebSocket（需要实时协同/消息时另开一个窗口）—— 必须换端口，否则与上面的 runserver 抢 8000
-C:\Users\banna\.conda\envs\banna\python.exe -m daphne -b 127.0.0.1 -p 8001 config.asgi:application
+# 后端 HTTP（默认 8000）—— 用项目自带 3.13 venv，无需 conda / PYTHONPATH
+cd C:\Users\banna\Desktop\banna\web\backend
+.\venv\Scripts\python.exe manage.py runserver 8000
+# 说明：WebSocket 已由 Channels 的 runserver 一并承载，开发阶段无需单独起 daphne；
+#       仅生产部署才用 daphne / uvicorn（见 docs/05 生产段落）
 
 # 前端开发（再开一个窗口）
-cd C:\Users\banna\Desktop\web\frontend
+cd C:\Users\banna\Desktop\banna\web\frontend
 npm run dev
 # 前端生产构建：直接跑封装脚本（自动使用 Desktop 外 esbuild，规避 B2）
 .\build.ps1
@@ -295,7 +295,7 @@ npm run dev
 
 > **端口约定**：HTTP `8000`、WebSocket `8001`（两者不能同端口）。若只做 REST 联调，**只起 runserver 即可**，daphne 仅在需要 Yjs 协同编辑 / IM 实时消息时启动；前端 Vite 的代理目标以 `frontend/vite.config.js` 为准。
 
-> 注：`banna` 是已存在的独立 conda 环境（Python 3.11.16，已装全部后端依赖）。若日后要在 Desktop 内重新建 venv，需先确认本机安全策略不再拦截其 SQLite 文件写。
+> 注：本机曾有的 `banna` conda 环境已不存在；现统一用 `backend\venv`（Python 3.13）。该 venv 在 Desktop 树下可正常运行（历史 1.3·B1 的 SQLite 拦截问题已不再复现）。
 
 演示账号：**admin / admin123**（超级用户）；新注册用户自动绑定普通用户角色。
 
