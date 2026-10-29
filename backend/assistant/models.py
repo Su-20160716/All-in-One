@@ -30,6 +30,10 @@ class AIConversation(models.Model):
     )
     model = models.CharField(max_length=64, blank=True, verbose_name="使用的模型")
     message_count = models.IntegerField(default=0, verbose_name="消息数")
+    # F56 长对话摘要：按消息数做缓存，新增消息后需要重新生成
+    summary = models.TextField(blank=True, default="", verbose_name="对话摘要")
+    summary_at = models.DateTimeField(null=True, blank=True, verbose_name="摘要生成时间")
+    summary_message_count = models.IntegerField(default=0, verbose_name="摘要覆盖的消息数")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 

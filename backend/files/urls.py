@@ -12,9 +12,11 @@ urlpatterns = [
     # 文件
     path("", views.FileListView.as_view(), name="file-list"),
     path("search/", views.FileSearchView.as_view(), name="file-search"),
+    path("search/fulltext/", views.FileFullTextSearchView.as_view(), name="file-search-fulltext"),
     path("recent/", views.RecentFileView.as_view(), name="recent-file"),
     path("starred/", views.StarredFileView.as_view(), name="starred-file"),
     path("analysis/", views.StorageAnalysisView.as_view(), name="storage-analysis"),
+    path("quota/advice/", views.StorageAdviceView.as_view(), name="file-quota-advice"),
     path("batch/", views.FileBatchView.as_view(), name="file-batch"),
     path("batch-tag/", views.FileBatchTagView.as_view(), name="file-batch-tag"),
     path("batch-rename/", views.FileBatchRenameView.as_view(), name="file-batch-rename"),
@@ -57,6 +59,9 @@ urlpatterns = [
     path("<int:pk>/pdf/", views.FilePdfView.as_view(), name="file-pdf"),
     # F561 可见性快照
     path("<int:pk>/visibility/", views.FileVisibilityView.as_view(), name="file-visibility"),
+    # F11 版本历史
+    path("<int:pk>/versions/", views.FileVersionListView.as_view(), name="file-versions"),
+    path("<int:pk>/versions/<int:version>/restore/", views.FileVersionRestoreView.as_view(), name="file-version-restore"),
     # 回收站
     path("trash/", views.TrashListView.as_view(), name="trash-list"),
     path("trash/action/", views.TrashActionView.as_view(), name="trash-action"),
@@ -64,6 +69,8 @@ urlpatterns = [
     # 共享
     path("shares/", views.ShareLinkListView.as_view(), name="share-list"),
     path("shares/create/", views.ShareLinkCreateView.as_view(), name="share-create"),
+    # F14 必须先于 <str:token>，否则 "1" 会被当成 token
+    path("shares/<int:pk>/analytics/", views.ShareAnalyticsView.as_view(), name="share-analytics"),
     path("shares/<str:token>/", views.ShareLinkDetailView.as_view(), name="share-detail"),
 ]
 
@@ -72,9 +79,11 @@ share_urlpatterns = [
     # 旧路由保留（向后兼容，已发布的外链继续有效）
     path("share/<str:token>/", views.ShareAccessView.as_view(), name="share-access"),
     path("share/<str:token>/download/<int:pk>/", views.ShareDownloadView.as_view(), name="share-download"),
+    path("share/<str:token>/raw/<int:pk>/", views.ShareRawView.as_view(), name="share-raw"),
     # F3：/api/share/* 别名。前端分享页是 history 路由 /share/:token，
     # 与旧根级 /share/ 混在一起会导致「打开分享链接看到的是 JSON 而不是页面」，
     # 故 API 统一挪到 /api/share/ 前缀，根级路由仅作兼容保留
     path("api/share/<str:token>/", views.ShareAccessView.as_view(), name="share-access-api"),
     path("api/share/<str:token>/download/<int:pk>/", views.ShareDownloadView.as_view(), name="share-download-api"),
+    path("api/share/<str:token>/raw/<int:pk>/", views.ShareRawView.as_view(), name="share-raw-api"),
 ]

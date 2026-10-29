@@ -10,6 +10,20 @@ def _has_prefetch(obj, name):
     return bool(cache) and name in cache
 
 
+def _materialize(instance):
+    """many=True 时 DRF 传入的是 QuerySet；先物化，预取逻辑才拿得到每条记录"""
+    if instance is None:
+        return []
+    if isinstance(instance, (list, tuple)):
+        return list(instance)
+    if hasattr(instance, "__iter__") and not isinstance(instance, (str, bytes, dict)):
+        try:
+            return list(instance)
+        except TypeError:
+            return [instance]
+    return [instance]
+
+
 class QuickReplySerializer(serializers.ModelSerializer):
     class Meta:
         model = QuickReply
@@ -80,9 +94,7 @@ class ChatMessageSerializer(serializers.ModelSerializer):
         # 50 条消息 = 150+ 次，现在整批 2 次
         self._session_members = {}
         self._session_settings = {}
-        instances = self.instance if isinstance(self.instance, list) else (
-            [self.instance] if self.instance is not None else []
-        )
+        instances = _materialize(self.instance)
         sids = list({m.session_id for m in instances if getattr(m, "session_id", None)})
         if sids:
             for sid, uid in ChatSession.objects.filter(id__in=sids).values_list("id", "members__id"):
@@ -144,6 +156,7 @@ class SessionSerializer(serializers.ModelSerializer):
     is_pinned = serializers.SerializerMethodField()
     is_archived = serializers.SerializerMethodField()
     draft = serializers.SerializerMethodField()
+    tags = serializers.SerializerMethodField()
     member_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -151,7 +164,7 @@ class SessionSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "type", "members", "members_info", "owner", "announcement",
             "avatar", "member_count", "last_message", "unread", "is_muted", "is_pinned",
-            "is_archived", "draft", "created_at",
+            "is_archived", "draft", "tags", "created_at",
         ]
 
     def __init__(self, *args, **kwargs):
@@ -162,9 +175,7 @@ class SessionSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         user = getattr(request, "user", None) if request else None
         if user is not None and user.is_authenticated:
-            instances = self.instance if isinstance(self.instance, list) else (
-                [self.instance] if self.instance is not None else []
-            )
+            instances = _materialize(self.instance)
             ids = [s.id for s in instances if getattr(s, "id", None)]
             if ids:
                 self._settings_map = {
@@ -208,6 +219,10 @@ class SessionSerializer(serializers.ModelSerializer):
                 "sender_name": msg.sender.display_name if msg.sender else "系统"}
 
     def get_unread(self, obj):
+        # 列表场景由视图注解 unread_count（单条 SQL），无需逐会话 COUNT
+        cached = getattr(obj, "unread_count", None)
+        if cached is not None:
+            return cached
         request = self.context.get("request")
         if not request:
             return 0
@@ -232,3 +247,7 @@ class SessionSerializer(serializers.ModelSerializer):
     def get_draft(self, obj):
         s = self._setting(obj)
         return s.draft if s else ""
+
+    def get_tags(self, obj):
+        s = self._setting(obj)
+        return list(s.tags or []) if s else []

@@ -37,6 +37,11 @@ class CoreConfig(AppConfig):
                     cur.execute("PRAGMA journal_mode=WAL")
                     cur.execute("PRAGMA busy_timeout=20000")
                     cur.execute("PRAGMA synchronous=NORMAL")
+                    # 排序/临时表放内存：默认走磁盘临时文件，一旦系统 Temp 不可写
+                    # （安全软件管控、只读 rootfs、容器无 /tmp）就会报
+                    # "unable to open database file"，典型受害者是日志/文件导出（带
+                    # Meta.ordering 的万行切片）。本项目 SQLite 规模下内存排序代价可忽略。
+                    cur.execute("PRAGMA temp_store=MEMORY")
             except Exception:
                 # pragma 失败不影响启动（只读库等场景）；登记日志便于排查
                 # WAL 未生效时的 database is locked 问题

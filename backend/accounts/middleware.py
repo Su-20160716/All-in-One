@@ -70,14 +70,12 @@ class LastActiveMiddleware(MiddlewareMixin):
             return None
         # 被禁用账号：除登出外一律拒绝
         if getattr(user, "is_disabled", False):
-            # 延迟导入，避免循环依赖
-            from rest_framework.response import Response
-            from rest_framework import status as http_status
-
+            # 中间件必须返回 HttpResponse，不能返回 DRF Response——
+            # 后者需要 DRF 视图设置 accepted_renderer，直接返回会 500 而非 403
             if request.path.startswith(API_PREFIX) and not request.path.endswith("/logout/"):
-                return Response(
+                return JsonResponse(
                     {"code": 403, "message": "账号已被禁用，请联系管理员", "detail": {}},
-                    status=http_status.HTTP_403_FORBIDDEN,
+                    status=403,
                 )
         now = timezone.now()
         last = user.last_active_at

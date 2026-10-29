@@ -40,6 +40,10 @@ urlpatterns = [
     path("admin/permissions/", views.PermissionListView.as_view(), name="permission-list"),
     path("admin/online/", views.OnlineUsersView.as_view(), name="online-users"),
     # F636 角色变更历史（管理员）
+    # F08/F09/F10 组织与权限增强
+    path("admin/departments/<int:pk>/move/", views.DepartmentMoveView.as_view(), name="department-move"),
+    path("admin/activity-heatmap/", views.ActivityHeatmapView.as_view(), name="activity-heatmap"),
+    path("admin/roles/<int:pk>/matrix/", views.RoleMatrixView.as_view(), name="role-matrix"),
     path("admin/role-audit/", views.RoleAuditLogView.as_view(), name="role-audit"),
     # ---------------- v8 新增（F613–F626 账号与个人） ----------------
     # F614 注销申请 7 天冷静期（可撤销）

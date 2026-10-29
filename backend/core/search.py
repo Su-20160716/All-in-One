@@ -21,7 +21,6 @@ import math
 import os
 import re
 from collections import Counter
-from datetime import datetime
 
 from django.conf import settings
 
@@ -431,13 +430,16 @@ def search(query: str, owner_ids, modules=None, limit: int = 20, offset: int = 0
     # 协同回写/模板生成的同文笔记），原先同分顺序取决于 DB 返回顺序
     # 不可控，新写入的文档可能被历史同分文档挤出首页。加 recency
     # tiebreaker 后同分文档新的在前，检索结果更符合直觉。
-    ts_map = dict(
-        SearchDoc.objects.filter(id__in=list(scores)[:5000])
+    # 用 epoch 秒做 tiebreaker，避免 naive 的 datetime.min 与 aware 的
+    # updated_at（USE_TZ=True）比较时抛 TypeError
+    ts_map = {
+        doc_id: ts.timestamp() if ts else 0.0
+        for doc_id, ts in SearchDoc.objects.filter(id__in=list(scores)[:5000])
         .values_list("id", "updated_at")
-    )
+    }
     ranked = sorted(
         scores.items(),
-        key=lambda kv: (kv[1], ts_map.get(kv[0]) or datetime.min),
+        key=lambda kv: (kv[1], ts_map.get(kv[0], 0.0)),
         reverse=True,
     )
 

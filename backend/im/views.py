@@ -1,6 +1,9 @@
 """IM 视图：会话管理、成员、成员设置、消息收发、撤回、删除、转发、搜索、未读汇总"""
+from datetime import datetime
+
 from django.db import transaction
-from django.db.models import Prefetch, Q
+from django.db.models import Count, DateTimeField, OuterRef, Q, Subquery, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
@@ -8,7 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
-from core.validators import as_date, as_int, parse_bool
+from core.validators import as_date, as_datetime, as_int, parse_bool
 from im.models import ChatMessage, ChatSession, KeywordAlert, MessageFavorite, QuickReply, SessionMemberSetting, TodoItem
 from im.serializers import (
     ChatMessageSerializer,
@@ -24,6 +27,29 @@ def _member_sessions(user):
     return ChatSession.objects.filter(members=user).distinct()
 
 
+_EPOCH = timezone.make_aware(datetime(1970, 1, 1))
+
+
+def _with_unread(qs, user):
+    """给会话 queryset 标注 unread_count（单条 SQL，替代每个会话一次 COUNT）。
+
+    阈值取该用户在该会话的 last_read_at；没有设置记录时回落到 1970 年，
+    等价于「全部未读」。
+    """
+    last_read = Subquery(
+        SessionMemberSetting.objects.filter(session=OuterRef("pk"), user=user)
+        .values("last_read_at")[:1]
+    )
+    threshold = Coalesce(last_read, Value(_EPOCH), output_field=DateTimeField())
+    unread = Subquery(
+        ChatMessage.objects.filter(session=OuterRef("pk"))
+        .exclude(sender=user)
+        .filter(created_at__gt=threshold)
+        .values("session").annotate(c=Count("id")).values("c")[:1]
+    )
+    return qs.annotate(unread_count=Coalesce(unread, 0))
+
+
 def _get_setting(session, user):
     obj, _ = SessionMemberSetting.objects.get_or_create(session=session, user=user)
     return obj
@@ -36,16 +62,27 @@ class SessionListView(APIView):
         archived = request.query_params.get("archived")
         # B6：prefetch members（members_info/member_count 共用）+ 最后一条消息
         # （to_attr 预取，避免每会话一次 order by 查询）
-        sessions = list(
-            _member_sessions(request.user).prefetch_related(
-                "members",
-                Prefetch(
-                    "messages",
-                    queryset=ChatMessage.objects.exclude(is_recalled=True).select_related("sender").order_by("-created_at"),
-                    to_attr="_last_messages",
-                ),
-            )
+        # 每条会话只取「最后一条消息」：旧实现把每个会话的全部消息都预取进内存。
+        # 先用相关子查询拿 last_message_id，再批量取这些消息（共 2 条 SQL）。
+        last_msg_id = (
+            ChatMessage.objects.filter(session=OuterRef("pk"))
+            .exclude(is_recalled=True)
+            .order_by("-created_at")
+            .values("id")[:1]
         )
+        sessions = list(
+            _with_unread(_member_sessions(request.user), request.user)
+            .annotate(last_message_id=Subquery(last_msg_id))
+            .prefetch_related("members")
+        )
+        msg_ids = [s.last_message_id for s in sessions if s.last_message_id]
+        last_msgs = {
+            m.id: m
+            for m in ChatMessage.objects.filter(id__in=msg_ids).select_related("sender")
+        } if msg_ids else {}
+        for s in sessions:
+            msg = last_msgs.get(s.last_message_id)
+            s._last_messages = [msg] if msg else []
         data = SessionSerializer(sessions, many=True, context={"request": request}).data
         # 归档过滤：archived=1 仅归档；默认仅未归档
         if archived == "1":
@@ -54,6 +91,10 @@ class SessionListView(APIView):
             pass
         else:
             data = [d for d in data if not d["is_archived"]]
+        # 标签过滤（会话设置里的自定义分组标签）
+        tag = (request.query_params.get("tag") or "").strip()
+        if tag:
+            data = [d for d in data if tag in (d.get("tags") or [])]
         # 关键字过滤（会话名 / 对方名）
         kw = (request.query_params.get("search") or "").strip()
         if kw:
@@ -69,7 +110,15 @@ class SessionListView(APIView):
         stype = request.data.get("type", "single")
         if stype == "direct":
             stype = "single"
-        member_ids = request.data.get("member_ids") or []
+        raw_ids = request.data.get("member_ids") or []
+        if not isinstance(raw_ids, (list, tuple)):
+            return Response({"message": "member_ids 必须是数组"}, status=400)
+        if len(raw_ids) > 200:
+            return Response({"message": "单次最多选择 200 人"}, status=400)
+        try:
+            member_ids = [as_int(x, field="member_ids", minimum=1) for x in raw_ids]
+        except ValidationError:
+            return Response({"message": "member_ids 必须全部为整数"}, status=400)
         if stype == "single":
             other_id = member_ids[0] if member_ids else None
             other = User.objects.filter(id=other_id).first()
@@ -77,11 +126,16 @@ class SessionListView(APIView):
                 return Response({"message": "对方不存在"}, status=400)
             exist = ChatSession.objects.filter(type="single", members=request.user).filter(members=other).first()
             if exist:
+                # 对方可能「退出」过单聊（= 归档），重新发起时恢复显示
+                setting = _get_setting(exist, request.user)
+                if setting.is_archived:
+                    setting.is_archived = False
+                    setting.save(update_fields=["is_archived"])
                 return Response(SessionSerializer(exist, context={"request": request}).data)
             session = ChatSession.objects.create(type="single", owner=request.user)
             session.members.add(request.user, other)
         else:
-            name = (request.data.get("name") or "未命名群聊").strip()
+            name = str(request.data.get("name") or "未命名群聊").strip()
             session = ChatSession.objects.create(type="group", name=name, owner=request.user,
                                                  announcement=request.data.get("announcement", ""))
             session.members.add(request.user)
@@ -181,8 +235,12 @@ class SessionLeaveView(APIView):
         if not s:
             return Response({"message": "会话不存在"}, status=404)
         if s.type == "single":
-            s.delete()
-            return Response({"message": "会话已删除"})
+            # 单聊「删除」只对当前用户归档：直接删会话会级联删掉对方的历史消息
+            setting = _get_setting(s, request.user)
+            setting.is_archived = True
+            setting.is_pinned = False
+            setting.save(update_fields=["is_archived", "is_pinned"])
+            return Response({"message": "会话已从列表移除"})
         if s.owner_id == request.user.id:
             # 群主退出 → 解散群
             send_to_session(s.id, {"type": "group.system", "data": {"content": "群主已解散该群聊"}})
@@ -200,7 +258,11 @@ class SessionTransferView(APIView):
         s = ChatSession.objects.filter(pk=pk).first()
         if not s or s.owner_id != request.user.id:
             return Response({"message": "仅群主可转让"}, status=403)
-        new_owner = s.members.filter(id=request.data.get("user_id")).first()
+        try:
+            new_owner_id = as_int(request.data.get("user_id"), field="user_id", minimum=1)
+        except ValidationError:
+            return Response({"message": "user_id 必须是整数"}, status=400)
+        new_owner = s.members.filter(id=new_owner_id).first()
         if not new_owner:
             return Response({"message": "新群主必须是群成员"}, status=400)
         s.owner = new_owner
@@ -225,12 +287,24 @@ class SessionSettingView(APIView):
         if "draft" in request.data:
             setting.draft = request.data["draft"]
             changed.append("draft")
+        if "tags" in request.data:
+            raw = request.data["tags"]
+            if not isinstance(raw, (list, tuple)):
+                return Response({"message": "tags 必须是数组"}, status=400)
+            tags = []
+            for t in raw:
+                val = str(t or "").strip()[:20]
+                if val and val not in tags:
+                    tags.append(val)
+            setting.tags = tags[:10]
+            changed.append("tags")
         if request.data.get("mark_read"):
             setting.last_read_at = timezone.now()
             changed.append("last_read_at")
         setting.save()
         return Response({"message": "设置已更新", "is_muted": setting.is_muted, "is_pinned": setting.is_pinned,
-                         "is_archived": setting.is_archived, "draft": setting.draft})
+                         "is_archived": setting.is_archived, "draft": setting.draft,
+                         "tags": list(setting.tags or [])})
 
 
 class MessageListView(APIView):
@@ -285,6 +359,11 @@ class MessageCreateView(APIView):
             return Response({"message": "会话不存在或你不在会话中"}, status=404)
         content = request.data.get("content", "")
         msg_type = request.data.get("msg_type", "text")
+        # 类型白名单：自由字符串会写进库，前端按类型选渲染器，脏值会渲染异常
+        if msg_type not in {t[0] for t in ChatMessage.TYPE_CHOICES}:
+            return Response({"message": "msg_type 非法"}, status=400)
+        if isinstance(content, str) and len(content) > 20000:
+            return Response({"message": "消息内容不能超过 20000 字"}, status=400)
         forward_id = as_int(request.data.get("forward_from"), default=None, field="forward_from") if request.data.get("forward_from") else None
         forward = ChatMessage.objects.filter(id=forward_id, session__members=request.user).first() if forward_id else None
         reply_id = as_int(request.data.get("reply_to"), default=None, field="reply_to") if request.data.get("reply_to") else None
@@ -295,6 +374,11 @@ class MessageCreateView(APIView):
             session=s, sender=request.user, content=content, msg_type=msg_type,
             attachments=request.data.get("attachments", []) or [], forward_from=forward, reply_to=reply,
         )
+        # 给已归档会话发消息 = 主动恢复显示
+        setting = _get_setting(s, request.user)
+        if setting.is_archived:
+            setting.is_archived = False
+            setting.save(update_fields=["is_archived"])
         send_to_session(s.id, {"type": "chat.message", "data": ChatMessageSerializer(msg, context={"request": request}).data})
         # 非免打扰成员推送通知
         muted_ids = set(SessionMemberSetting.objects.filter(session=s, is_muted=True).values_list("user_id", flat=True))
@@ -425,7 +509,17 @@ class GlobalMessageSearchView(APIView):
         date_to = request.query_params.get("date_to")
         if date_to:
             qs = qs.filter(created_at__date__lte=as_date(date_to, field="date_to"))
-        if not kw and not sender and not date_from and not date_to:
+        msg_type = (request.query_params.get("msg_type") or "").strip()
+        if msg_type:
+            qs = qs.filter(msg_type=msg_type)
+        has_attachment = request.query_params.get("has_attachment")
+        if has_attachment not in (None, ""):
+            if parse_bool(has_attachment, field="has_attachment"):
+                qs = qs.exclude(attachments=[])
+            else:
+                qs = qs.filter(attachments=[])
+        if not kw and not sender and not date_from and not date_to and not msg_type \
+                and has_attachment in (None, ""):
             return Response({"list": [], "total": 0})
         qs = qs.order_by("-id")[:100]
         data = []
@@ -440,15 +534,17 @@ class UnreadSummaryView(APIView):
     """未读消息汇总（免打扰会话单独计数）"""
 
     def get(self, request):
-        sessions = _member_sessions(request.user)
+        # B6：原来每个会话 2 次查询（setting + COUNT）；现在未读数由一条
+        # 带相关子查询的注解算出，设置一次批量取出
+        sessions = _with_unread(_member_sessions(request.user), request.user)
+        settings = {
+            s.session_id: s for s in SessionMemberSetting.objects.filter(user=request.user)
+        }
         total, muted_total, per_session = 0, 0, {}
         for s in sessions:
-            setting = SessionMemberSetting.objects.filter(session=s, user=request.user).first()
-            qs = s.messages.exclude(sender=request.user)
-            if setting and setting.last_read_at:
-                qs = qs.filter(created_at__gt=setting.last_read_at)
-            n = qs.count()
+            n = s.unread_count or 0
             per_session[s.id] = n
+            setting = settings.get(s.id)
             if setting and setting.is_muted:
                 muted_total += n
             else:
@@ -482,11 +578,11 @@ class QuickReplyListView(APIView):
         return Response({"list": QuickReplySerializer(qs, many=True).data, "total": qs.count()})
 
     def post(self, request):
-        content = (request.data.get("content") or "").strip()
+        content = str(request.data.get("content") or "").strip()
         if not content:
             return Response({"message": "内容不能为空"}, status=400)
         qr = QuickReply.objects.create(
-            owner=request.user, title=request.data.get("title", "")[:120], content=content
+            owner=request.user, title=str(request.data.get("title") or "")[:120], content=content
         )
         return Response(QuickReplySerializer(qr).data, status=201)
 
@@ -501,7 +597,7 @@ class QuickReplyDetailView(APIView):
             return Response({"message": "模板不存在"}, status=404)
         for f in ("title", "content"):
             if f in request.data:
-                setattr(qr, f, request.data[f])
+                setattr(qr, f, str(request.data[f] or ""))
         qr.save()
         return Response(QuickReplySerializer(qr).data)
 
@@ -548,7 +644,7 @@ class MessageEditView(APIView):
             return Response({"message": "该消息不可编辑"}, status=400)
         if timezone.now() - msg.created_at > timezone.timedelta(minutes=10):
             return Response({"message": "超过 10 分钟不可编辑"}, status=400)
-        content = (request.data.get("content") or "").strip()
+        content = str(request.data.get("content") or "").strip()
         if not content:
             return Response({"message": "消息内容不能为空"}, status=400)
         msg.content = content
@@ -624,17 +720,24 @@ class TodoListView(APIView):
                          "open": qs.filter(is_done=False).count()})
 
     def post(self, request):
-        message_id = request.data.get("message_id")
+        try:
+            message_id = as_int(request.data.get("message_id"), default=None, field="message_id", minimum=1)
+        except ValidationError:
+            return Response({"message": "message_id 必须是整数"}, status=400)
         msg = ChatMessage.objects.filter(id=message_id, session__members=request.user).first() if message_id else None
-        content = (request.data.get("content") or (msg.content if msg else "") or "").strip()
+        content = str(request.data.get("content") or (msg.content if msg else "") or "").strip()
         if not content:
             return Response({"message": "内容不能为空"}, status=400)
+        try:
+            remind_at = as_datetime(request.data.get("remind_at"), field="remind_at") if request.data.get("remind_at") else None
+        except ValidationError:
+            return Response({"message": "remind_at 必须是合法日期时间"}, status=400)
         item = TodoItem.objects.create(
             owner=request.user,
             session=msg.session if msg else None,
             message=msg,
             content=content[:500],
-            remind_at=request.data.get("remind_at") or None,
+            remind_at=remind_at,
         )
         return Response(TodoItemSerializer(item).data, status=201)
 
@@ -651,10 +754,17 @@ class TodoDetailView(APIView):
             return Response({"message": "条目不存在"}, status=404)
         if "is_done" in request.data:
             item.is_done = parse_bool(request.data["is_done"], field="is_done")
-        if "content" in request.data and (request.data["content"] or "").strip():
-            item.content = request.data["content"].strip()[:500]
+        if "content" in request.data and str(request.data["content"] or "").strip():
+            item.content = str(request.data["content"]).strip()[:500]
         if "remind_at" in request.data:
-            item.remind_at = request.data["remind_at"] or None
+            raw = request.data["remind_at"]
+            if not raw:
+                item.remind_at = None
+            else:
+                try:
+                    item.remind_at = as_datetime(raw, field="remind_at")
+                except ValidationError:
+                    return Response({"message": "remind_at 必须是合法日期时间"}, status=400)
         item.save()
         return Response(TodoItemSerializer(item).data)
 
@@ -761,7 +871,7 @@ class SessionAnnouncementView(APIView):
             return Response({"message": "单聊没有群公告"}, status=400)
         if s.owner_id != request.user.id:
             return Response({"message": "仅群主可发布公告"}, status=403)
-        s.announcement = (request.data.get("announcement") or "")[:500]
+        s.announcement = str(request.data.get("announcement") or "")[:500]
         s.save(update_fields=["announcement"])
         broadcast_session(s.id, {"type": "session.updated", "data": {"session_id": s.id}})
         return Response({"message": "公告已更新", "session_id": s.id, "announcement": s.announcement})
@@ -792,7 +902,11 @@ class FavoriteListView(APIView):
         return Response({"list": MessageFavoriteSerializer(qs, many=True).data, "total": qs.count()})
 
     def post(self, request):
-        msg = ChatMessage.objects.filter(id=request.data.get("message_id"), session__members=request.user).first()
+        try:
+            message_id = as_int(request.data.get("message_id"), field="message_id", minimum=1)
+        except ValidationError:
+            return Response({"message": "message_id 必须是整数"}, status=400)
+        msg = ChatMessage.objects.filter(id=message_id, session__members=request.user).first()
         if not msg:
             return Response({"message": "消息不存在"}, status=404)
         fav = MessageFavorite.objects.filter(owner=request.user, message=msg).first()
@@ -800,7 +914,7 @@ class FavoriteListView(APIView):
             fav.delete()
             return Response({"message": "已取消收藏", "favorited": False})
         fav = MessageFavorite.objects.create(owner=request.user, message=msg,
-                                             note=(request.data.get("note") or "")[:200])
+                                             note=str(request.data.get("note") or "")[:200])
         return Response({"message": "已收藏", "favorited": True,
                          "item": MessageFavoriteSerializer(fav).data}, status=201)
 
@@ -955,4 +1069,38 @@ class SessionUnreadLineView(APIView):
             "session_id": s.id, "has_unread": True, "unread_count": unread.count(),
             "first_unread_id": first_unread.id,
             "context": ChatMessageSerializer(context, many=True, context={"request": request}).data,
+        })
+
+
+class MessageReadersView(APIView):
+    """F26 已读回执详情：发送者 / 群主可查看谁已读、谁未读"""
+
+    def get(self, request, pk):
+        msg = ChatMessage.objects.filter(id=pk, session__members=request.user).first()
+        if not msg:
+            return Response({"message": "消息不存在"}, status=404)
+        session = msg.session
+        can_view = (
+            msg.sender_id == request.user.id
+            or (session.type == "group" and session.owner_id == request.user.id)
+        )
+        if not can_view:
+            return Response({"message": "仅发送者或群主可查看已读详情"}, status=403)
+        settings = {
+            s.user_id: s.last_read_at
+            for s in SessionMemberSetting.objects.filter(session=session)
+        }
+        readers, unreaders = [], []
+        for u in session.members.exclude(id=msg.sender_id):
+            last_read = settings.get(u.id)
+            row = {"id": u.id, "display_name": u.display_name,
+                   "avatar": u.avatar.url if u.avatar else ""}
+            if last_read and last_read >= msg.created_at:
+                readers.append(row)
+            else:
+                unreaders.append(row)
+        return Response({
+            "message_id": msg.id, "session_id": session.id,
+            "read": len(readers), "unread": len(unreaders),
+            "readers": readers, "unreaders": unreaders,
         })

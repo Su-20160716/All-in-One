@@ -12,6 +12,8 @@ from difflib import SequenceMatcher
 
 from django.utils.text import slugify
 
+from core.regex_safety import RegexSafetyError, compile_safe, guard_subject
+
 from .common import (as_lines, endpoint, fail, ok, opt_bool, opt_num, opt_str,
                      p, req, req_list, req_num, req_str)
 from .data import REGEX_TOKENS
@@ -503,11 +505,16 @@ def json_unflatten(request):
         for i, part in enumerate(parts):
             nxt_is_idx = i + 1 < len(parts) and parts[i + 1].isdigit()
             if nxt_is_idx:
+                idx = int(parts[i + 1])
+                if idx > 10000:
+                    raise ValueError("数组下标不能超过 10000")
                 cur = cur.setdefault(part, [])
-                nxt = parts[i + 1]
-                while len(cur) <= int(nxt):
-                    cur.append(None)
-                cur = cur[int(nxt)]
+                if not isinstance(cur, list):
+                    raise ValueError(f"字段 {part} 既被当作对象又被当作数组")
+                need = idx + 1 - len(cur)
+                if need > 0:
+                    cur.extend([None] * need)
+                cur = cur[idx]
             elif i + 1 < len(parts):
                 cur = cur.setdefault(part, {})
             else:
@@ -643,8 +650,12 @@ def log_parse(request):
         m = _LOG_RE.match(ln)
         if m:
             d = m.groupdict()
-            d["status"] = int(d["status"])
-            d["size"] = None if d["size"] == "-" else int(d["size"])
+            try:
+                d["status"] = int(d["status"])
+                d["size"] = None if d["size"] == "-" else int(d["size"])
+            except (TypeError, ValueError, OverflowError):
+                bad += 1
+                continue
             rows.append(d)
         else:
             bad += 1
@@ -721,7 +732,7 @@ def log_filter(request):
     keyword = opt_str(request, "keyword")
     regex = opt_str(request, "regex")
     invert = opt_bool(request, "invert")
-    pat = re.compile(regex) if regex else None
+    pat = compile_safe(regex) if regex else None
     out = []
     for ln in as_lines(text):
         keep = True
@@ -812,12 +823,12 @@ def encode_punycode(request):
 @endpoint()
 def regex_replace(request):
     """正则替换（带次数与命名组支持）。"""
-    text = req_str(request)
+    text = guard_subject(req_str(request))
     pattern = req(request, "pattern")
     repl = opt_str(request, "replace", "")
     flags = re.I if opt_bool(request, "ignore_case") else 0
     flags |= re.M if opt_bool(request, "multiline") else 0
-    compiled = re.compile(str(pattern), flags)
+    compiled = compile_safe(str(pattern), flags)
     result, n = compiled.subn(repl, text)
     return ok({"result": result, "count": n})
 
@@ -825,10 +836,10 @@ def regex_replace(request):
 @endpoint()
 def regex_extract(request):
     """正则提取全部匹配（含命名组/位置）。"""
-    text = req_str(request)
+    text = guard_subject(req_str(request))
     pattern = req(request, "pattern")
     flags = re.I if opt_bool(request, "ignore_case") else 0
-    compiled = re.compile(str(pattern), flags)
+    compiled = compile_safe(str(pattern), flags)
     matches = []
     for m in compiled.finditer(text):
         item = {"match": m.group(0), "start": m.start(), "end": m.end()}
@@ -845,9 +856,9 @@ def regex_extract(request):
 @endpoint()
 def regex_split(request):
     """正则切分。"""
-    text = req_str(request)
+    text = guard_subject(req_str(request))
     pattern = req(request, "pattern")
-    parts = re.split(str(pattern), text)
+    parts = compile_safe(str(pattern)).split(text)
     if opt_bool(request, "drop_empty"):
         parts = [x for x in parts if x]
     return ok({"parts": parts, "count": len(parts)})
@@ -860,10 +871,10 @@ def regex_explain(request):
     found = [t for t in REGEX_TOKENS if all(tok in pattern for tok in t[:1])]
     explained = [{"token": t[0], "meaning": t[1]} for t in found]
     try:
-        re.compile(pattern)
+        compile_safe(pattern)
         valid = True
         err = ""
-    except re.error as e:
+    except (RegexSafetyError, re.error) as e:
         valid, err = False, str(e)
     return ok({"valid": valid, "error": err, "tokens": explained, "length": len(pattern)})
 
@@ -871,17 +882,20 @@ def regex_explain(request):
 @endpoint()
 def regex_grep(request):
     """按正则过滤行（支持 -v 反选与高亮标记）。"""
-    text = req_str(request)
+    text = guard_subject(req_str(request))
     pattern = req(request, "pattern")
-    pat = re.compile(str(pattern))
+    pat = compile_safe(str(pattern))
+    highlight = None
     invert = opt_bool(request, "invert")
+    if opt_bool(request, "highlight") and not invert:
+        highlight = compile_safe(f"({pattern})")
     keep, drop = [], 0
     for ln in as_lines(text):
         hit = bool(pat.search(ln))
         if invert:
             hit = not hit
         if hit and ln.strip():
-            keep.append(re.sub(f"({pattern})", r"【\1】", ln) if not invert and opt_bool(request, "highlight") else ln)
+            keep.append(highlight.sub(r"【\1】", ln) if highlight else ln)
         else:
             drop += 1
     return ok({"lines": keep, "matched": len(keep), "skipped": drop})

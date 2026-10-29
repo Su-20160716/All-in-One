@@ -30,6 +30,8 @@ class OperationLog(models.Model):
     action = models.CharField(max_length=16, choices=ACTION_CHOICES, default="other", verbose_name="动作")
     target = models.CharField(max_length=255, blank=True, verbose_name="操作对象")
     detail = models.TextField(blank=True, verbose_name="详情")
+    # F01：更新类操作的字段级前后值（仅 notes/files/projects 白名单采集）
+    diff = models.JSONField(null=True, blank=True, verbose_name="字段变更")
     ip = models.GenericIPAddressField(null=True, blank=True, verbose_name="IP")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="时间")
 
@@ -76,13 +78,18 @@ class Notification(models.Model):
 
 
 class NotificationSetting(models.Model):
-    """用户通知偏好：按分类开关（免打扰）"""
+    """用户通知偏好：按分类开关 + 分渠道 + 静默时段（F04）"""
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notification_settings", verbose_name="用户"
     )
     category = models.CharField(max_length=16, default="system", verbose_name="分类")
     enabled = models.BooleanField(default=True, verbose_name="是否接收")
+    # 站内(inapp)/邮件(email)/Webhook(webhook)；空列表按 ["inapp"] 处理
+    channels = models.JSONField(default=list, blank=True, verbose_name="推送渠道")
+    webhook_url = models.CharField(max_length=500, blank=True, default="", verbose_name="Webhook 地址")
+    quiet_start = models.TimeField(null=True, blank=True, verbose_name="静默开始")
+    quiet_end = models.TimeField(null=True, blank=True, verbose_name="静默结束")
 
     class Meta:
         verbose_name = "通知偏好"
@@ -333,3 +340,24 @@ class SlowEndpoint(models.Model):
     @property
     def avg_ms(self) -> int:
         return int(self.total_ms / self.samples) if self.samples else 0
+
+
+class AttachmentRef(models.Model):
+    """F05 跨模块附件引用：笔记/卡片/消息/工单引用同一份物理文件
+
+    gc_media 只清理「回收站超 30 天且没有任何引用」的文件，避免误删共享物理文件。
+    """
+
+    file = models.ForeignKey("files.FileMeta", on_delete=models.CASCADE, related_name="attachment_refs", verbose_name="文件")
+    module = models.CharField(max_length=32, verbose_name="引用方模块")
+    object_id = models.BigIntegerField(verbose_name="引用方ID")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="建立时间")
+
+    class Meta:
+        verbose_name = "附件引用"
+        verbose_name_plural = "附件引用"
+        unique_together = [("file", "module", "object_id")]
+        indexes = [models.Index(fields=["file"]), models.Index(fields=["module", "object_id"])]
+
+    def __str__(self):
+        return f"{self.file_id} <- {self.module}:{self.object_id}"

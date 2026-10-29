@@ -16,6 +16,9 @@ class DashboardCardOrder(models.Model):
         related_name="dashboard_card_order", verbose_name="用户",
     )
     order = models.JSONField(default=list, blank=True, verbose_name="卡片顺序")
+    # F28/F29：布局与卡片可见性（跨设备同步，localStorage 仅作离线兜底）
+    layout = models.JSONField(default=dict, blank=True, verbose_name="卡片布局")
+    enabled = models.JSONField(default=list, blank=True, verbose_name="启用的卡片")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
     class Meta:

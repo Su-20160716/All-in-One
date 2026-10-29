@@ -34,6 +34,8 @@ class NoteSerializer(serializers.ModelSerializer):
             "is_pinned", "is_favorite", "is_public", "is_archived", "share_token",
             "version", "is_deleted", "deleted_at", "words", "child_count",
             "ai_summary", "ai_summary_at", "created_at", "updated_at",
+            # F18 定时发布 / 到期归档
+            "publish_at", "expire_at",
             # F572 颜色 / F573 来源 / F582 分组文件夹
             "color", "source", "folder", "folder_name",
         ]

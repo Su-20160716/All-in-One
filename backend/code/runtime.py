@@ -5,7 +5,7 @@
 - **可用性优先**：启动/首次调用时探测本机有哪些解释器/编译器，探测不到的
   语言返回结构化 `RUNTIME_NOT_FOUND`，前端据此把按钮置灰，**绝不 500**；
 - **进程级隔离**：`subprocess` + 独立临时目录 + 环境变量白名单 + 无 shell；
-- **资源约束**：超时用 communicate(timeout) + kill；输出按字节截断；
+- **资源约束**：超时用 wait(timeout) + kill；输出读线程边读边按上限截断；
   内存上限在 POSIX 上用 `resource.setrlimit`，Windows 上降级为「不限制 + 记录」；
 - **危险模式拦截**：执行前静态扫描明显危险调用（rm -rf /、格式化磁盘、
   反弹 shell、fork 炸弹等），命中则直接拒绝（第 40 条）。
@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -606,7 +607,11 @@ def _build_argv(template, exe, src, out, tmpdir):
 
 
 def _spawn(argv, stdin, cwd, timeout, env):
-    """启动子进程并收集结果；恒定返回字典，不抛异常。"""
+    """启动子进程并收集结果；恒定返回字典，不抛异常。
+
+    输出用读线程边读边按字节上限保留，避免 `communicate()` 先把全部输出
+    读进内存（`while True: print(...)` 可直接把 worker 撑爆）。
+    """
     result = {
         "stdout": "", "stderr": "", "exit_code": 0,
         "timed_out": False, "signal_name": "", "memory_kb": 0,
@@ -638,29 +643,82 @@ def _spawn(argv, stdin, cwd, timeout, env):
         result["exit_code"] = 126
         return result
 
+    lock = threading.Lock()
+    buffers = {"out": [], "err": []}
+    sizes = {"out": 0, "err": 0}
+    overflow = {"out": False, "err": False}
+
+    def _pump(stream, key):
+        try:
+            while True:
+                block = stream.read(8192)
+                if not block:
+                    break
+                with lock:
+                    room = OUTPUT_LIMIT - sizes[key]
+                    if room > 0:
+                        keep = block[:room]
+                        buffers[key].append(keep)
+                        sizes[key] += len(keep)
+                    if len(block) > room:
+                        overflow[key] = True
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    def _feed():
+        try:
+            if stdin:
+                proc.stdin.write(stdin.encode("utf-8"))
+            proc.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+
+    pumps = [threading.Thread(target=_pump, args=(proc.stdout, "out"), daemon=True),
+             threading.Thread(target=_pump, args=(proc.stderr, "err"), daemon=True)]
+    feeder = threading.Thread(target=_feed, daemon=True)
+    for t in pumps:
+        t.start()
+    feeder.start()
+
+    timed_out = False
     try:
-        out, err = proc.communicate(
-            input=(stdin or "").encode("utf-8"),
-            timeout=timeout,
-        )
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        result["timed_out"] = True
+        timed_out = True
         _kill(proc)
         try:
-            out, err = proc.communicate(timeout=2)
-        except Exception:  # noqa: BLE001
-            out, err = b"", b""
-        out = (out or b"") + "\n[执行超时，进程已被终止]".encode("utf-8")
-        result["exit_code"] = None
-        result["stderr"] = _decode(err)
-        result["stdout"] = _decode(out)
-        return result
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
 
-    stdout, trunc1 = _decode_limited(out)
-    stderr, trunc2 = _decode_limited(err)
+    feeder.join(timeout=1)
+    for t in pumps:
+        t.join(timeout=2)
+
+    def _collect(key):
+        with lock:
+            raw = b"".join(buffers[key])
+            truncated = overflow[key]
+        text = _decode(raw)
+        if truncated:
+            text += f"\n\n… [输出超过 {OUTPUT_LIMIT // 1024}KB，已截断]"
+        return text, truncated
+
+    stdout, trunc1 = _collect("out")
+    stderr, trunc2 = _collect("err")
     result["stdout"] = stdout
     result["stderr"] = stderr
     result["truncated"] = trunc1 or trunc2
+    if timed_out:
+        result["timed_out"] = True
+        result["stdout"] = stdout + "\n[执行超时，进程已被终止]"
+        result["exit_code"] = None
+        return result
     result["exit_code"] = proc.returncode
     if proc.returncode is not None and proc.returncode < 0:
         result["signal_name"] = _signal_name(-proc.returncode)
@@ -683,19 +741,6 @@ def _decode(raw):
     if isinstance(raw, str):
         return raw
     return raw.decode("utf-8", errors="replace")
-
-
-def _decode_limited(raw):
-    """解码并按字节截断（第 26 条）。"""
-    if not raw:
-        return "", False
-    truncated = len(raw) > OUTPUT_LIMIT
-    if truncated:
-        raw = raw[:OUTPUT_LIMIT]
-    text = _decode(raw)
-    if truncated:
-        text += f"\n\n… [输出超过 {OUTPUT_LIMIT // 1024}KB，已截断]"
-    return text, truncated
 
 
 def _signal_name(num):

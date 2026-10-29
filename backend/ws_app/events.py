@@ -2,7 +2,18 @@
 
 业务视图在关键写操作后调用这些函数；单机 InMemory 与多机 Redis ChannelLayer 均可。
 """
-from ws_app.consumers import push_to_session, push_to_user
+import logging
+
+from ws_app.consumers import push_to_user
+
+logger = logging.getLogger(__name__)
+
+# NotifyConsumer 上已注册的 group_send handler（点号已转下划线）
+_KNOWN_HANDLERS = frozenset({
+    "notification", "file_event", "board_event", "chat_message", "chat_typing",
+    "group_system", "session_updated", "session_typing", "message_recalled",
+    "message_pinned", "message_edited", "message_deleted",
+})
 
 
 def notify_file_event(user_id: int, action: str, payload: dict):
@@ -31,7 +42,7 @@ def notify_board_event(project_id: int, action: str, payload: dict):
 
 
 def notify_chat_message(session_id: int, payload: dict):
-    push_to_session(session_id, "chat_message", payload)
+    send_to_session(session_id, {"type": "chat.message", "data": payload})
 
 
 def _session_member_ids(session_id: int):
@@ -44,9 +55,14 @@ def _session_member_ids(session_id: int):
 
 def send_to_session(session_id: int, event: dict):
     """向会话全体成员的个人频道投递事件（event 形如 {"type": "chat.message", "data": {...}}）"""
+    event_type = str(event.get("type") or "")
+    handler = event_type.replace(".", "_")
+    if handler not in _KNOWN_HANDLERS:
+        logger.warning("send_to_session 收到未注册事件类型 %r，已跳过（session=%s）", event_type, session_id)
+        return
     for uid in _session_member_ids(session_id):
         # type 中的点号对应 consumer handler 名（点→下划线）
-        push_to_user(uid, event["type"].replace(".", "_"), event.get("data", {}))
+        push_to_user(uid, handler, event.get("data", {}))
 
 
 def broadcast_session(session_id: int, event: dict):

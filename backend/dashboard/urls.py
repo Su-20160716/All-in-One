@@ -16,6 +16,9 @@ urlpatterns = [
     path("storage-usage/", views.StorageUsageView.as_view(), name="storage-usage"),
     path("recent-activity/", views.RecentActivityView.as_view(), name="recent-activity"),
     path("card-order/", views.CardOrderView.as_view(), name="card-order"),
+    # F28/F29 布局持久化与卡片开关 / F30 每日摘要
+    path("layout/", views.DashboardLayoutView.as_view(), name="dashboard-layout"),
+    path("daily-summary/", views.DailySummaryView.as_view(), name="daily-summary"),
     path("admin/global/", views.GlobalStatsView.as_view(), name="global-stats"),
     path("admin/trend/", views.ActivityTrendView.as_view(), name="activity-trend"),
     path("admin/user-growth/", views.AdminUserGrowthView.as_view(), name="user-growth"),

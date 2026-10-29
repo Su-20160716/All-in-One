@@ -6,6 +6,7 @@ import hashlib
 import hmac as hmac_mod
 import io
 import json
+import math
 import re
 import secrets
 import struct
@@ -195,15 +196,22 @@ def token_password_audit(request):
     if re.search(r"[^a-zA-Z0-9]", pwd):
         pool += 33
     entropy = len(pwd) * (pool.bit_length() if pool else 0)
-    # 每秒 1e10 次尝试的离线破解估算
-    attempts = pool ** len(pwd) / 2 if pool else 0
-    seconds = attempts / 1e10 if attempts else 0
+    # 每秒 1e10 次尝试的离线破解估算；用对数算，避免超长密码把
+    # `pool ** len(pwd)` 变成天文数字后在转 float 时抛 OverflowError
+    if pool and pwd:
+        log_seconds = len(pwd) * math.log10(pool) - math.log10(2) - 10
+        seconds = 10 ** log_seconds if log_seconds < 18 else float("inf")
+    else:
+        seconds = 0.0
     units = [("年", 31536000), ("天", 86400), ("小时", 3600), ("分钟", 60), ("秒", 1)]
-    human = "瞬间"
-    for name, sec in units:
-        if seconds >= sec:
-            human = f"{seconds / sec:.1f} {name}"
-            break
+    if math.isinf(seconds):
+        human = "超过已知宇宙年龄"
+    else:
+        human = "瞬间"
+        for name, sec in units:
+            if seconds >= sec:
+                human = f"{seconds / sec:.1f} {name}"
+                break
     weak_words = ["password", "123456", "qwerty", "admin", "abc123", "iloveyou", "111111", "000000"]
     flagged = [w for w in weak_words if w in pwd.lower()]
     score = max(0, min(100, int(entropy * 1.8) - 30 * len(flagged)))

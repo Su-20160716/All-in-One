@@ -62,6 +62,8 @@ class SessionMemberSetting(models.Model):
     is_muted = models.BooleanField(default=False, verbose_name="免打扰")
     is_pinned = models.BooleanField(default=False, verbose_name="置顶")
     is_archived = models.BooleanField(default=False, verbose_name="已归档")
+    # F25 自定义标签（列表页可按标签过滤）
+    tags = models.JSONField(default=list, blank=True, verbose_name="标签")
     draft = models.TextField(blank=True, verbose_name="草稿")
     draft_updated_at = models.DateTimeField(null=True, blank=True, verbose_name="草稿更新时间")
     typing_at = models.DateTimeField(null=True, blank=True, verbose_name="最近正在输入时间")

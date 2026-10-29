@@ -410,6 +410,34 @@ class HelpTicket(SuiteBase):
         verbose_name = "工单"
 
 
+class DocAnnotation(models.Model):
+    """F45 文档批注：文件 → 页码 → 区域 → 正文，parent 为空是主批注，否则是回复。
+
+    rect 存相对坐标（页宽高百分比，0–1），前端按预览容器尺寸还原，缩放安全。
+    """
+
+    file = models.ForeignKey("files.FileMeta", on_delete=models.CASCADE,
+                             related_name="annotations", verbose_name="文件")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              related_name="doc_annotations", verbose_name="作者")
+    page = models.IntegerField("页码", default=1)
+    rect = models.JSONField("区域", default=dict, blank=True)
+    body = models.TextField("批注内容", blank=True, default="")
+    parent = models.ForeignKey("self", on_delete=models.CASCADE, null=True, blank=True,
+                               related_name="replies", verbose_name="父批注")
+    resolved = models.BooleanField("已解决", default=False)
+    created_at = models.DateTimeField("创建时间", auto_now_add=True)
+
+    class Meta:
+        verbose_name = "文档批注"
+        verbose_name_plural = "文档批注"
+        ordering = ["page", "created_at"]
+        indexes = [models.Index(fields=["file", "page"], name="os_annot_file_page_idx")]
+
+    def __str__(self):
+        return f"#{self.pk} p{self.page} {self.body[:20]}"
+
+
 class SuiteEvent(models.Model):
     title = models.CharField("标题", max_length=200, default="")
     status = models.CharField("状态", max_length=20, default="planned")

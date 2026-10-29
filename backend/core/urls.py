@@ -42,6 +42,9 @@ urlpatterns = [
     path("admin/settings/", views.AdminSiteSettingView.as_view(), name="admin-settings"),
     # 健康检查
     path("health/", views.HealthView.as_view(), name="health"),
+    # F03 通用导入导出
+    path("io/<str:app>/export/", views.GenericExportView.as_view(), name="core-io-export"),
+    path("io/<str:app>/import/", views.GenericImportView.as_view(), name="core-io-import"),
     # ---------------- v8 新增：管理与平台（F627–F642） ----------------
     # F627 后端健康卡
     path("admin/health-card/", views.AdminHealthCardView.as_view(), name="admin-health-card"),

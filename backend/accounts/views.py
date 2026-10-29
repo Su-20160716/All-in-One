@@ -4,6 +4,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 import json
+import os
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
@@ -444,6 +445,22 @@ class AvatarView(APIView):
         file = request.FILES.get("avatar")
         if not file:
             return Response({"message": "请选择头像文件"}, status=status.HTTP_400_BAD_REQUEST)
+        # 头像会以静态资源被浏览器直接渲染：必须限定真实图片类型。
+        # 历史上直接把上传文件塞给 ImageField，SVG/HTML 可当头像存成 XSS 载荷。
+        ext = os.path.splitext(file.name)[1].lower().lstrip(".")
+        if ext not in {"jpg", "jpeg", "png", "gif", "webp", "bmp"}:
+            return Response({"message": "头像仅支持 jpg/png/gif/webp/bmp"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if file.size > 5 * 1024 * 1024:
+            return Response({"message": "头像不能超过 5MB"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from PIL import Image
+
+            img = Image.open(file)
+            img.verify()
+            file.seek(0)
+        except Exception:
+            return Response({"message": "文件不是有效图片"}, status=status.HTTP_400_BAD_REQUEST)
         snapshot_avatar(request.user, note="上传新头像前自动保存")
         request.user.avatar = file
         request.user.save(update_fields=["avatar"])
@@ -637,8 +654,11 @@ class UserDirectoryView(APIView):
         keyword = request.query_params.get("q")
         if keyword:
             qs = qs.filter(Q(username__icontains=keyword) | Q(nickname__icontains=keyword) | Q(email__icontains=keyword))
-        qs = qs.order_by("username")[:50]
-        return Response({"list": UserDirectorySerializer(qs, many=True).data, "total": qs.count()})
+        # 先取总数再切片 —— 对切片后的 QuerySet 调 count() 会带上 LIMIT，
+        # total 会永远等于 50
+        total = qs.count()
+        rows = qs.order_by("username")[:50]
+        return Response({"list": UserDirectorySerializer(rows, many=True).data, "total": total})
 
 
 class UserListView(APIView):
@@ -855,16 +875,18 @@ class AssignRoleView(APIView):
     def post(self, request):
         ser = AssignRoleSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        users = User.objects.filter(id__in=ser.validated_data["user_ids"])
-        roles = Role.objects.filter(id__in=ser.validated_data["role_ids"])
+        users = list(
+            User.objects.filter(id__in=ser.validated_data["user_ids"]).prefetch_related("roles")
+        )
+        roles = list(Role.objects.filter(id__in=ser.validated_data["role_ids"]))
+        after = [r.code for r in roles]
         ip = get_client_ip(request)
         for u in users:
-            before = list(u.roles.values_list("code", flat=True))
+            before = [r.code for r in u.roles.all()]
             u.roles.set(roles)
-            after = list(u.roles.values_list("code", flat=True))
             if before != after:
                 record_role_change(request.user, u, "assign", before, after, ip, "批量分配角色")
-        return Response({"message": f"已为 {users.count()} 个用户分配角色"})
+        return Response({"message": f"已为 {len(users)} 个用户分配角色"})
 
 
 class RoleListView(APIView):
@@ -1991,3 +2013,145 @@ class RoleAuditLogView(APIView):
             "total": total,
             "page": pg.page.number if pg.page else 1,
         })
+
+
+# ===========================================================================
+# F08/F09/F10 组织与权限增强（纯新增）
+# ===========================================================================
+
+class DepartmentMoveView(APIView):
+    """F08 部门移动：改上级并校验不成环，返回新的路径与下级清单"""
+
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, pk):
+        dept = Department.objects.filter(pk=pk).first()
+        if not dept:
+            return Response({"message": "部门不存在"}, status=status.HTTP_404_NOT_FOUND)
+        raw = request.data.get("parent", request.data.get("parent_id"))
+        parent = None
+        if raw not in (None, "", 0, "0"):
+            try:
+                pid = int(raw)
+            except (TypeError, ValueError):
+                return Response({"message": "parent 必须是整数"}, status=400)
+            if pid in dept.descendant_ids(include_self=True):
+                return Response({"message": "不能将部门移动到自身或其下级"}, status=400)
+            parent = Department.objects.filter(pk=pid).first()
+            if not parent:
+                return Response({"message": "目标部门不存在"}, status=404)
+        dept.parent = parent
+        if "sort" in request.data:
+            try:
+                dept.sort = int(request.data.get("sort") or 0)
+            except (TypeError, ValueError):
+                return Response({"message": "sort 必须是整数"}, status=400)
+        dept.save(update_fields=["parent", "sort"])
+        return Response({
+            "id": dept.id, "name": dept.name, "parent": parent.id if parent else None,
+            "path": dept.path_name(), "descendant_ids": dept.descendant_ids(),
+            "member_count": dept.members.count(),
+        })
+
+
+class ActivityHeatmapView(APIView):
+    """F09 用户活跃热力图：按周×小时聚合登录/操作日志"""
+
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        from datetime import timedelta
+
+        from core.models import OperationLog
+
+        try:
+            days = int(request.query_params.get("days") or 90)
+        except (TypeError, ValueError):
+            return Response({"message": "days 必须是整数"}, status=400)
+        days = max(7, min(180, days))
+        user_id = request.query_params.get("user")
+        since = timezone.now() - timedelta(days=days)
+        login = LoginLog.objects.filter(is_success=True, created_at__gte=since)
+        oper = OperationLog.objects.filter(created_at__gte=since)
+        if user_id:
+            try:
+                uid = int(user_id)
+            except (TypeError, ValueError):
+                return Response({"message": "user 必须是整数"}, status=400)
+            login, oper = login.filter(user_id=uid), oper.filter(user_id=uid)
+        weekday = [0] * 7
+        hour = [0] * 24
+        by_day = {}
+        cells = {}
+        for ts in list(login.values_list("created_at", flat=True)) + \
+                list(oper.values_list("created_at", flat=True)):
+            local = timezone.localtime(ts)
+            weekday[local.weekday()] += 1
+            hour[local.hour] += 1
+            key = local.date().isoformat()
+            by_day[key] = by_day.get(key, 0) + 1
+            cells[(local.weekday(), local.hour)] = cells.get((local.weekday(), local.hour), 0) + 1
+        return Response({
+            "days": days,
+            "total": sum(weekday),
+            "weekday_labels": ["周一", "周二", "周三", "周四", "周五", "周六", "周日"],
+            "by_weekday": weekday,
+            "by_hour": hour,
+            "by_day": [{"date": k, "count": v} for k, v in sorted(by_day.items())],
+            "cells": [
+                {"weekday": w, "hour": h, "count": c}
+                for (w, h), c in sorted(cells.items())
+            ],
+            "peak": {"weekday": weekday.index(max(weekday)) if weekday else 0,
+                     "hour": hour.index(max(hour)) if hour else 0},
+        })
+
+
+class RoleMatrixView(APIView):
+    """F10 角色×权限矩阵：GET 读取，PUT 整体保存（事务内）"""
+
+    permission_classes = [IsAdminUser]
+
+    def _role(self, pk):
+        return Role.objects.filter(pk=pk).first()
+
+    def get(self, request, pk):
+        role = self._role(pk)
+        if not role:
+            return Response({"message": "角色不存在"}, status=status.HTTP_404_NOT_FOUND)
+        perms = list(Permission.objects.all().order_by("module", "id"))
+        modules = {}
+        for p in perms:
+            modules.setdefault(p.module, []).append({
+                "id": p.id, "code": p.code, "name": p.name,
+            })
+        return Response({
+            "role": {"id": role.id, "name": role.name, "code": role.code,
+                     "data_scope": role.data_scope, "is_builtin": role.is_builtin},
+            "modules": [{"module": m, "permissions": rows} for m, rows in modules.items()],
+            "permission_ids": list(role.permissions.values_list("id", flat=True)),
+            "total_permissions": len(perms),
+        })
+
+    def put(self, request, pk):
+        role = self._role(pk)
+        if not role:
+            return Response({"message": "角色不存在"}, status=status.HTTP_404_NOT_FOUND)
+        ids = request.data.get("permission_ids")
+        codes = request.data.get("permission_codes")
+        if ids is None and codes is None:
+            return Response({"message": "需要 permission_ids 或 permission_codes"}, status=400)
+        if ids is not None and not isinstance(ids, list):
+            return Response({"message": "permission_ids 必须是数组"}, status=400)
+        if codes is not None and not isinstance(codes, list):
+            return Response({"message": "permission_codes 必须是数组"}, status=400)
+        with transaction.atomic():
+            if ids is not None:
+                qs = Permission.objects.filter(id__in=[int(i) for i in ids if str(i).isdigit()])
+            else:
+                qs = Permission.objects.filter(code__in=[str(c) for c in codes])
+            role.permissions.set(qs)
+            applied = qs.count()
+        return Response({"message": "权限矩阵已保存", "role_id": role.id,
+                         "applied": applied,
+                         "permission_ids": list(role.permissions.values_list("id", flat=True))})

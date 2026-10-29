@@ -45,6 +45,27 @@ class Board(models.Model):
         return f"{self.project.name} / {self.name}"
 
 
+class Sprint(models.Model):
+    """F23 迭代：卡片可归入迭代，结束后未完成卡片自动回到待办池"""
+
+    STATUS_CHOICES = [("planned", "规划中"), ("active", "进行中"), ("closed", "已结束")]
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="sprints", verbose_name="项目")
+    name = models.CharField(max_length=120, verbose_name="迭代名称")
+    start_at = models.DateTimeField(null=True, blank=True, verbose_name="开始时间")
+    end_at = models.DateTimeField(null=True, blank=True, verbose_name="结束时间")
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="planned", verbose_name="状态")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "迭代"
+        verbose_name_plural = "迭代"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.project_id}:{self.name}"
+
+
 class TaskCard(models.Model):
     """任务卡片"""
 
@@ -62,6 +83,10 @@ class TaskCard(models.Model):
     story_points = models.IntegerField(default=0, verbose_name="故事点/工作量")
     estimated_minutes = models.IntegerField(default=0, verbose_name="预估工时(分钟)")
     number = models.IntegerField(null=True, blank=True, db_index=True, verbose_name="项目内编号")
+    sprint = models.ForeignKey(
+        "Sprint", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="cards", verbose_name="所属迭代",
+    )
     is_archived = models.BooleanField(default=False, verbose_name="已归档")
     sort_order = models.IntegerField(default=0, verbose_name="列内排序")
     started_at = models.DateTimeField(null=True, blank=True, verbose_name="开始时间")
@@ -93,16 +118,8 @@ class TaskCard(models.Model):
         """F592 卡片编号展示：C-1 / C-2"""
         return f"C-{self.number}" if self.number else ""
 
-    def save(self, *args, **kwargs):
-        # F592 首次保存时按项目分配自增编号（仅当为空，避免额外查询）
-        if self.number is None and self.board_id:
-            from django.db.models import Max
-
-            project_id = getattr(self.board, "project_id", None)
-            if project_id:
-                m = TaskCard.objects.filter(board__project_id=project_id).aggregate(x=Max("number"))["x"] or 0
-                self.number = m + 1
-        # 归一化 due_date：接口传入的是 YYYY-MM-DD 字符串，Django 不会在保存时转成 date，
+    def _normalize_due_date(self):
+        # 接口传入的是 YYYY-MM-DD 字符串，Django 不会在保存时转成 date，
         # 直接留在实例上会让后续比较/序列化报错，这里统一转换。
         if isinstance(self.due_date, str):
             from datetime import datetime as _dt
@@ -111,6 +128,26 @@ class TaskCard(models.Model):
                 self.due_date = _dt.strptime(self.due_date[:10], "%Y-%m-%d").date()
             except ValueError:
                 self.due_date = None
+
+    def save(self, *args, **kwargs):
+        # F592 首次保存时按项目分配自增编号（仅当为空，避免额外查询）。
+        # 编号在「查 Max + 写入」之间有竞态，并发创建会拿到同一个号；
+        # 锁住项目行（Postgres 生效，SQLite 为 no-op）把这段收进同一事务。
+        project_id = None
+        if self.number is None and self.board_id:
+            project_id = getattr(self.board, "project_id", None)
+        if project_id:
+            from django.db import transaction
+            from django.db.models import Max
+
+            with transaction.atomic():
+                Project.objects.select_for_update().filter(pk=project_id).first()
+                m = TaskCard.objects.filter(board__project_id=project_id).aggregate(x=Max("number"))["x"] or 0
+                self.number = m + 1
+                self._normalize_due_date()
+                super().save(*args, **kwargs)
+            return
+        self._normalize_due_date()
         super().save(*args, **kwargs)
 
 

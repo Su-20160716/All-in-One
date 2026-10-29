@@ -76,6 +76,13 @@ def dataset_create(request):
         owner=request.user,
         columns=cols, rows=rows,
     )
+    if rows:
+        try:
+            from dataintel.views_plus import snapshot_version
+
+            snapshot_version(ds, request.user, note=f"创建时 {len(rows)} 行")
+        except Exception:  # noqa: BLE001
+            pass
     return ok({"id": ds.id, "name": ds.name, "row_count": ds.row_count,
                "columns": ds.columns, "created_at": ds.created_at.isoformat()})
 
@@ -146,7 +153,16 @@ def dataset_rows_import(request, pk):
     new_keys = {k for r in rows for k in r} - {c["name"] for c in ds.columns}
     ds.columns = ds.columns + [{"name": k, "type": "string"} for k in sorted(new_keys)]
     ds.save()
-    return ok({"id": ds.id, "row_count": ds.row_count, "mode": mode, "added": len(rows)})
+    # F48：导入即留版本快照；版本能力失败不能影响导入本身
+    version = None
+    try:
+        from dataintel.views_plus import snapshot_version
+
+        version = snapshot_version(ds, request.user, note=f"{mode} {len(rows)} 行").version
+    except Exception:  # noqa: BLE001
+        version = None
+    return ok({"id": ds.id, "row_count": ds.row_count, "mode": mode,
+               "added": len(rows), "version": version})
 
 
 @endpoint()
@@ -238,19 +254,32 @@ def profile_corr(request):
     fields = p(request, "fields") or _numeric_fields(rows)
     if len(fields) < 2:
         raise ValueError("数值字段不足 2 个，无法计算相关矩阵")
-    cols = {f: [float(r[f]) for r in rows if isinstance(r.get(f), (int, float)) and not isinstance(r.get(f), bool)] for f in fields}
-    n = min(len(v) for v in cols.values())
-    if n < 3:
+    if len(fields) > 30:
+        raise ValueError("最多同时计算 30 个字段的相关矩阵")
+
+    def _is_num(r, f):
+        v = r.get(f)
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    matrix = {a: {} for a in fields}
+    pair_n = {}
+    for i, a in enumerate(fields):
+        matrix[a][a] = 1.0
+        for b in fields[i + 1:]:
+            pairs = [(float(r[a]), float(r[b])) for r in rows if _is_num(r, a) and _is_num(r, b)]
+            if len(pairs) < 3:
+                matrix[a][b] = matrix[b][a] = None
+                continue
+            rv = round(pearson([x for x, _ in pairs], [y for _, y in pairs]), 4)
+            matrix[a][b] = matrix[b][a] = rv
+            pair_n[(a, b)] = len(pairs)
+    if not pair_n:
         raise ValueError("有效样本不足 3 行")
-    matrix = {}
-    for a in fields:
-        matrix[a] = {}
-        for b in fields:
-            matrix[a][b] = round(pearson(cols[a][:n], cols[b][:n]), 4)
-    pairs = sorted(((a, b, matrix[a][b]) for i, a in enumerate(fields) for b in fields[i + 1:]),
+    n = min(pair_n.values())
+    pairs = sorted(((a, b, matrix[a][b]) for (a, b) in pair_n),
                    key=lambda t: -abs(t[2]))
     return ok({"fields": fields, "matrix": matrix, "n": n,
-               "top_pairs": [{"a": a, "b": b, "r": r} for a, b, r in pairs[:10]]})
+               "top_pairs": [{"a": a, "b": b, "r": r, "n": pair_n[(a, b)]} for a, b, r in pairs[:10]]})
 
 
 @endpoint()

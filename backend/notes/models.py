@@ -51,6 +51,9 @@ class Note(models.Model):
     # AI 摘要（assistant 模块写入，避免重复调用大模型）
     ai_summary = models.TextField(blank=True, verbose_name="AI 摘要")
     ai_summary_at = models.DateTimeField(null=True, blank=True, verbose_name="摘要生成时间")
+    # F18 定时发布 / 到期归档（均为空时行为与旧版完全一致）
+    publish_at = models.DateTimeField(null=True, blank=True, verbose_name="定时发布时间")
+    expire_at = models.DateTimeField(null=True, blank=True, verbose_name="到期时间")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 

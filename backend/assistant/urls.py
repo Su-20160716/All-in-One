@@ -17,6 +17,8 @@ urlpatterns = [
     # F645 分支新会话 / F655 导出 Markdown
     path("conversations/<int:pk>/branch/", v.ConversationBranchView.as_view(), name="ai-conversation-branch"),
     path("conversations/<int:pk>/export/", v.ConversationExportView.as_view(), name="ai-conversation-export"),
+    # F56 长对话自动摘要
+    path("conversations/<int:pk>/summarize/", v.ConversationSummarizeView.as_view(), name="ai-conversation-summarize"),
     # F644 提示词库
     path("prompts/", v.PromptLibraryView.as_view(), name="ai-prompts"),
     path("prompts/<int:pk>/", v.PromptDetailView.as_view(), name="ai-prompt-detail"),

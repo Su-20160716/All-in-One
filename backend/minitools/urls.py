@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""minitools 路由：26 大家族 × 374 个纯函数工具 + catalog = 375 个 URL。"""
+"""minitools 路由：27 大家族 × 376 个纯函数工具 + catalog = 377 个 URL。"""
 from django.urls import path
 
 from .common import endpoint, endpoint_index, ok
@@ -30,6 +30,7 @@ from . import tools_life as life
 from . import tools_trivia as trivia
 from . import tools_statsx as statsx
 from . import tools_lab as lab
+from . import tools_media as media
 
 SUBSYSTEMS = [
     ("text", "文本处理", [
@@ -166,6 +167,7 @@ SUBSYSTEMS = [
         "dilution", "titration", "concentration-convert",
         "standard-solution", "sig-figs", "temp-table",
     ]),
+    ("media", "图片与批量哈希", ["image-compress", "hash-batch"]),
 ]
 
 
@@ -571,6 +573,8 @@ VIEWS = {
     "lab/standard-solution/": lab.standard_solution,
     "lab/sig-figs/": lab.sig_figs,
     "lab/temp-table/": lab.temp_table,
+    # F42/F44 图片压缩与批量哈希
+    "media/image-compress/": media.image_compress, "media/hash-batch/": media.hash_batch,
 }
 
 
@@ -591,4 +595,4 @@ urlpatterns = [path("catalog/", minitools_catalog, name="minitools-catalog")]
 for _route, _view in VIEWS.items():
     urlpatterns.append(path(_route, _view))
 
-assert len(urlpatterns) == 375, f"minitools 接口数应为 375，实际 {len(urlpatterns)}"
+assert len(urlpatterns) == 377, f"minitools 接口数应为 377，实际 {len(urlpatterns)}"

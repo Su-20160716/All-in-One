@@ -25,14 +25,23 @@ def net_ip_calc(request):
     net = ipaddress.ip_network(cidr, strict=False)
     if net.version != 4:
         raise ValueError("本接口仅处理 IPv4（v6 请用 ip-classify）")
-    hosts = list(net.hosts()) if net.num_addresses > 2 else []
+    # 不要 list(net.hosts())：/8 有 1600 万地址，会直接把进程内存打满。
+    # 首末可用地址用整数运算即可。
+    if net.prefixlen <= 30:
+        usable = net.num_addresses - 2
+        first_host = str(net.network_address + 1)
+        last_host = str(net.broadcast_address - 1)
+    else:
+        usable = net.num_addresses
+        first_host = str(net.network_address)
+        last_host = str(net.broadcast_address)
     return ok({
         "network": str(net.network_address), "netmask": str(net.netmask),
         "wildcard": str(net.hostmask), "broadcast": str(net.broadcast_address),
         "prefix": net.prefixlen, "total_addresses": net.num_addresses,
-        "usable_hosts": net.num_addresses - 2 if net.prefixlen <= 30 else net.num_addresses,
-        "first_host": str(hosts[0]) if hosts else str(net.network_address),
-        "last_host": str(hosts[-1]) if hosts else str(net.broadcast_address),
+        "usable_hosts": usable,
+        "first_host": first_host,
+        "last_host": last_host,
         "is_private": net.is_private,
     })
 

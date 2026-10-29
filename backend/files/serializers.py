@@ -1,7 +1,11 @@
 """文件模块序列化"""
+import math
+
+from django.conf import settings
 from django.db.models import Sum as ModelsSum
 from rest_framework import serializers
 
+from core.validators import sanitize_filename
 from files.models import FileMeta, FileTag, Folder, ShareLink
 
 
@@ -22,12 +26,17 @@ class FolderSerializer(serializers.ModelSerializer):
         read_only_fields = ["owner", "created_at", "updated_at"]
 
     def get_file_count(self, obj):
-        return obj.files.filter(is_deleted=False).count()
+        cached = getattr(obj, "file_count_ann", None)
+        return obj.files.filter(is_deleted=False).count() if cached is None else cached
 
     def get_folder_count(self, obj):
-        return obj.children.count()
+        cached = getattr(obj, "folder_count_ann", None)
+        return obj.children.count() if cached is None else cached
 
     def get_total_size(self, obj):
+        cached = getattr(obj, "total_size_ann", None)
+        if cached is not None:
+            return cached
         return obj.files.filter(is_deleted=False).aggregate(s=ModelsSum("size"))["s"] or 0
 
 
@@ -107,8 +116,26 @@ class ChunkInitSerializer(serializers.Serializer):
     folder_id = serializers.IntegerField(required=False, allow_null=True)
     file_size = serializers.IntegerField(min_value=0)
     chunk_size = serializers.IntegerField(min_value=1, max_value=100 * 1024 * 1024)
-    total_chunks = serializers.IntegerField(min_value=1)
+    total_chunks = serializers.IntegerField(min_value=1, max_value=20000)
     sha1 = serializers.CharField(required=False, allow_blank=True, max_length=40)
+
+    def validate_filename(self, value):
+        return sanitize_filename(value)
+
+    def validate(self, attrs):
+        max_bytes = int(getattr(settings, "FILE_MAX_SIZE_MB", 1024)) * 1024 * 1024
+        if attrs["file_size"] > max_bytes:
+            raise serializers.ValidationError(
+                {"file_size": f"文件超过大小限制 {settings.FILE_MAX_SIZE_MB}MB"}
+            )
+        # total_chunks 必须与 file_size/chunk_size 自洽：否则完成时按声明值逐片拼接，
+        # 可以凭空放大读写量（声明 1 片但 file_size 巨大 / 声明 2 万片）
+        expected = max(1, math.ceil(attrs["file_size"] / attrs["chunk_size"]))
+        if attrs["total_chunks"] != expected:
+            raise serializers.ValidationError(
+                {"total_chunks": f"应为 {expected}（file_size / chunk_size 向上取整）"}
+            )
+        return attrs
 
 
 class ShareLinkSerializer(serializers.ModelSerializer):

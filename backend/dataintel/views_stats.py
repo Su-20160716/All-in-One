@@ -176,22 +176,34 @@ def stats_proportion_ci(request):
 def stats_binomial_test(request):
     """二项精确检验：成功率是否偏离 p0。"""
     successes = int(req_num(request, "successes", 0, minimum=0, integer=True))
-    trials = int(req_num(request, "trials", 0, minimum=1, integer=True))
+    trials = int(req_num(request, "trials", 0, minimum=1, maximum=100000, integer=True))
     p0 = float(opt_num(request, "p0", 0.5, minimum=0, maximum=1) or 0.5)
     if successes > trials:
         raise ValueError("successes 不能大于 trials")
     phat = successes / trials
+    if trials > 1000:
+        se = math.sqrt(p0 * (1 - p0) / trials)
+        if se <= 0:
+            raise ValueError("p0 为 0 或 1 时无法做正态近似")
+        z = (phat - p0) / se
+        p_one = norm_cdf(-abs(z))
+        p_two = min(1.0, 2 * p_one)
+        return ok({"observed_rate": round(phat, 6), "p0": p0, "trials": trials, "successes": successes,
+                   "p_one_sided": round(p_one, 6), "p_two_sided": round(p_two, 6),
+                   "significant_0.05": p_two < 0.05, "approximate": True,
+                   "verdict": "实际成功率显著偏离基准" if p_two < 0.05 else "与基准无显著差异"})
+
     # 精确二项：单侧与双侧
-    def binom_pmf(k):
-        return math.comb(trials, k) * p0 ** k * (1 - p0) ** (trials - k)
+    pmf = [math.comb(trials, k) * p0 ** k * (1 - p0) ** (trials - k) for k in range(trials + 1)]
     if phat >= p0:
-        p_one = sum(binom_pmf(k) for k in range(successes, trials + 1))
+        p_one = sum(pmf[successes:])
     else:
-        p_one = sum(binom_pmf(k) for k in range(0, successes + 1))
-    p_two = min(1.0, sum(binom_pmf(k) for k in range(trials + 1) if binom_pmf(k) <= binom_pmf(successes) * 1.0000001))
+        p_one = sum(pmf[:successes + 1])
+    cutoff = pmf[successes] * 1.0000001
+    p_two = min(1.0, sum(v for v in pmf if v <= cutoff))
     return ok({"observed_rate": round(phat, 6), "p0": p0, "trials": trials, "successes": successes,
                "p_one_sided": round(p_one, 6), "p_two_sided": round(p_two, 6),
-               "significant_0.05": p_two < 0.05,
+               "significant_0.05": p_two < 0.05, "approximate": False,
                "verdict": "实际成功率显著偏离基准" if p_two < 0.05 else "与基准无显著差异"})
 
 
@@ -204,9 +216,9 @@ def stats_corr_sig(request):
         raise ValueError("x/y 等长且至少 3 个样本")
     r = pearson(x, y)
     n = len(x)
-    t = r * math.sqrt((n - 2) / (1 - r * r)) if abs(r) < 1 else float("inf")
+    t = r * math.sqrt((n - 2) / (1 - r * r)) if abs(r) < 1 else None
     p_value = 0.0 if abs(r) >= 1 else t_sf_two_sided(abs(t), n - 2)
-    return ok({"r": round(r, 6), "t": round(t, 6), "df": n - 2, "n": n,
+    return ok({"r": round(r, 6), "t": round(t, 6) if t is not None else None, "df": n - 2, "n": n,
                "p_value": round(p_value, 6), "significant_0.05": p_value < 0.05,
                "strength": "强" if abs(r) >= 0.7 else "中等" if abs(r) >= 0.4 else "弱",
                "direction": "正相关" if r > 0 else "负相关" if r < 0 else "无"})
@@ -491,25 +503,47 @@ def cluster_kmeans(request):
 def cluster_hierarchical(request):
     """层次聚类（单连接凝聚法）：合并步骤 + 指定 k 时的划分快照。"""
     pts = to_points(req_list(request, "points"))
-    if len(pts) < 3:
+    n = len(pts)
+    if n < 3:
         raise ValueError("至少 3 个点")
-    k = int(opt_num(request, "k", 2, minimum=1, maximum=len(pts) - 1) or 2)
-    clusters = [[i] for i in range(len(pts))]
+    if n > 500:
+        raise ValueError("点数最多 500（单连接层次聚类为 O(n²) 规模）")
+    k = int(opt_num(request, "k", 2, minimum=1, maximum=n - 1) or 2)
+
+    # 单连接层次聚类等价于按距离升序做 Kruskal 合并（并查集）
+    edges = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            edges.append((euclid(pts[i], pts[j]), i, j))
+    edges.sort(key=lambda e: e[0])
+
+    parent = list(range(n))
+    members = {i: [i] for i in range(n)}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
     steps = []
     snapshot_at_k = None
-    while len(clusters) > 1:
-        best = (float("inf"), 0, 1)
-        for i in range(len(clusters)):
-            for j in range(i + 1, len(clusters)):
-                d = min(euclid(pts[a], pts[b]) for a in clusters[i] for b in clusters[j])
-                if d < best[0]:
-                    best = (d, i, j)
-        d, i, j = best
-        merged = clusters[i] + clusters[j]
-        steps.append({"merge": [clusters[i], clusters[j]], "distance": round(d, 6), "size": len(merged)})
-        clusters = [c for ci, c in enumerate(clusters) if ci not in (i, j)] + [merged]
-        if len(clusters) == k:
-            snapshot_at_k = [sorted(c) for c in clusters]
+    count = n
+    for d, i, j in edges:
+        ri, rj = find(i), find(j)
+        if ri == rj:
+            continue
+        mi = members[ri]
+        mj = members.pop(rj)
+        steps.append({"merge": [sorted(mi), sorted(mj)], "distance": round(d, 6),
+                      "size": len(mi) + len(mj)})
+        parent[rj] = ri
+        mi.extend(mj)
+        count -= 1
+        if count == k:
+            snapshot_at_k = [sorted(c) for c in members.values()]
+        if count == 1:
+            break
     return ok({"steps": steps[:50], "merge_count": len(steps),
                "clusters_at_k": snapshot_at_k, "k_requested": k,
                "note": "单连接（最近邻）凝聚策略，n 较大时建议改用 kmeans"})
@@ -630,26 +664,32 @@ def outlier_mad(request):
 def outlier_lof(request):
     """LOF 局部离群因子（简化实现，k 近邻密度比）。"""
     pts = to_points(req_list(request, "points"))
-    k = int(opt_num(request, "k", 3, minimum=1, maximum=max(1, len(pts) - 1)) or 3)
     n = len(pts)
+    if n > 2000:
+        raise ValueError("点数最多 2000（LOF 为 O(n²·k) 规模）")
+    k = int(opt_num(request, "k", 3, minimum=1, maximum=max(1, n - 1)) or 3)
     if n < k + 1:
         raise ValueError("点数必须大于 k")
-    dist = [[euclid(pts[i], pts[j]) for j in range(n)] for i in range(n)]
-    knn = []
+    knn = [None] * n
+    kdist = [None] * n
+    lrd = [None] * n
+
+    def row_dists(i):
+        r = [(euclid(pts[i], pts[j]), j) for j in range(n) if j != i]
+        r.sort(key=lambda t: t[0])
+        return r
+
     for i in range(n):
-        order = sorted((dist[i][j], j) for j in range(n) if j != i)
-        knn.append([j for _, j in order[:k]])
-    kdist = [max(dist[i][j] for j in knn[i]) if knn[i] else 0 for i in range(n)]
-    lrd = []
-    for i in range(n):
-        reach = [max(kdist[j], dist[i][j]) for j in knn[i]] or [1e-9]
-        lrd.append(1 / (mean(reach) or 1e-9))
-    lof = []
-    for i in range(n):
-        if knn[i]:
-            lof.append(round(mean([lrd[j] for j in knn[i]]) / lrd[i] if lrd[i] else 1, 4))
-        else:
-            lof.append(1.0)
+        di = row_dists(i)
+        knn[i] = [j for _, j in di[:k]]
+        kdist[i] = di[k - 1][0]
+        reach = []
+        for d, j in di[:k]:
+            if kdist[j] is None:
+                kdist[j] = row_dists(j)[k - 1][0]
+            reach.append(max(kdist[j], d))
+        lrd[i] = 1 / (mean(reach) or 1e-9)
+    lof = [round(mean([lrd[j] for j in knn[i]]) / lrd[i] if lrd[i] else 1, 4) for i in range(n)]
     threshold = float(opt_num(request, "threshold", 1.5) or 1.5)
     flags = [{"index": i, "lof": lof[i]} for i in range(n) if lof[i] > threshold]
     return ok({"lof_scores": lof, "k": k, "threshold": threshold, "outliers": flags,

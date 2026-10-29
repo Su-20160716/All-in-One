@@ -100,8 +100,14 @@ def knapsack_dp(request):
     values = _get_list(request, "values")
     if len(weights) != len(values):
         raise ValueError("weights 与 values 长度需一致")
+    if len(weights) > 200:
+        raise ValueError("物品数量最多 200")
     cap = int(req_num(request, "capacity", minimum=0))
+    if cap > 10000:
+        raise ValueError("背包容量最大支持 10000（DP 表规模 O(n·cap)）")
     n = len(weights)
+    if any(weights[i] < 0 for i in range(n)):
+        raise ValueError("weights 不能为负数")
     dp = [[0] * (cap + 1) for _ in range(n + 1)]
     for i in range(1, n + 1):
         w = int(weights[i - 1])
@@ -111,7 +117,10 @@ def knapsack_dp(request):
                 dp[i][c] = max(dp[i - 1][c], dp[i - 1][c - w] + v)
             else:
                 dp[i][c] = dp[i - 1][c]
-    return ok({"max_value": dp[n][cap], "dp_table": dp})
+    if (n + 1) * (cap + 1) <= 250000:
+        return ok({"max_value": dp[n][cap], "dp_table": dp})
+    return ok({"max_value": dp[n][cap], "dp_table": None,
+               "note": "DP 表过大已省略，仅返回最优值"})
 
 
 @endpoint()

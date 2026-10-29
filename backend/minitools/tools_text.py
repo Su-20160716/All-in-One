@@ -272,13 +272,21 @@ def _levenshtein(a, b):
 @endpoint()
 def similarity(request):
     """20. 文本相似度（Jaccard + Levenshtein）。"""
+    from difflib import SequenceMatcher
+
     a = req_str(request, "text_a")
     b = req_str(request, "text_b")
+    if len(a) > 2000 or len(b) > 2000:
+        ratio = SequenceMatcher(None, a, b).quick_ratio()
+        sa, sb = set(a.lower()), set(b.lower())
+        j = len(sa & sb) / len(sa | sb) if (sa | sb) else 1.0
+        return ok({"jaccard": round(j, 4), "levenshtein": None,
+                   "ratio": round(ratio, 4), "approximate": True})
     sa, sb = set(a.lower()), set(b.lower())
     j = len(sa & sb) / len(sa | sb) if (sa | sb) else 1.0
     lev = _levenshtein(a, b)
     ratio = 1.0 - lev / max(len(a), len(b)) if max(len(a), len(b)) else 1.0
-    return ok({"jaccard": round(j, 4), "levenshtein": lev, "ratio": round(ratio, 4)})
+    return ok({"jaccard": round(j, 4), "levenshtein": lev, "ratio": round(ratio, 4), "approximate": False})
 
 
 @endpoint()

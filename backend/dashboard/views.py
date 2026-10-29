@@ -1,6 +1,7 @@
 """统计面板视图：全局统计（管理员） + 个人工作台统计 + 多维趋势/分布/待办聚合
 + 今日卡片（到期/学习/日程/存储）+ 最近动态 + 卡片顺序同步（F657-F660、F666-F668）
 """
+import json
 from datetime import timedelta
 from functools import wraps
 
@@ -599,3 +600,91 @@ class CardOrderView(APIView):
 
     post = put
     patch = put
+
+
+class DashboardLayoutView(APIView):
+    """F28/F29 工作台布局与卡片开关：GET 读取 / PUT 保存"""
+
+    @endpoint(("GET",))
+    def get(self, request):
+        from dashboard.models import DashboardCardOrder
+
+        obj = DashboardCardOrder.objects.filter(owner=request.user).first()
+        return Response({
+            "order": (obj.order if obj else []) or [],
+            "enabled": (obj.enabled if obj else []) or [],
+            "layout": (obj.layout if obj else {}) or {},
+            "updated_at": obj.updated_at if obj else None,
+        })
+
+    @endpoint(("PUT", "POST", "PATCH"))
+    def put(self, request):
+        from dashboard.models import DashboardCardOrder
+
+        payload = request.data if isinstance(request.data, dict) else {}
+        layout = payload.get("layout")
+        if layout is not None and not isinstance(layout, dict):
+            raise ValueError("layout 需为对象")
+        order = payload.get("order")
+        if order is None and isinstance(layout, dict):
+            order = layout.get("order")
+        enabled = payload.get("enabled")
+        if enabled is None and isinstance(layout, dict):
+            enabled = layout.get("enabled")
+        obj, _ = DashboardCardOrder.objects.get_or_create(owner=request.user)
+        if order is not None:
+            if not isinstance(order, list) or not all(isinstance(x, str) for x in order):
+                raise ValueError("order 需为字符串数组")
+            obj.order = [x[:64] for x in order[:60]]
+        if enabled is not None:
+            if not isinstance(enabled, list) or not all(isinstance(x, str) for x in enabled):
+                raise ValueError("enabled 需为字符串数组")
+            obj.enabled = [x[:64] for x in enabled[:60]]
+        if layout is not None:
+            if len(json.dumps(layout, ensure_ascii=False)) > 20000:
+                raise ValueError("layout 过大（上限 20KB）")
+            obj.layout = layout
+        obj.save()
+        return Response({
+            "saved": True, "order": obj.order, "enabled": obj.enabled,
+            "layout": obj.layout, "updated_at": obj.updated_at,
+        })
+
+
+class DailySummaryView(APIView):
+    """F30 每日工作摘要：今天新增/完成、写作、上传、消息、专注"""
+
+    @endpoint(("GET",))
+    def get(self, request):
+        from datetime import datetime, time
+
+        from learning.models import StudySession
+        from notes.models import WordActivity
+        from projects.models import TaskCard
+
+        today = timezone.localdate()
+        start = timezone.make_aware(datetime.combine(today, time.min))
+        notes_new = Note.objects.filter(owner=request.user, created_at__gte=start).count()
+        cards_done = TaskCard.objects.filter(
+            assignees=request.user, status="done", completed_at__gte=start
+        ).distinct().count()
+        files_new = FileMeta.objects.filter(
+            owner=request.user, is_deleted=False, created_at__gte=start
+        ).count()
+        messages = ChatMessage.objects.filter(sender=request.user, created_at__gte=start).count()
+        words = WordActivity.objects.filter(owner=request.user, date=today).values_list("delta", flat=True).first() or 0
+        focus = StudySession.objects.filter(owner=request.user, study_date=today).aggregate(
+            m=Sum("minutes"))["m"] or 0
+        items = [
+            {"key": "notes", "label": "新增笔记", "value": notes_new, "unit": "篇"},
+            {"key": "cards", "label": "完成卡片", "value": cards_done, "unit": "张"},
+            {"key": "words", "label": "写作字数", "value": words, "unit": "字"},
+            {"key": "files", "label": "上传文件", "value": files_new, "unit": "个"},
+            {"key": "messages", "label": "发送消息", "value": messages, "unit": "条"},
+            {"key": "focus", "label": "专注时长", "value": focus, "unit": "分钟"},
+        ]
+        active = sum(1 for i in items if i["value"])
+        return Response({
+            "date": today.isoformat(), "items": items, "active_kinds": active,
+            "headline": f"今天有 {active} 类活动，写作 {words} 字，完成 {cards_done} 张卡片",
+        })

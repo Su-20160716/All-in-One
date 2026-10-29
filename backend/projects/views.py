@@ -6,6 +6,7 @@ from django.db import transaction
 from django.db.models import Count as ModelsCount, Max as ModelsMax, Prefetch, Sum as ModelsSum, Q
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 from accounts.models import User
 from core.models import notify
 from core.pagination import OptionalPageNumberPagination
-from core.validators import as_int
+from core.validators import as_int, parse_bool
 from projects.models import (
     AcceptanceItem,
     Board,
@@ -26,6 +27,7 @@ from projects.models import (
     Milestone,
     Project,
     ProjectActivity,
+    Sprint,
     Subtask,
     TaskCard,
     WorkLog,
@@ -216,6 +218,13 @@ class ProjectMemberView(APIView):
             return Response({"message": "仅项目创建者可管理成员"}, status=403)
         user_ids = request.data.get("user_ids") or []
         usernames = request.data.get("usernames") or []
+        if not isinstance(user_ids, (list, tuple)) or not isinstance(usernames, (list, tuple)):
+            return Response({"message": "user_ids / usernames 必须是数组"}, status=400)
+        try:
+            user_ids = [as_int(x, field="user_ids", minimum=1) for x in user_ids]
+        except ValidationError:
+            return Response({"message": "user_ids 必须全部为整数"}, status=400)
+        usernames = [str(x) for x in usernames]
         added = []
         users = User.objects.filter(Q(id__in=user_ids) | Q(username__in=usernames))
         for u in users:
@@ -229,7 +238,10 @@ class ProjectMemberView(APIView):
         project = Project.objects.filter(pk=pk).first()
         if not project or project.owner_id != request.user.id:
             return Response({"message": "仅项目创建者可管理成员"}, status=403)
-        user_id = request.query_params.get("user_id")
+        try:
+            user_id = as_int(request.query_params.get("user_id"), field="user_id", minimum=1)
+        except ValidationError:
+            return Response({"message": "user_id 必须是整数"}, status=400)
         user = project.members.filter(id=user_id).first()
         if user:
             project.members.remove(user)
@@ -448,7 +460,11 @@ class CardBatchView(APIView):
             _push_board_event(project.id, "card.batch", batch_action="priority", count=n)
             return Response({"message": f"已更新 {n} 个任务优先级"})
         if action == "move":
-            board = Board.objects.filter(pk=request.data.get("board_id"), project=project).first()
+            try:
+                target_board_id = as_int(request.data.get("board_id"), field="board_id", minimum=1)
+            except ValidationError:
+                return Response({"message": "board_id 必须是整数"}, status=400)
+            board = Board.objects.filter(pk=target_board_id, project=project).first()
             if not board:
                 return Response({"message": "目标列不存在"}, status=404)
             n = qs.update(board=board)
@@ -456,7 +472,14 @@ class CardBatchView(APIView):
                               board_id=board.id)
             return Response({"message": f"已移动 {n} 个任务"})
         if action == "assignees":
-            users = User.objects.filter(id__in=request.data.get("user_ids") or [])
+            raw_ids = request.data.get("user_ids") or []
+            if not isinstance(raw_ids, (list, tuple)):
+                return Response({"message": "user_ids 必须是数组"}, status=400)
+            try:
+                user_ids = [as_int(x, field="user_ids", minimum=1) for x in raw_ids]
+            except ValidationError:
+                return Response({"message": "user_ids 必须全部为整数"}, status=400)
+            users = User.objects.filter(id__in=user_ids)
             for c in qs:
                 c.assignees.set(users)
             return Response({"message": "已批量分配负责人"})
@@ -520,6 +543,10 @@ class CardSearchView(APIView):
                 qs = qs.filter(**{f: v})
         assignee = request.query_params.get("assignee")
         if assignee:
+            try:
+                assignee = as_int(assignee, field="assignee", minimum=1)
+            except ValidationError:
+                return Response({"message": "assignee 必须是整数"}, status=400)
             qs = qs.filter(assignees__id=assignee)
         label = request.query_params.get("label")
         if label:
@@ -534,8 +561,16 @@ class CardSearchView(APIView):
             qs = qs.filter(due_date__gte=today, due_date__lte=today + timedelta(days=7))
         elif due == "nodate":
             qs = qs.filter(due_date__isnull=True)
-        qs = qs.distinct()
-        return Response({"list": TaskCardSerializer(qs, many=True).data, "total": qs.count()})
+        qs = (
+            qs.select_related("board", "board__project")
+            .prefetch_related(
+                "assignees", "comments", "subtasks", "acceptance_items", "worklogs",
+                Prefetch("dependencies", queryset=CardDependency.objects.select_related("blocked_by")),
+            )
+            .distinct()
+        )
+        data = TaskCardSerializer(qs, many=True).data
+        return Response({"list": data, "total": len(data)})
 
 
 # ============ 子任务 ============
@@ -549,7 +584,11 @@ class SubtaskListView(APIView):
         if not title:
             return Response({"message": "子任务标题不能为空"}, status=400)
         order = (card.subtasks.aggregate(m=ModelsMax("sort_order"))["m"] or 0) + 1
-        assignee = User.objects.filter(pk=request.data.get("assignee_id")).first()
+        try:
+            assignee_id = as_int(request.data.get("assignee_id"), default=None, field="assignee_id", minimum=1)
+        except ValidationError:
+            return Response({"message": "assignee_id 必须是整数"}, status=400)
+        assignee = User.objects.filter(pk=assignee_id).first() if assignee_id else None
         st = Subtask.objects.create(card=card, title=title, sort_order=order, assignee=assignee)
         return Response(SubtaskSerializer(st).data, status=201)
 
@@ -566,7 +605,7 @@ class SubtaskDetailView(APIView):
         if "title" in request.data:
             st.title = request.data["title"].strip() or st.title
         if "is_done" in request.data:
-            st.is_done = bool(request.data["is_done"])
+            st.is_done = parse_bool(request.data["is_done"], field="is_done")
         if "assignee_id" in request.data:
             st.assignee = User.objects.filter(pk=request.data["assignee_id"]).first()
         st.save()
@@ -753,7 +792,15 @@ class MyTasksView(APIView):
             qs = qs.filter(due_date__gte=today, due_date__lte=today + timedelta(days=7))
         elif bucket == "nodate":
             qs = qs.filter(due_date__isnull=True)
-        qs = qs.select_related("board", "board__project").distinct().order_by("due_date", "-id")
+        qs = (
+            qs.select_related("board", "board__project")
+            .prefetch_related(
+                "assignees", "comments", "subtasks", "acceptance_items", "worklogs",
+                Prefetch("dependencies", queryset=CardDependency.objects.select_related("blocked_by")),
+            )
+            .distinct()
+            .order_by("due_date", "-id")
+        )
         data = []
         for c in qs[:200]:
             d = TaskCardSerializer(c).data
@@ -778,6 +825,10 @@ class MyTasksView(APIView):
 # ===========================================================================
 
 def _board_of(user, board_id):
+    try:
+        board_id = as_int(board_id, field="board_id", minimum=1)
+    except ValidationError:
+        return None
     board = Board.objects.filter(pk=board_id).first()
     if not board or not _can_access(user, board.project):
         return None
@@ -851,7 +902,11 @@ class CardChecklistView(APIView):
         if not title:
             return Response({"message": "清单项不能为空"}, status=400)
         order = (card.subtasks.aggregate(m=ModelsMax("sort_order"))["m"] or 0) + 1
-        assignee = User.objects.filter(pk=request.data.get("assignee_id")).first()
+        try:
+            assignee_id = as_int(request.data.get("assignee_id"), default=None, field="assignee_id", minimum=1)
+        except ValidationError:
+            return Response({"message": "assignee_id 必须是整数"}, status=400)
+        assignee = User.objects.filter(pk=assignee_id).first() if assignee_id else None
         st = Subtask.objects.create(card=card, title=title, sort_order=order, assignee=assignee)
         return Response(SubtaskSerializer(st).data, status=201)
 
@@ -1131,14 +1186,24 @@ class CardBatchMoveView(APIView):
     """F593 批量移动卡片到目标列（保持传入顺序）"""
 
     def post(self, request):
-        project_id = request.data.get("project_id")
+        try:
+            project_id = as_int(request.data.get("project_id"), field="project_id", minimum=1)
+            board_id = as_int(request.data.get("board_id"), field="board_id", minimum=1)
+        except ValidationError:
+            return Response({"message": "project_id / board_id 必须是整数"}, status=400)
         project = Project.objects.filter(pk=project_id).first()
         if not project or not _can_access(request.user, project):
             return Response({"message": "项目不存在或无权访问"}, status=404)
-        board = Board.objects.filter(pk=request.data.get("board_id"), project=project).first()
+        board = Board.objects.filter(pk=board_id, project=project).first()
         if not board:
             return Response({"message": "目标列不存在"}, status=404)
-        ids = request.data.get("card_ids") or []
+        raw_ids = request.data.get("card_ids") or []
+        if not isinstance(raw_ids, (list, tuple)):
+            return Response({"message": "card_ids 必须是数组"}, status=400)
+        try:
+            ids = [as_int(x, field="card_ids", minimum=1) for x in raw_ids]
+        except ValidationError:
+            return Response({"message": "card_ids 必须全部为整数"}, status=400)
         cards = list(TaskCard.objects.filter(id__in=ids, board__project=project).order_by("sort_order", "id"))
         if not cards:
             return Response({"message": "没有可移动的卡片"}, status=400)
@@ -1261,7 +1326,7 @@ class CardDodDetailView(APIView):
         if "content" in request.data and (request.data["content"] or "").strip():
             item.content = request.data["content"].strip()[:300]
         if "is_done" in request.data:
-            item.is_done = bool(request.data["is_done"])
+            item.is_done = parse_bool(request.data["is_done"], field="is_done")
         item.save()
         return Response(AcceptanceItemSerializer(item).data)
 
@@ -1308,7 +1373,14 @@ class ProjectStandupView(APIView):
         except (TypeError, ValueError):
             target = timezone.localdate()
         prev = target - timedelta(days=1)
-        cards = list(TaskCard.objects.filter(board__project=project).select_related("board"))
+        cards = list(
+            TaskCard.objects.filter(board__project=project)
+            .select_related("board")
+            .prefetch_related(
+                "assignees",
+                Prefetch("dependencies", queryset=CardDependency.objects.select_related("blocked_by")),
+            )
+        )
 
         def brief(c):
             return {"id": c.id, "code": c.code, "title": c.title, "status": c.status,
@@ -1321,7 +1393,7 @@ class ProjectStandupView(APIView):
         for c in cards:
             if c.status == "done":
                 continue
-            has_blocker = any(d.blocked_by.status != "done" for d in c.dependencies.select_related("blocked_by"))
+            has_blocker = any(d.blocked_by.status != "done" for d in c.dependencies.all())
             overdue = bool(c.due_date and c.due_date < target)
             if has_blocker or overdue:
                 item = brief(c)
@@ -1344,7 +1416,7 @@ class CardArchiveView(APIView):
         if not card:
             return Response({"message": "任务不存在"}, status=404)
         if "is_archived" in request.data:
-            card.is_archived = bool(request.data["is_archived"])
+            card.is_archived = parse_bool(request.data["is_archived"], field="is_archived")
         else:
             card.is_archived = not card.is_archived
         card.save(update_fields=["is_archived"])
@@ -1363,3 +1435,126 @@ class ProjectArchivedCardsView(APIView):
             return Response({"message": "项目不存在或无权访问"}, status=404)
         qs = TaskCard.objects.filter(board__project=project, is_archived=True)
         return Response({"list": TaskCardSerializer(qs, many=True).data, "total": qs.count()})
+
+
+# ============ F23 迭代（Sprint）管理 ============
+
+def _sprint_payload(s):
+    return {
+        "id": s.id, "project_id": s.project_id, "name": s.name,
+        "start_at": s.start_at, "end_at": s.end_at, "status": s.status,
+        "stats": {
+            "total": s.cards.filter(is_archived=False).count(),
+            "done": s.cards.filter(is_archived=False, status="done").count(),
+            "points": s.cards.filter(is_archived=False).aggregate(n=ModelsSum("story_points"))["n"] or 0,
+        },
+    }
+
+
+class ProjectSprintView(APIView):
+    """GET 迭代列表 / POST 新建迭代"""
+
+    def get(self, request, project_id):
+        project = Project.objects.filter(pk=project_id).first()
+        if not project or not _can_access(request.user, project):
+            return Response({"message": "项目不存在或无权访问"}, status=404)
+        rows = [_sprint_payload(s) for s in project.sprints.all()]
+        return Response({"list": rows, "total": len(rows)})
+
+    def post(self, request, project_id):
+        project = Project.objects.filter(pk=project_id).first()
+        if not project or project.owner_id != request.user.id:
+            return Response({"message": "项目不存在或无权操作"}, status=404)
+        name = str(request.data.get("name") or "").strip()[:120]
+        if not name:
+            return Response({"message": "迭代名称不能为空"}, status=400)
+        sprint = Sprint.objects.create(
+            project=project,
+            name=name,
+            start_at=request.data.get("start_at") or None,
+            end_at=request.data.get("end_at") or None,
+        )
+        _log_activity(project, request.user, "create", f"迭代 {name}")
+        return Response(_sprint_payload(sprint), status=201)
+
+
+class SprintActionView(APIView):
+    """POST start / close。close 时未完成卡片自动回到待办池"""
+
+    def post(self, request, project_id, sid, action):
+        project = Project.objects.filter(pk=project_id).first()
+        if not project or project.owner_id != request.user.id:
+            return Response({"message": "项目不存在或无权操作"}, status=404)
+        sprint = Sprint.objects.filter(pk=sid, project=project).first()
+        if not sprint:
+            return Response({"message": "迭代不存在"}, status=404)
+
+        if action == "start":
+            if sprint.status == "closed":
+                return Response({"message": "已结束的迭代不能重新开始"}, status=400)
+            if project.sprints.filter(status="active").exclude(pk=sprint.pk).exists():
+                return Response({"message": "已有进行中的迭代，请先结束"}, status=400)
+            sprint.status = "active"
+            sprint.start_at = sprint.start_at or timezone.now()
+            sprint.save(update_fields=["status", "start_at"])
+            _log_activity(project, request.user, "move", f"开始迭代 {sprint.name}")
+            return Response(_sprint_payload(sprint))
+
+        if action == "close":
+            if sprint.status == "closed":
+                return Response(_sprint_payload(sprint))
+            with transaction.atomic():
+                carried = sprint.cards.filter(is_archived=False).exclude(status="done").update(sprint=None)
+                sprint.status = "closed"
+                sprint.end_at = sprint.end_at or timezone.now()
+                sprint.save(update_fields=["status", "end_at"])
+            _log_activity(project, request.user, "move", f"结束迭代 {sprint.name}（结转 {carried} 张）")
+            payload = _sprint_payload(sprint)
+            payload["carried_over"] = carried
+            return Response(payload)
+
+        return Response({"message": "action 只能是 start / close"}, status=400)
+
+
+# ============ F22 工时预估偏差 ============
+
+class ProjectEffortReportView(APIView):
+    """预估 vs 实际工时偏差；未填预估的卡片不计入偏差统计"""
+
+    def get(self, request, project_id):
+        project = Project.objects.filter(pk=project_id).first()
+        if not project or not _can_access(request.user, project):
+            return Response({"message": "项目不存在或无权访问"}, status=404)
+        cards = (
+            TaskCard.objects.filter(board__project=project, is_archived=False)
+            .values("id", "title", "estimated_minutes", "story_points", "status")
+        )
+        spent_rows = (
+            WorkLog.objects.filter(card__board__project=project)
+            .values("card_id").annotate(total=ModelsSum("minutes"))
+        )
+        spent_map = {r["card_id"]: r["total"] or 0 for r in spent_rows}
+
+        rows, est_total, spent_total = [], 0, 0
+        for c in cards:
+            estimate = c["estimated_minutes"] or 0
+            spent = spent_map.get(c["id"], 0)
+            est_total += estimate
+            spent_total += spent
+            if estimate <= 0:
+                continue
+            rows.append({
+                "id": c["id"], "title": c["title"], "status": c["status"],
+                "estimate": estimate, "spent": spent,
+                "variance": spent - estimate,
+                "variance_pct": round((spent - estimate) / estimate * 100, 1),
+            })
+        rows.sort(key=lambda r: -abs(r["variance"]))
+        return Response({
+            "project_id": project.id,
+            "estimate_total": est_total, "spent_total": spent_total,
+            "variance_total": spent_total - est_total,
+            "overall_pct": round((spent_total - est_total) / est_total * 100, 1) if est_total else 0,
+            "counted": len(rows),
+            "top": rows[:20],
+        })

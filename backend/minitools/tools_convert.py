@@ -190,6 +190,9 @@ def number_system(request):
     to = opt_str(request, "to", "roman")
     if frm == "arabic" and to == "roman":
         n = int(value)
+        # 经典罗马数字只到 3999；更大的值会让循环退化成长串 M
+        if not 1 <= n <= 3999:
+            raise ValueError("罗马数字仅支持 1-3999")
         roman = [(1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"),
                  (90, "XC"), (50, "L"), (40, "XL"), (10, "X"), (9, "IX"),
                  (5, "V"), (4, "IV"), (1, "I")]

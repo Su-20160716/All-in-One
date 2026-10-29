@@ -281,3 +281,45 @@ class FileVisibilitySnapshot(models.Model):
 
     def __str__(self):
         return f"{self.file_id}:{self.visibility}"
+
+
+class FileVersion(models.Model):
+    """F11 文件历史版本：在线编辑/覆盖保存前的物理副本（仅保留最近 N 个）"""
+
+    file = models.ForeignKey(FileMeta, on_delete=models.CASCADE, related_name="versions", verbose_name="文件")
+    version = models.PositiveIntegerField(verbose_name="版本号")
+    storage_path = models.CharField(max_length=500, verbose_name="版本存储路径")
+    size = models.BigIntegerField(default=0, verbose_name="大小(字节)")
+    sha1 = models.CharField(max_length=40, blank=True, verbose_name="SHA1")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="file_versions", verbose_name="保存人",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="保存时间")
+
+    class Meta:
+        verbose_name = "文件版本"
+        verbose_name_plural = "文件版本"
+        ordering = ["-version"]
+        unique_together = [("file", "version")]
+
+    def __str__(self):
+        return f"{self.file_id} v{self.version}"
+
+
+class ShareVisit(models.Model):
+    """F14 分享访问明细：按 IP/UA 哈希去重统计独立访客（不落原始 IP）"""
+
+    link = models.ForeignKey(ShareLink, on_delete=models.CASCADE, related_name="visits", verbose_name="分享链接")
+    ip_hash = models.CharField(max_length=64, blank=True, default="", db_index=True, verbose_name="IP哈希")
+    ua_hash = models.CharField(max_length=64, blank=True, default="", verbose_name="UA哈希")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="访问时间")
+
+    class Meta:
+        verbose_name = "分享访问"
+        verbose_name_plural = "分享访问"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["link", "-created_at"])]
+
+    def __str__(self):
+        return f"{self.link_id} @{self.created_at:%Y-%m-%d %H:%M}"

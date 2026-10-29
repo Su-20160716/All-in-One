@@ -17,12 +17,14 @@ from django.db.models import Count, Q, Sum
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.pagination import OptionalPageNumberPagination
 from core.scoping import is_visible, owner_qs, scope_queryset
+from core.validators import as_datetime, parse_bool
 from notes import links as link_lib
 from notes.models import Note, NoteFolder, NoteLink, NoteSnippet, NoteTag, NoteVersion, WordActivity, WritingGoal
 from notes.serializers import NoteSerializer, NoteTagSerializer, NoteVersionSerializer
@@ -45,8 +47,11 @@ def _note_qs(user):
 
     注意：只用于**读**。写操作请用 `_note_write_qs`，否则部门/全平台范围
     会连带把他人笔记变成可改可删。
+    F18：未到 publish_at 的定时笔记只对作者本人可见。
     """
-    return scope_queryset(Note.objects.all(), user)
+    qs = scope_queryset(Note.objects.all(), user)
+    now = timezone.now()
+    return qs.filter(Q(publish_at__isnull=True) | Q(publish_at__lte=now) | Q(owner=user))
 
 
 def _note_write_qs(user):
@@ -249,6 +254,19 @@ class NoteListView(APIView):
         if color in NOTE_COLORS:
             note.color = color
             note.save(update_fields=["color"])
+        # F18 定时发布 / 到期时间
+        sched = {}
+        try:
+            for field in ("publish_at", "expire_at"):
+                raw = request.data.get(field)
+                if raw not in (None, ""):
+                    sched[field] = as_datetime(raw, field=field)
+        except ValidationError:
+            return Response({"message": "publish_at / expire_at 必须是合法日期时间"}, status=400)
+        if sched:
+            for field, val in sched.items():
+                setattr(note, field, val)
+            note.save(update_fields=list(sched.keys()))
         self._tags = request.data.get("tags") or []
         _apply_tags(request.user, note, self._tags)
         return Response(NoteSerializer(note).data, status=status.HTTP_201_CREATED)
@@ -323,7 +341,12 @@ class NoteDetailView(APIView):
                 changed = True
             for flag in ("is_pinned", "is_favorite", "is_public"):
                 if flag in request.data:
-                    setattr(note, flag, bool(request.data[flag]))
+                    setattr(note, flag, parse_bool(request.data[flag], field=flag))
+                    changed = True
+            for field in ("publish_at", "expire_at"):
+                if field in request.data:
+                    raw = request.data.get(field)
+                    setattr(note, field, None if raw in (None, "") else as_datetime(raw, field=field))
                     changed = True
             if "tags" in request.data and isinstance(request.data["tags"], list):
                 _apply_tags(request.user, note, request.data["tags"])
@@ -444,7 +467,8 @@ class NoteTagListView(APIView):
     def get(self, request):
         qs = NoteTag.objects.filter(owner=request.user).annotate(c=Count("notes")).order_by("-c", "name")
         data = NoteTagSerializer(qs, many=True).data
-        return Response({"list": data, "total": qs.count()})
+        # 序列化已取全量，len 即总数；annotate 后再 count() 会多一条聚合查询
+        return Response({"list": data, "total": len(data)})
 
     def post(self, request):
         name = (request.data.get("name") or "").strip()
@@ -1021,7 +1045,7 @@ class WritingGoalDetailView(APIView):
                 return _nb("target 必须大于 0")
             goal.target = target
         if "active" in request.data:
-            goal.active = bool(request.data["active"])
+            goal.active = parse_bool(request.data["active"], field="active")
         goal.save()
         return Response({"message": "已更新", "id": goal.id, "target": goal.target, "active": goal.active})
 
@@ -1158,7 +1182,10 @@ class RandomNoteView(APIView):
         if count == 0:
             return _nb("没有可回顾的笔记", 404)
         offset = random.randint(0, count - 1)
-        note = list(qs[offset:offset + 1])[0]
+        picked = list(qs[offset:offset + 1])
+        if not picked:  # count 与取行之间被并发删除
+            return _nb("没有可回顾的笔记", 404)
+        note = picked[0]
         data = NoteSerializer(note).data
         data["outline"] = extract_outline(note.content)
         data["pool_size"] = count
@@ -1185,7 +1212,11 @@ class NoteHealthView(APIView):
             limit = _qp_int(request.query_params, "limit", 50, lo=1, hi=300)
         except ValueError as e:
             return _nb(str(e))
-        notes = list(_note_qs(request.user).filter(is_deleted=False).order_by("-updated_at")[:2000])
+        # 预取 tags：下方逐篇判空，否则 2000 篇 = 2000 次查询
+        notes = list(
+            _note_qs(request.user).filter(is_deleted=False)
+            .prefetch_related("tags").order_by("-updated_at")[:2000]
+        )
         if not notes:
             return Response({"note_count": 0, "avg_score": 0, "grade": "-",
                              "distribution": {}, "issues": [], "worst": []})
@@ -1209,7 +1240,7 @@ class NoteHealthView(APIView):
             if not outgoing.get(n.id) and n.id not in backlinked:
                 score -= 20
                 issues.append("orphan")
-            if not n.tags.exists():
+            if not n.tags.all():
                 score -= 10
                 issues.append("no_tag")
             if (now - n.updated_at).days > stale_days:
@@ -1385,7 +1416,7 @@ class NoteMergeView(APIView):
             link_lib.rebuild_links_for_note(target)
         except Exception:
             logger.exception("B23：静默兜底已登记（notes/views.py:1383 原为 pass）——review 是否应收窄异常类型")
-        keep = bool(request.data.get("keep_source", False))
+        keep = parse_bool(request.data.get("keep_source"), field="keep_source")
         if keep:
             message = f"已合并到「{target.title}」（源笔记保留）"
         else:
@@ -1763,7 +1794,7 @@ class NotePinView(APIView):
         if not note:
             return _nb("笔记不存在", 404)
         if "pinned" in request.data:
-            note.is_pinned = bool(request.data["pinned"])
+            note.is_pinned = parse_bool(request.data["pinned"], field="pinned")
         else:
             note.is_pinned = not note.is_pinned
         note.save(update_fields=["is_pinned", "updated_at"])

@@ -53,10 +53,11 @@ def find_link(token, file_id=None, folder_id=None):
     return qs.first()
 
 
-def validate_link(link, password="", for_download=False):
+def validate_link(link, password="", for_download=False, request=None):
     """校验链接有效性；不通过抛 ShareAccessError。
 
     :param for_download: True 时额外校验下载权限与次数上限
+    :param request: 传入时记录一条访问明细（F14，只存 IP/UA 哈希）
     """
     if not link or link.is_revoked:
         raise ShareAccessError("链接不存在或已失效", status=404)
@@ -70,7 +71,29 @@ def validate_link(link, password="", for_download=False):
             raise ShareAccessError("当前链接不允许下载", status=403)
         if link.max_downloads is not None and link.download_count >= link.max_downloads:
             raise ShareAccessError("下载次数已达上限", status=403)
+    if request is not None:
+        record_visit(link, request)
     return link
+
+
+def record_visit(link, request):
+    """F14 访问明细：只落 IP/UA 的 sha256 前缀，失败不影响分享访问"""
+    try:
+        import hashlib
+
+        from core.utils import get_client_ip
+
+        from .models import ShareVisit
+
+        ip = get_client_ip(request) or ""
+        ua = (request.META.get("HTTP_USER_AGENT") or "")[:300]
+        ShareVisit.objects.create(
+            link=link,
+            ip_hash=hashlib.sha256(ip.encode("utf-8")).hexdigest()[:32] if ip else "",
+            ua_hash=hashlib.sha256(ua.encode("utf-8")).hexdigest()[:32] if ua else "",
+        )
+    except Exception:
+        pass
 
 
 def bump_view(link):

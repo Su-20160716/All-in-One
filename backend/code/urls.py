@@ -36,6 +36,7 @@ SUBSYSTEMS = [
     ["run", "安全执行", "执行 / REPL / 历史 / 统计 / 参数预设", [
         "run/", "run/repl/", "run/history/", "run/<int:pk>/", "run/<int:pk>/delete/",
         "run/clear/", "run/stats/", "run/presets/", "run/presets/<int:pk>/",
+        "runs/compare/",
     ]],
     ["judge", "判题", "多用例判定与排行榜", [
         "judge/", "judge/history/", "judge/<int:pk>/", "leaderboard/",
@@ -48,6 +49,7 @@ SUBSYSTEMS = [
     ["analyze", "静态分析", "指标 / 大纲 / 复杂度 / 质量 / 统计卡", [
         "analyze/", "outline/", "complexity/", "quality/", "flow/",
         "similarity/", "secret-scan/", "refactor-hints/", "code-stats/",
+        "dependencies/check/",
     ]],
     ["ai", "智能辅助", "生成 / 解释 / 找bug / 重构 / 测试 / 评审", [
         "ai/status/", "ai/generate/", "ai/transform/", "ai/error-explain/",
@@ -134,6 +136,7 @@ VIEWS = {
     "run/stats/": C.run_stats,
     "run/presets/": C.run_presets,
     "run/presets/<int:pk>/": C.run_preset_detail,
+    "runs/compare/": C.run_compare,
     "run/<int:pk>/": C.run_detail,
     "run/<int:pk>/delete/": C.run_delete,
     # judge
@@ -161,6 +164,7 @@ VIEWS = {
     "secret-scan/": A.secret_scan,
     "refactor-hints/": A.refactor_hints,
     "code-stats/": A.code_stats,
+    "dependencies/check/": C.dependency_check,
     # ai
     "ai/status/": A.ai_status,
     "ai/generate/": A.ai_generate,
@@ -239,7 +243,7 @@ public_urlpatterns = [
 # 契约断言：接口数量变化时必须显式确认
 # v6 基础 75 + L5 竞技教学 18 + L3 AI 补齐 6 + L4 工程化 6 = 105
 # F669–F680 能力扩展 +5：snippets/folders · run/presets(2) · code-stats · daily/reminder
-_EXPECTED = 110
+_EXPECTED = 112
 assert len(urlpatterns) == _EXPECTED, (
     f"code 接口数应为 {_EXPECTED}，实际 {len(urlpatterns)}"
 )

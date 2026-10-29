@@ -1,8 +1,9 @@
 """用户/角色/权限/租户/部门 序列化"""
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
-from rest_framework_simplejwt.exceptions import InvalidToken
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.models import (
     DATA_SCOPE_CHOICES,
@@ -42,12 +43,15 @@ class MyTokenRefreshSerializer(TokenRefreshSerializer):
     避免「旧 access 失效但旧 refresh 还能续出新 access」的半失效状态"""
 
     def validate(self, attrs):
-        refresh = attrs["refresh"]
+        # ⚠ attrs["refresh"] 是字符串（TokenRefreshSerializer.refresh = CharField），
+        # 必须先解析成 RefreshToken 才能读 claim；直接 str.get() 会抛 AttributeError，
+        # 一旦被宽泛的 except 吞掉就会变成"所有合法 refresh 都被判失效"。
         try:
-            user = User.objects.filter(id=refresh.get("user_id")).first()
-        except Exception:
-            user = None
-        if user is None or refresh.get("tv") != user.token_version:
+            token = RefreshToken(attrs["refresh"])
+        except TokenError as exc:
+            raise InvalidToken(str(exc))
+        user = User.objects.filter(id=token.get("user_id")).first()
+        if user is None or token.get("tv") != user.token_version:
             raise InvalidToken("登录态已失效，请重新登录")
         return super().validate(attrs)
 

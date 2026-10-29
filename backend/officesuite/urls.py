@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""officesuite 路由：30 个业务子系统 × 249 接口 + 目录 1 = 250 个 URL。
+"""officesuite 路由：30 个业务子系统 × 249 接口 + 文档增强 3 + 目录 1 = 253 个 URL。
 
 家族划分（与 views_*.py 的 *_FAMILY_COUNT 对应）：
 - flow     approval(12) seal(6) expense(8) travel(7) contract(8)      = 41
@@ -16,11 +16,15 @@ F681–F692 新增 15 个接口（235 → 250）：
   duty/swap-request×4 · todo/quadrant · todo/repeat-scan ·
   ticket/rate · ticket/auto-assign · wiki/like · wiki/star ·
   minutes/action-items/toggle · minutes/action-items/stats
+
+F45–F47 文档增强 3 个接口（250 → 253）：
+  annotations（GET/POST 同路径）· formula/eval · outline-from-note
 """
 from django.urls import path
 
 from devtools.common import endpoint_index
 from officesuite import views_cal as c
+from officesuite import views_doc as dc
 from officesuite import views_flow as f
 from officesuite import views_know as k
 from officesuite import views_people as pe
@@ -356,8 +360,13 @@ urlpatterns = [
     path("calendar/event/<int:pk>/delete/", c.calendar_event_delete),
     path("calendar/event/<int:pk>/rsvp/", c.calendar_event_rsvp),
     path("calendar/event/<int:pk>/attendees/", c.calendar_event_attendees),
+
+    # ---- 文档增强（F45–F47，3）----
+    path("annotations/", dc.annotations, name="doc-annotations"),
+    path("formula/eval/", dc.formula_eval, name="doc-formula-eval"),
+    path("outline-from-note/", dc.outline_from_note, name="doc-outline-from-note"),
 ]
 
-_count = (1 + 41 + 46 + 73 + 78 + 11)
-assert len(urlpatterns) == 250 == _count, \
-    f"officesuite 接口数应为 250（1+41+46+73+78+11），实际 {len(urlpatterns)}"
+_count = (1 + 41 + 46 + 73 + 78 + 11 + 3)
+assert len(urlpatterns) == 253 == _count, \
+    f"officesuite 接口数应为 253（1+41+46+73+78+11+3），实际 {len(urlpatterns)}"

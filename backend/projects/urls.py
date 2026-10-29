@@ -58,6 +58,10 @@ urlpatterns = [
     path("<int:project_id>/cards/by-number/<int:number>/", views.CardByNumberView.as_view(), name="card-by-number"),
     path("<int:project_id>/resolve/", views.CardResolveView.as_view(), name="card-resolve"),
     path("<int:project_id>/standup/", views.ProjectStandupView.as_view(), name="project-standup"),
+    # F23 迭代管理 / F22 工时偏差
+    path("<int:project_id>/sprints/", views.ProjectSprintView.as_view(), name="project-sprints"),
+    path("<int:project_id>/sprints/<int:sid>/<str:action>/", views.SprintActionView.as_view(), name="sprint-action"),
+    path("<int:project_id>/effort-report/", views.ProjectEffortReportView.as_view(), name="project-effort-report"),
     path("<int:project_id>/archived-cards/", views.ProjectArchivedCardsView.as_view(), name="project-archived-cards"),
 ]
 

@@ -16,10 +16,13 @@
 本模块面向 DRF 视图里散落的裸转换，不重复造轮子。
 """
 from datetime import date, datetime
+import os
+import re
 
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-__all__ = ["as_int", "parse_bool", "as_date"]
+__all__ = ["as_int", "parse_bool", "as_date", "as_datetime", "sanitize_filename"]
 
 # 没传 default 时的哨兵：区别于「default=None 表示缺失取 None」
 _MISSING = object()
@@ -108,3 +111,50 @@ def as_date(value, field=""):
         return date.fromisoformat(str(value).strip())
     except ValueError:
         raise ValidationError(f"{name} 必须是日期（YYYY-MM-DD）")
+
+
+def as_datetime(value, field=""):
+    """把入参安全转成 aware datetime（ISO 8601）；失败抛 ValidationError。
+
+    直接赋值给 DateTimeField 的垃圾字符串会在 save() 时才抛 Django 的
+    ValidationError，DRF 不识别 → 500。
+    """
+    name = _label(field)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValidationError(f"{name} 必须是日期时间（ISO 8601）")
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        except ValueError:
+            raise ValidationError(f"{name} 必须是日期时间（ISO 8601）")
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt)
+    return dt
+
+
+_UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f]')
+# Windows 设备名：以这些名字命名的文件会被解释成设备，写入行为未定义
+_WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {
+    f"{prefix}{i}" for prefix in ("COM", "LPT") for i in range(1, 10)
+}
+
+
+def sanitize_filename(raw, fallback="未命名文件", max_length=200):
+    """把客户端文件名收敛成「可安全落盘」的名字。
+
+    只取 basename（挡 ../ 与盘符）、剔除控制字符与 Windows 非法字符、
+    避开设备名；不改变用户可读的部分（中文/空格/括号均保留）。
+    """
+    text = str(raw or "").replace("\\", "/")
+    name = os.path.basename(text).strip()
+    name = _UNSAFE_FILENAME_CHARS.sub("_", name).strip(" .")
+    if not name or name in (".", ".."):
+        return fallback
+    stem, ext = os.path.splitext(name)
+    if stem.upper() in _WINDOWS_RESERVED:
+        stem = f"_{stem}"
+    if len(stem) + len(ext) > max_length:
+        stem = stem[: max(1, max_length - len(ext))]
+    return f"{stem}{ext}"

@@ -27,6 +27,7 @@ urlpatterns = [
     path("messages/<int:pk>/edit/", views.MessageEditView.as_view(), name="message-edit"),
     path("messages/<int:pk>/delete-for-all/", views.MessageDeleteForAllView.as_view(), name="message-delete-all"),
     path("messages/<int:pk>/translate/", views.MessageTranslateView.as_view(), name="message-translate"),
+    path("messages/<int:pk>/readers/", views.MessageReadersView.as_view(), name="message-readers"),
     path("sessions/<int:pk>/draft/", views.SessionDraftView.as_view(), name="session-draft"),
     path("sessions/<int:pk>/mute/", views.SessionMuteView.as_view(), name="session-mute"),
     path("sessions/<int:pk>/typing/", views.SessionTypingView.as_view(), name="session-typing"),

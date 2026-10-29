@@ -51,6 +51,10 @@ def _to_cn_upper(n):
         return "零元整"
     int_part = int(n)
     frac = int(round((n - int_part) * 100))
+    # 四舍五入可能把小数进位到 100（如 1.999 → 100 分），归一进整数部分
+    if frac >= 100:
+        int_part += 1
+        frac -= 100
     # 整数部分
     if int_part == 0:
         int_str = ""
@@ -108,6 +112,8 @@ def to_english_words(request):
     while n > 0:
         groups.append(n % 1000)
         n //= 1000
+    if len(groups) > len(_EN_SCALES):
+        raise ValueError("数字过大，最多支持到万亿级（< 10^15）")
     parts = []
     for i, g in enumerate(groups):
         if g == 0:
@@ -213,8 +219,16 @@ def power_calc(request):
     """38. 幂运算（含大数）。"""
     base = req_num(request, "base")
     exponent = req_num(request, "exponent")
-    result = Decimal(str(base)) ** Decimal(str(exponent))
-    return ok({"result": format(result, "f")})
+    if abs(exponent) > 10000:
+        raise ValueError("指数绝对值不能超过 10000")
+    try:
+        result = Decimal(str(base)) ** Decimal(str(exponent))
+        text = format(result, "f")
+    except (ArithmeticError, ValueError) as exc:
+        raise ValueError(f"幂运算失败：{exc}")
+    if len(text) > 10000:
+        raise ValueError("结果位数过多（超过 10000 位）")
+    return ok({"result": text})
 
 
 @endpoint()

@@ -12,6 +12,7 @@ from django.db import connection
 from django.db.models import Count, Max, Q
 from django.http import HttpResponse
 from django.utils import timezone
+from django.utils.http import content_disposition_header
 from rest_framework import serializers, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
@@ -29,7 +30,21 @@ from core.models import (
 from core.pagination import StandardPagination
 from core.scoping import scope_queryset, visible_user_ids
 from core.utils import format_size
-from core.validators import as_int
+from core.validators import as_date, as_int, parse_bool, sanitize_filename
+
+
+def _parse_dt(value, field):
+    """可空 ISO 时间入参：非法值 400，空值 None（历史上直接透传字符串 → 保存时 500）"""
+    if value in (None, ""):
+        return None
+    from django.utils.dateparse import parse_datetime
+
+    dt = parse_datetime(str(value).strip())
+    if dt is None:
+        raise ValidationError(f"{field} 必须是 ISO 时间（如 2026-01-01T09:00:00）")
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt)
+    return dt
 
 
 # ---------------- 序列化器 ----------------
@@ -45,13 +60,13 @@ class OperationLogSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OperationLog
-        fields = ["id", "username", "module", "action", "target", "detail", "ip", "created_at"]
+        fields = ["id", "username", "module", "action", "target", "detail", "diff", "ip", "created_at"]
 
 
 class NotificationSettingSerializer(serializers.ModelSerializer):
     class Meta:
         model = NotificationSetting
-        fields = ["category", "enabled"]
+        fields = ["category", "enabled", "channels", "webhook_url", "quiet_start", "quiet_end"]
 
 
 class AnnouncementSerializer(serializers.ModelSerializer):
@@ -158,23 +173,65 @@ class NotificationDeleteView(APIView):
 
 
 class NotificationSettingView(APIView):
-    """读取 / 更新我的通知偏好"""
+    """读取 / 更新我的通知偏好（分类开关 + 渠道 + 静默时段）"""
 
     CATEGORIES = ["system", "file", "note", "project", "message", "share"]
+    CHANNELS = ("inapp", "email", "webhook")
 
     def get(self, request):
-        qs = NotificationSetting.objects.filter(user=request.user)
-        disabled = {s.category: s.enabled for s in qs}
-        return Response({"settings": {c: disabled.get(c, True) for c in self.CATEGORIES}})
+        rows = list(NotificationSetting.objects.filter(user=request.user))
+        by_cat = {s.category: s for s in rows}
+        cfg = by_cat.get("system")
+        return Response({
+            "settings": {c: (by_cat[c].enabled if c in by_cat else True) for c in self.CATEGORIES},
+            "channels": (cfg.channels if cfg and cfg.channels else ["inapp"]),
+            "webhook_url": cfg.webhook_url if cfg else "",
+            "quiet_start": cfg.quiet_start.strftime("%H:%M") if cfg and cfg.quiet_start else "",
+            "quiet_end": cfg.quiet_end.strftime("%H:%M") if cfg and cfg.quiet_end else "",
+        })
+
+    @staticmethod
+    def _parse_time(value, field):
+        from datetime import datetime as _dt
+
+        if value in (None, ""):
+            return None
+        try:
+            return _dt.strptime(str(value).strip(), "%H:%M").time()
+        except ValueError:
+            raise ValidationError(f"{field} 需为 HH:MM 格式")
 
     def post(self, request):
         settings_map = request.data.get("settings") or {}
+        if not isinstance(settings_map, dict):
+            raise ValidationError("settings 必须是对象")
         for category, enabled in settings_map.items():
             if category not in self.CATEGORIES:
                 continue
             obj, _ = NotificationSetting.objects.get_or_create(user=request.user, category=category)
-            obj.enabled = bool(enabled)
+            obj.enabled = parse_bool(enabled, field="enabled", default=True)
             obj.save(update_fields=["enabled"])
+
+        channels = request.data.get("channels")
+        webhook_url = request.data.get("webhook_url")
+        quiet_start = request.data.get("quiet_start")
+        quiet_end = request.data.get("quiet_end")
+        if any(v is not None for v in (channels, webhook_url, quiet_start, quiet_end)):
+            cfg, _ = NotificationSetting.objects.get_or_create(user=request.user, category="system")
+            if channels is not None:
+                if not isinstance(channels, list) or any(c not in self.CHANNELS for c in channels):
+                    raise ValidationError(f"channels 只能包含 {'/'.join(self.CHANNELS)}")
+                cfg.channels = channels
+            if webhook_url is not None:
+                url = str(webhook_url).strip()[:500]
+                if url and not url.lower().startswith(("http://", "https://")):
+                    raise ValidationError("webhook_url 需以 http:// 或 https:// 开头")
+                cfg.webhook_url = url
+            if quiet_start is not None:
+                cfg.quiet_start = self._parse_time(quiet_start, "quiet_start")
+            if quiet_end is not None:
+                cfg.quiet_end = self._parse_time(quiet_end, "quiet_end")
+            cfg.save()
         return Response({"message": "通知偏好已保存"})
 
 
@@ -237,10 +294,10 @@ class AdminAnnouncementView(APIView):
             title=title,
             content=request.data.get("content", ""),
             level=request.data.get("level", "info"),
-            is_pinned=bool(request.data.get("is_pinned", False)),
-            is_published=bool(request.data.get("is_published", True)),
-            scheduled_at=request.data.get("scheduled_at") or None,
-            expires_at=request.data.get("expires_at") or None,
+            is_pinned=parse_bool(request.data.get("is_pinned"), field="is_pinned"),
+            is_published=parse_bool(request.data.get("is_published"), default=True, field="is_published"),
+            scheduled_at=_parse_dt(request.data.get("scheduled_at"), "scheduled_at"),
+            expires_at=_parse_dt(request.data.get("expires_at"), "expires_at"),
             author=request.user,
         )
         return Response(AnnouncementSerializer(ann).data, status=201)
@@ -287,9 +344,9 @@ def _filter_logs(request, qs):
     if ip:
         qs = qs.filter(ip__icontains=ip)
     if start:
-        qs = qs.filter(created_at__date__gte=start)
+        qs = qs.filter(created_at__date__gte=as_date(start, field="start"))
     if end:
-        qs = qs.filter(created_at__date__lte=end)
+        qs = qs.filter(created_at__date__lte=as_date(end, field="end"))
     if target:
         qs = qs.filter(target__icontains=target)
     if result == "fail":
@@ -392,7 +449,7 @@ class StorageTopUsersView(APIView):
         rows = (
             FileMeta.objects.filter(is_deleted=False)
             .values("owner_id", "owner__username", "owner__nickname")
-            .annotate(total_bytes=Sum("size"), file_count=Sum("id"))
+            .annotate(total_bytes=Sum("size"), file_count=Count("id"))
             .order_by("-total_bytes")[:10]
         )
         result = []
@@ -486,17 +543,102 @@ class HealthView(APIView):
 
     def get(self, request):
         db_ok = True
+        latency_ms = 0
         try:
+            import time as _time
+
+            t0 = _time.time()
             with connection.cursor() as cur:
                 cur.execute("SELECT 1")
                 cur.fetchone()
+            latency_ms = int((_time.time() - t0) * 1000)
         except Exception:
             db_ok = False
-        return Response({
+        data = {
             "status": "ok" if db_ok else "degraded",
             "db": db_ok,
+            "db_latency_ms": latency_ms,
             "version": getattr(settings, "PLATFORM_VERSION", "1.0.0"),
-        })
+        }
+        user = getattr(request, "user", None)
+        if user is not None and user.is_authenticated and user.is_staff:
+            data["detail"] = self._detail()
+        return Response(data)
+
+    @staticmethod
+    def _detail():
+        """F02 管理员巡检面板：磁盘 / 慢接口 / WS / 后台任务，任一项失败只降级不 500"""
+        import shutil
+
+        out = {"media": {}, "slow_endpoints": [], "ws": None, "tasks": None}
+        try:
+            usage = shutil.disk_usage(settings.MEDIA_ROOT)
+            out["media"] = {
+                "path": str(settings.MEDIA_ROOT),
+                "total_bytes": usage.total,
+                "used_bytes": usage.used,
+                "free_bytes": usage.free,
+                "used_pct": round(usage.used / usage.total * 100, 1) if usage.total else 0,
+            }
+        except Exception:
+            out["media"] = {"path": str(settings.MEDIA_ROOT), "error": "unavailable"}
+        try:
+            from core.models import SlowEndpoint
+
+            out["slow_endpoints"] = [
+                {"path": s.path, "avg_ms": s.avg_ms, "max_ms": s.max_ms, "samples": s.samples}
+                for s in SlowEndpoint.objects.order_by("-max_ms")[:10]
+            ]
+        except Exception:
+            pass
+        try:
+            from channels.layers import get_channel_layer
+
+            layer = get_channel_layer()
+            if layer is None:
+                out["ws"] = {"connections": None, "note": "未配置 channel layer"}
+            elif "Redis" in type(layer).__name__:
+                out["ws"] = {"connections": None, "note": "Redis channel layer，连接数由 Redis 侧统计"}
+            else:
+                out["ws"] = {"connections": None, "note": "当前使用内存 channel layer，无法跨进程统计"}
+        except Exception:
+            out["ws"] = {"connections": None, "note": "channel layer 不可用"}
+        try:
+            from django.core.cache import cache
+
+            backlog = cache.get("task_backlog")
+            out["tasks"] = {"backlog": backlog} if backlog is not None else {
+                "backlog": None, "note": "未接入异步任务队列（同步执行）",
+            }
+        except Exception:
+            out["tasks"] = {"backlog": None}
+        return out
+
+
+class GenericExportView(APIView):
+    """F03 通用导出：任意已声明模块 → CSV / JSON"""
+
+    def get(self, request, app):
+        from core.importer import export_response
+
+        try:
+            return export_response(app, request)
+        except ValueError as exc:
+            return Response({"message": str(exc)}, status=400)
+
+
+class GenericImportView(APIView):
+    """F03 通用导入：上传 CSV/JSON，返回逐行错误回执"""
+
+    def post(self, request, app):
+        from core.importer import import_response
+
+        try:
+            return Response(import_response(app, request))
+        except ValidationError as exc:
+            return Response({"message": exc.detail if isinstance(exc.detail, str) else str(exc.detail)}, status=400)
+        except ValueError as exc:
+            return Response({"message": str(exc)}, status=400)
 
 
 class PublicSiteSettingView(APIView):
@@ -669,7 +811,10 @@ class SearchExportView(APIView):
         modules = [m for m in (request.query_params.get("module") or "").split(",") if m]
         data = search(q, visible_user_ids(request.user), modules=modules or None, limit=200)
         resp = HttpResponse(content_type="text/csv; charset=utf-8-sig")
-        resp["Content-Disposition"] = f"attachment; filename=search_{q[:20]}.csv"
+        # 关键词进响应头：剔除引号/控制字符，非 ASCII 走 RFC 5987；
+        # 直接拼接会被 " 或换行注入额外响应头
+        filename = sanitize_filename(f"search_{q[:20]}.csv", fallback="search.csv", max_length=80)
+        resp["Content-Disposition"] = content_disposition_header(True, filename)
         writer = csv.writer(resp)
         writer.writerow(["模块", "标题", "摘要", "相关度", "更新时间"])
         for r in data.get("results", []):
@@ -874,7 +1019,9 @@ class AnnouncementReadTrendView(APIView):
 
         ann_by_day = {}
         for a in Announcement.objects.filter(created_at__gte=start_at):
-            ann_by_day.setdefault(a.created_at.date(), []).append(a.id)
+            # 与 start_day / DB 侧 created_at__date 统一按本地时区归日，
+            # 否则 00:00-08:00 发布的公告会落到前一天的桶里
+            ann_by_day.setdefault(timezone.localtime(a.created_at).date(), []).append(a.id)
         reads_by_day = {
             row["created_at__date"]: row["c"]
             for row in AnnouncementRead.objects.filter(created_at__gte=start_at)
@@ -1326,13 +1473,18 @@ class AdminBroadcastView(APIView):
             recipients = UserModel.objects.filter(id__in=id_list, is_active=True)
             scope = f"{len(id_list)} 位指定用户"
 
-        sent = 0
-        for u in recipients[:5000]:
-            Notification.objects.create(
-                recipient=u, title=title, content=content, level=level,
-                category="system", link=link,
-            )
-            sent += 1
+        recipients = list(recipients[:5000])
+        Notification.objects.bulk_create(
+            [
+                Notification(
+                    recipient=u, title=title, content=content, level=level,
+                    category="system", link=link,
+                )
+                for u in recipients
+            ],
+            batch_size=500,
+        )
+        sent = len(recipients)
         OperationLog.objects.create(
             user=request.user, module="core", action="create",
             target="群发通知", detail=f"{scope} · {title[:80]}",

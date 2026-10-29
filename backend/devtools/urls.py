@@ -4,6 +4,7 @@
 from django.urls import path
 
 from . import views_code as c
+from . import views_datax as d
 from . import views_math as m
 from . import views_misc as x
 from . import views_text as t
@@ -16,7 +17,8 @@ SUBSYSTEMS = [
     ("json", "JSON 进阶", ["flatten", "unflatten", "merge", "ndjson", "stats", "pick"]),
     ("log", "日志分析", ["parse", "level-stat", "timeframe", "topn", "filter"]),
     ("encode", "编码转换", ["base32", "base85", "qp", "unicode-escape", "punycode"]),
-    ("regex", "正则实验室", ["replace", "extract", "split", "explain", "grep", "template"]),
+    ("regex", "正则实验室", ["replace", "extract", "split", "explain", "grep", "template", "debug"]),
+    ("data", "结构化数据互转", ["yaml", "toml", "xml", "convert"]),
     ("hash", "哈希扩展", ["crc32", "adler32", "sha3", "hmac", "blake2"]),
     ("token", "令牌与密钥", ["jwt-sign", "jwt-verify", "apikey", "otp", "nanoid", "password-audit"]),
     ("code", "代码工具", ["minify-css", "beautify", "lang-detect", "loc", "todo-scan", "gitmoji"]),
@@ -55,6 +57,10 @@ VIEWS = {
     "encode/unicode-escape/": t.encode_unicode_escape, "encode/punycode/": t.encode_punycode,
     "regex/replace/": t.regex_replace, "regex/extract/": t.regex_extract, "regex/split/": t.regex_split,
     "regex/explain/": t.regex_explain, "regex/grep/": t.regex_grep, "regex/template/": t.regex_template,
+    # F39 结构化数据互转 / F40 正则调试 / F41 时间戳批量
+    "data/yaml/": d.data_yaml, "data/toml/": d.data_toml, "data/xml/": d.data_xml,
+    "data/convert/": d.data_convert,
+    "regex/debug/": d.regex_debug, "date/timestamp-batch/": d.timestamp_batch,
     # code
     "hash/crc32/": c.hash_crc32, "hash/adler32/": c.hash_adler32, "hash/sha3/": c.hash_sha3,
     "hash/hmac/": c.hash_hmac, "hash/blake2/": c.hash_blake2,
@@ -107,7 +113,7 @@ VIEWS = {
 
 @endpoint(("GET",))
 def devtools_catalog(request):
-    """目录：27 个子系统 × 154 接口的路由总览（供前端动态渲染）。"""
+    """目录：28 个子系统 × 160 接口的路由总览（供前端动态渲染）。"""
     return ok({
         "domain": "devtools", "domain_name": "开发者工具箱",
         "subsystems": [{"key": k, "name": n, "endpoints": eps,
@@ -122,4 +128,4 @@ urlpatterns = [path("catalog/", devtools_catalog, name="devtools-catalog")]
 for _route, _view in VIEWS.items():
     urlpatterns.append(path(_route, _view))
 
-assert len(urlpatterns) == 154, f"devtools 接口数应为 154，实际 {len(urlpatterns)}"
+assert len(urlpatterns) == 160, f"devtools 接口数应为 160，实际 {len(urlpatterns)}"

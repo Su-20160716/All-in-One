@@ -41,11 +41,30 @@ class NotifyConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"type": "pong", "ts": str(__import__("django.utils.timezone", fromlist=["now"]).now())})
         elif msg_type == "typing":
             session_id = content.get("session_id")
-            if session_id:
+            try:
+                session_id = int(session_id)
+            except (TypeError, ValueError):
+                return
+            member_ids = await self._session_member_ids(session_id)
+            if not member_ids:
+                return  # 非会话成员不允许向该会话广播输入状态
+            payload = {"user": self.user.display_name, "user_id": self.user.id, "session_id": session_id}
+            for uid in member_ids:
+                if uid == self.user.id:
+                    continue
                 await self.channel_layer.group_send(
-                    f"session_{session_id}",
-                    {"type": "chat.typing", "data": {"user": self.user.display_name, "session_id": session_id}},
+                    f"user_{uid}", {"type": "chat_typing", "data": payload},
                 )
+
+    @database_sync_to_async
+    def _session_member_ids(self, session_id):
+        """会话成员 id；调用者不在会话内时返回空列表"""
+        from im.models import ChatSession
+
+        session = ChatSession.objects.filter(pk=session_id, members=self.user).first()
+        if session is None:
+            return []
+        return list(session.members.values_list("id", flat=True))
 
     # ---- 以下 handler 供 channel_layer.group_send 调用 ----
     async def notification(self, event):
@@ -69,8 +88,20 @@ class NotifyConsumer(AsyncJsonWebsocketConsumer):
     async def session_updated(self, event):
         await self.send_json({"type": "session.updated", "data": event["data"]})
 
+    async def session_typing(self, event):
+        await self.send_json({"type": "session.typing", "data": event["data"]})
+
     async def message_recalled(self, event):
         await self.send_json({"type": "message.recalled", "data": event["data"]})
+
+    async def message_pinned(self, event):
+        await self.send_json({"type": "message.pinned", "data": event["data"]})
+
+    async def message_edited(self, event):
+        await self.send_json({"type": "message.edited", "data": event["data"]})
+
+    async def message_deleted(self, event):
+        await self.send_json({"type": "message.deleted", "data": event["data"]})
 
 
 def push_to_user(user_id: int, event_type: str, data: dict):
@@ -79,14 +110,6 @@ def push_to_user(user_id: int, event_type: str, data: dict):
     if not layer:
         return
     async_to_sync(layer.group_send)(f"user_{user_id}", {"type": event_type, "data": data})
-
-
-def push_to_session(session_id: int, event_type: str, data: dict):
-    """向会话频道组广播（成员需加入 session_<id> 组）"""
-    layer = get_channel_layer()
-    if not layer:
-        return
-    async_to_sync(layer.group_send)(f"session_{session_id}", {"type": event_type, "data": data})
 
 
 # ---------------------------------------------------------------------------
@@ -234,14 +257,15 @@ class CollabConsumer(AsyncJsonWebsocketConsumer):
     # ---- 数据库操作（同步上下文包装） ----
     @database_sync_to_async
     def _can_edit(self):
-        from core.scoping import is_visible
+        from core.scoping import can_write
         from notes.models import Note
 
         note = Note.objects.filter(pk=self.note_id, is_deleted=False).first()
         if note is None:
             return False
-        # 数据范围内可见即可协同（管理员可见全部；普通用户仅本人）
-        return is_visible(note, self.user)
+        # 协同会写回正文（_save_snapshot → note.save），必须按「写权限」判定；
+        # 数据范围（dept/all）只决定能不能看，不能拿来看他人笔记后改内容。
+        return can_write(self.user, note)
 
     @database_sync_to_async
     def _load_state(self):

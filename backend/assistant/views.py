@@ -14,13 +14,16 @@ from functools import wraps
 from urllib.parse import quote
 
 from django.http import HttpResponse
+from django.utils import timezone
 from rest_framework import status
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from assistant import generators, llm, retrieval
 from assistant.models import AIConversation, AIGeneratedQuestion, AIMessage, AIPrompt
 from core.scoping import scope_queryset
+from core.validators import as_int, parse_bool
 
 SYSTEM_TUTOR = (
     "你是「全能协作平台」内置的知识助手。回答要准确、简洁、结构清晰，"
@@ -108,7 +111,7 @@ class NoteSummarizeView(APIView):
         if mode and mode not in self.MODES:
             return Response({"message": f"mode 只能是 {' / '.join(self.MODES)}"}, status=400)
 
-        force = bool(request.data.get("force"))
+        force = parse_bool(request.data.get("force"), field="force")
         if note.ai_summary and not force:
             points = llm.bullet_points(content, 5)
             modes = _summary_modes(note.ai_summary, points, content)
@@ -243,15 +246,21 @@ class AssistantAskView(APIView):
     """
 
     def post(self, request):
-        question = (request.data.get("question") or "").strip()
+        question = str(request.data.get("question") or "").strip()
         if not question:
             return Response({"message": "请输入问题"}, status=400)
 
-        note_ids = request.data.get("note_ids") or None
-        keyword = (request.data.get("keyword") or "").strip()
+        raw_ids = request.data.get("note_ids") or None
+        if raw_ids is not None and not isinstance(raw_ids, (list, tuple)):
+            return Response({"message": "note_ids 必须是数组"}, status=400)
+        try:
+            note_ids = {as_int(i, field="note_ids", minimum=1) for i in raw_ids} if raw_ids else None
+        except ValidationError:
+            return Response({"message": "note_ids 必须全部为整数"}, status=400)
+        keyword = str(request.data.get("keyword") or "").strip()
         notes = list(retrieval.search_notes(request.user, keyword or question, limit=30))
         if note_ids:
-            allowed = set(int(i) for i in note_ids)
+            allowed = note_ids
             notes = [n for n in notes if n.id in allowed] or list(
                 scope_queryset(_note_model().objects.filter(id__in=allowed, is_deleted=False), request.user)
             )
@@ -506,10 +515,10 @@ class QuestionGenerateView(APIView):
 
     def post(self, request):
         topic = (request.data.get("topic") or "").strip()
-        count = max(1, min(int(request.data.get("count") or 5), 10))
+        count = as_int(request.data.get("count"), default=5, field="count", minimum=1, maximum=10)
         qtype = self.TYPE_ALIAS.get(str(request.data.get("type") or "single"), "single")
-        difficulty = max(1, min(int(request.data.get("difficulty") or 2), 5))
-        save = bool(request.data.get("save", True))
+        difficulty = as_int(request.data.get("difficulty"), default=2, field="difficulty", minimum=1, maximum=5)
+        save = parse_bool(request.data.get("save"), default=True, field="save")
 
         if not topic:
             return Response({"message": "请提供知识点或主题"}, status=400)
@@ -635,7 +644,10 @@ class GeneratedQuestionListView(APIView):
         topic = request.query_params.get("topic")
         if topic:
             qs = qs.filter(topic__icontains=topic)
-        limit = min(int(request.query_params.get("limit", 50)), 200)
+        try:
+            limit = as_int(request.query_params.get("limit"), default=50, field="limit", minimum=1, maximum=200)
+        except ValidationError:
+            return Response({"message": "limit 必须是 1-200 的整数"}, status=400)
         return Response({"list": [
             {"id": q.id, "topic": q.topic, "question_type": q.question_type, "difficulty": q.difficulty,
              "stem": q.stem, "options": q.options, "answer": q.answer, "analysis": q.analysis,
@@ -644,7 +656,13 @@ class GeneratedQuestionListView(APIView):
         ], "total": qs.count()})
 
     def delete(self, request):
-        ids = request.data.get("ids") or []
+        raw_ids = request.data.get("ids") or []
+        if not isinstance(raw_ids, (list, tuple)):
+            return Response({"message": "ids 必须是数组"}, status=400)
+        try:
+            ids = [as_int(i, field="ids", minimum=1) for i in raw_ids]
+        except ValidationError:
+            return Response({"message": "ids 必须全部为整数"}, status=400)
         if not ids:
             return Response({"message": "未选择题目"}, status=400)
         n = AIGeneratedQuestion.objects.filter(owner=request.user, id__in=ids).delete()[0]
@@ -676,7 +694,7 @@ class GradeView(APIView):
             return Response({"message": "请提供待批改的题目"}, status=400)
         items = items[:20]
 
-        record = bool(request.data.get("record_mistakes", True))
+        record = parse_bool(request.data.get("record_mistakes"), default=True, field="record_mistakes")
         results, provider, model, fallback = [], "local", "local-heuristic", ""
 
         for idx, item in enumerate(items):
@@ -1050,7 +1068,7 @@ class PromptLibraryView(APIView):
         p = AIPrompt.objects.create(
             owner=request.user, title=title[:120], content=content[:4000],
             category=(request.data.get("category") or "自定义")[:32],
-            is_favorite=bool(request.data.get("is_favorite")),
+            is_favorite=parse_bool(request.data.get("is_favorite"), field="is_favorite"),
         )
         return Response(_prompt_json(p), status=201)
 
@@ -1070,7 +1088,7 @@ class PromptDetailView(APIView):
             if field in request.data and request.data[field]:
                 setattr(p, field, str(request.data[field])[:cap])
         if "is_favorite" in request.data:
-            p.is_favorite = bool(request.data["is_favorite"])
+            p.is_favorite = parse_bool(request.data["is_favorite"], field="is_favorite")
         p.save()
         return Response(_prompt_json(p))
 
@@ -1178,6 +1196,95 @@ class ConversationExportView(APIView):
             f"attachment; filename=\"{fname}\"; filename*=UTF-8''{quote(conv.title or '对话')}.md"
         )
         return resp
+
+
+class ConversationSummarizeView(APIView):
+    """F56 长对话自动摘要：GET/POST /api/assistant/conversations/<pk>/summarize/
+
+    有 LLM 走模型；无 Key 用本地抽取式摘要。按消息数缓存，新增消息后自动失效，
+    传 force=1 可强制重算。
+    """
+
+    MAX_TRANSCRIPT = 12000
+
+    def _transcript(self, conv):
+        msgs = list(conv.messages.order_by("id"))
+        lines = []
+        for m in msgs[-80:]:
+            who = "用户" if m.role == "user" else ("助手" if m.role == "assistant" else "系统")
+            body = (m.content or "").strip()
+            if not body:
+                continue
+            lines.append(f"{who}：{body[:600]}")
+        text = "\n".join(lines)
+        if len(text) > self.MAX_TRANSCRIPT:
+            text = text[-self.MAX_TRANSCRIPT:]
+        return text, len(msgs)
+
+    def _local(self, conv, transcript):
+        head = [m for m in list(conv.messages.order_by("id"))[:3] if (m.content or "").strip()]
+        tail = [m for m in list(conv.messages.order_by("-id"))[:5] if (m.content or "").strip()][::-1]
+        parts = []
+        for m in head:
+            parts.append(("用户" if m.role == "user" else "助手") + "：" + (m.content or "").strip()[:120])
+        picked = llm.extractive_summary(transcript, max_sentences=5)
+        if picked:
+            parts.append(picked[:600])
+        if tail:
+            last = tail[-1]
+            parts.append("最近：" + (last.content or "").strip()[:120])
+        return "；".join(p for p in parts if p)[:800]
+
+    def _handle(self, request, pk):
+        conv = AIConversation.objects.filter(pk=pk, owner=request.user).first()
+        if not conv:
+            return Response({"message": "会话不存在"}, status=404)
+        transcript, total = self._transcript(conv)
+        if not transcript:
+            raise ValueError("会话还没有可摘要的消息")
+        force = parse_bool(request.query_params.get("force") if request.method == "GET" else request.data.get("force"),
+                           field="force")
+        cached = (conv.summary and conv.summary_message_count == total and not force)
+        if cached:
+            return Response({"conversation_id": conv.id, "summary": conv.summary,
+                             "summary_at": conv.summary_at, "message_count": total,
+                             "covered": conv.summary_message_count, "cached": True,
+                             "provider": "cache"})
+
+        mode = "local"
+        summary = ""
+        try:
+            res = llm.chat([
+                {"role": "system", "content": "你是对话摘要助手。只输出摘要正文，不要客套话。"},
+                {"role": "user", "content": (
+                    "把下面这段 AI 对话压缩成 5 条以内要点，保留结论、决定与待办：\n\n" + transcript
+                )},
+            ], temperature=0.3, max_tokens=600)
+            if res.get("ok") and (res.get("content") or "").strip():
+                summary = res["content"].strip()[:2000]
+                mode = "llm"
+        except Exception:  # noqa: BLE001 —— 摘要属增强能力，失败降级
+            mode = "local"
+        if not summary:
+            summary = self._local(conv, transcript)
+
+        conv.summary = summary
+        conv.summary_at = timezone.now()
+        conv.summary_message_count = total
+        conv.save(update_fields=["summary", "summary_at", "summary_message_count"])
+        llm.log_usage(request.user.id, "conversation_summary", {"ok": True}, prompt_chars=len(transcript),
+                      output_chars=len(summary))
+        return Response({"conversation_id": conv.id, "summary": summary,
+                         "summary_at": conv.summary_at, "message_count": total,
+                         "covered": total, "cached": False, "provider": mode})
+
+    @endpoint(("GET",))
+    def get(self, request, pk):
+        return self._handle(request, pk)
+
+    @endpoint(("POST",))
+    def post(self, request, pk):
+        return self._handle(request, pk)
 
 
 # ---------------------------------------------------------------------------

@@ -1,23 +1,27 @@
 # -*- coding: utf-8 -*-
 """dataintel 路由：dataset/profile/transform/calc + stats/forecast/regress/cluster/outlier
-+ nlp/textmine/vector + ai/report + chart/abtest/cohort/sampling/geo，共 107 个 URL（含目录）。"""
++ nlp/textmine/vector + ai/report + chart/abtest/cohort/sampling/geo，共 119 个 URL（含目录）。
+
+F48 版本管理 +3（versions / diff / rollback），F49 图表落盘 +1，F50 数据质量 +1。
+"""
 from django.urls import path
 
 from . import views_ai as ai
 from . import views_data as d
 from . import views_extra as e
 from . import views_nlp as n
+from . import views_plus as px
 from . import views_stats as s
 from devtools.common import endpoint, endpoint_index, ok
 
 SUBSYSTEMS = [
-    ("dataset", "数据集管理", 6), ("profile", "数据画像", 5), ("transform", "数据变换", 6),
+    ("dataset", "数据集管理", 9), ("profile", "数据画像", 5), ("transform", "数据变换", 6),
     ("calc", "数据计算器", 5), ("stats", "统计检验", 8), ("forecast", "时间序列", 6),
     ("regress", "回归拟合", 5), ("cluster", "聚类", 4), ("outlier", "异常检测", 4),
     ("nlp", "中文 NLP", 8), ("textmine", "文本挖掘", 5), ("vector", "向量运算", 5),
-    ("ai", "AI 增强", 8), ("report", "智能报表", 5), ("chart", "图表数据", 8),
+    ("ai", "AI 增强", 8), ("report", "智能报表", 5), ("chart", "图表数据", 9),
     ("abtest", "A/B 实验", 5), ("cohort", "留存分析", 4), ("sampling", "抽样", 4),
-    ("geo", "轻地理计算", 6), ("insight", "自动洞察", 6),
+    ("geo", "轻地理计算", 6), ("insight", "自动洞察", 6), ("quality", "数据质量", 1),
 ]
 
 urlpatterns = [
@@ -37,6 +41,10 @@ urlpatterns = [
     path("dataset/<int:pk>/delete/", d.dataset_delete),
     path("dataset/<int:pk>/rows/import/", d.dataset_rows_import),
     path("dataset/<int:pk>/rows/query/", d.dataset_rows_query),
+    # F48 版本（3）
+    path("dataset/<int:pk>/versions/", px.dataset_versions),
+    path("dataset/<int:pk>/versions/diff/", px.dataset_version_diff),
+    path("dataset/<int:pk>/versions/<int:vid>/rollback/", px.dataset_version_rollback),
     # profile（5）
     path("profile/describe/", d.profile_describe),
     path("profile/freq/", d.profile_freq),
@@ -163,6 +171,9 @@ urlpatterns = [
     path("insight/corr-top/", e.insight_corr_top),
     path("insight/segment-diff/", e.insight_segment_diff),
     path("insight/narrate/", e.insight_narrate),
+    # F49 图表落盘 + F50 数据质量（2）
+    path("chart/save/", px.chart_save),
+    path("data-quality/", px.data_quality),
 ]
 
-assert len(urlpatterns) == 114, f"dataintel 接口数应为 114，实际 {len(urlpatterns)}"
+assert len(urlpatterns) == 119, f"dataintel 接口数应为 119，实际 {len(urlpatterns)}"

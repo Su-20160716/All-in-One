@@ -46,6 +46,8 @@ CODES = {
     # —— 通用 ——
     "ADAPTER_ERROR": "适配器内部错误",
     "PROBE_FAILED": "探测失败",
+    # —— 汇率 ——
+    "RATES_FALLBACK": "未配置实时汇率源，已降级为静态参考值",
 }
 
 
@@ -107,3 +109,55 @@ def probe(name: str) -> dict:
 def probe_all() -> dict:
     """全部依赖探测（供 /api/core/health/ 与管理端诊断页）。"""
     return {name: probe(name) for name in sorted(_PROBES)}
+
+
+# ---------------------------------------------------------------------------
+# 汇率：静态参考值 + 可选环境覆盖（F51 单位换算）
+# ---------------------------------------------------------------------------
+
+# 「1 单位外币 = 多少 CNY」；仅用于离线演示，不构成交易依据。
+STATIC_RATES_CNY = {
+    "CNY": 1.0, "USD": 7.10, "EUR": 7.75, "JPY": 0.0475, "HKD": 0.912,
+    "GBP": 9.10, "AUD": 4.68, "CAD": 5.15, "KRW": 0.00515, "SGD": 5.28,
+    "TWD": 0.221, "THB": 0.205, "RUB": 0.078, "INR": 0.084, "CHF": 8.05,
+}
+STATIC_RATES_AS_OF = "2026-01-01"
+
+
+def currency_rates() -> dict:
+    """返回 {code: 每单位兑 CNY} 与来源标注。
+
+    优先读 settings.CURRENCY_RATES（运维可注入实时汇率），未配置则用静态参考值。
+    任何异常都退回静态表，调用方永远不会因为汇率拿不到而 500。
+    """
+    from django.conf import settings
+
+    override = getattr(settings, "CURRENCY_RATES", None)
+    if isinstance(override, dict) and override:
+        rates = {}
+        for k, v in override.items():
+            try:
+                rates[str(k).upper()] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if rates:
+            rates.setdefault("CNY", 1.0)
+            return {
+                "ok": True, "code": "OK", "rates": rates,
+                "source": "settings", "as_of": getattr(settings, "CURRENCY_RATES_AS_OF", ""),
+                "message": "汇率来自系统配置",
+            }
+    return {
+        "ok": False, "code": "RATES_FALLBACK", "rates": dict(STATIC_RATES_CNY),
+        "source": "static-reference", "as_of": STATIC_RATES_AS_OF,
+        "message": "未配置实时汇率源，使用静态参考值（仅供演示）",
+    }
+
+
+def _probe_currency():
+    info = currency_rates()
+    return {"available": bool(info["rates"]), "source": info["source"],
+            "as_of": info["as_of"], "currencies": len(info["rates"])}
+
+
+register_probe("currency", _probe_currency)

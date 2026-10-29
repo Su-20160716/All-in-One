@@ -48,6 +48,8 @@ school = [
     path("school/knowledge/search/", v.KnowledgeSearchView.as_view(), name="learn-knowledge-search"),
     # v8 新增（dsh 2026-10-01）：必须排在 <str:kid> 兜底之前，否则会被当知识点 ID 吃掉
     path("school/knowledge/related/", v.KnowledgeRelatedView.as_view(), name="learn-knowledge-related"),  # F539
+    # F33 知识图谱
+    path("school/knowledge-graph/", v.KnowledgeGraphView.as_view(), name="learn-knowledge-graph"),
     path("school/knowledge/<str:kid>/", v.KnowledgeDetailView.as_view(), name="learn-knowledge-detail"),
     path("school/stages/<str:stage>/subjects/<str:subject>/", v.SubjectDetailView.as_view(), name="learn-subject"),
     path("school/formulas/", v.FormulaListView.as_view(), name="learn-formulas"),
@@ -99,6 +101,8 @@ personal = [
     # ---- v8 学习区新增能力（dsh 2026-10-01，只增不改）----
     path("study/daily-goal/", v.DailyGoalView.as_view(), name="learn-daily-goal"),           # F523
     path("study/pomodoro/", v.PomodoroView.as_view(), name="learn-pomodoro"),                # F524
+    # F34 番茄钟区间报告
+    path("study/pomodoro/report/", v.PomodoroReportView.as_view(), name="learn-pomodoro-report"),
     path("study/question-sets/", v.QuestionSetView.as_view(), name="learn-question-sets"),   # F525
     path("study/mastery-rating/", v.MasteryRatingView.as_view(), name="learn-mastery-rating"),  # F526
     path("study/paper-archive/", v.PaperArchiveView.as_view(), name="learn-paper-archive"),  # F537

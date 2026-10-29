@@ -443,12 +443,13 @@ OFFICE_SUBSYSTEMS = [
     ("minutes", "会议纪要", 9), ("formcollect", "收集表单", 8),
     ("announcement", "部门公告", 8), ("poll", "投票", 9),
     ("helpdesk", "工单", 11), ("calendar", "共享日程", 11),
+    ("docenh", "文档增强", 3),
 ]
 
 
 @endpoint(("GET",))
 def suite_catalog(request):
-    """officesuite 目录：30 个子系统 × 249 接口总览（供前端动态渲染）。"""
+    """officesuite 目录：31 个子系统 × 252 接口 + 目录 = 253（供前端动态渲染）。"""
     subsystems = OFFICE_SUBSYSTEMS
     return ok({
         "domain": "officesuite", "domain_name": "办公套件",
@@ -458,7 +459,8 @@ def suite_catalog(request):
         "subsystem_count": len(subsystems),
         "endpoint_count": sum(c for _, _, c in subsystems) + 1,
         "note": "endpoint_count 含本目录接口；F681–F692 新增冲突预检/时长模板/换班申请/"
-                "满意度评分/轮询分配/点赞收藏/重复规则/四象限/忙闲与行动项统计",
+                "满意度评分/轮询分配/点赞收藏/重复规则/四象限/忙闲与行动项统计；"
+                "F45–F47 新增文档批注/表格公式/演示大纲（文档增强）",
     })
 
 

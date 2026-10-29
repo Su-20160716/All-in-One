@@ -11,6 +11,7 @@ import io
 import json
 import random
 import re
+import secrets
 import string
 import time
 import urllib.parse
@@ -36,8 +37,12 @@ def t_timestamp(params):
     if mode == "now":
         return {"timestamp": int(time.time()), "iso": datetime.now().isoformat()}
     if mode == "to_date":
-        ts = int(params.get("timestamp", 0))
-        return {"date": datetime.fromtimestamp(ts).isoformat()}
+        try:
+            ts = int(params.get("timestamp", 0))
+            return {"date": datetime.fromtimestamp(ts).isoformat()}
+        except (ValueError, OSError, OverflowError) as exc:
+            # 超范围时间戳在 Windows 上抛 OSError，不能让它冒到 500
+            raise ValueError(f"时间戳超出可转换范围：{exc}")
     date_str = params.get("date", "")
     dt = datetime.fromisoformat(date_str)
     return {"timestamp": int(dt.timestamp())}
@@ -56,7 +61,8 @@ def t_password(params):
     pools = string.ascii_lowercase + string.ascii_uppercase + string.digits
     if params.get("symbol", True):
         pools += "!@#$%^&*()-_=+"
-    out = ["".join(random.choice(pools) for _ in range(length)) for _ in range(n)]
+    # secrets 走 OS 熵源；random 是可预测的 Mersenne Twister，不适合生成口令
+    out = ["".join(secrets.choice(pools) for _ in range(length)) for _ in range(n)]
     return {"list": out, "result": "\n".join(out)}
 
 
@@ -223,10 +229,18 @@ def t_markdown_plain(params):
 
 
 def t_regex_test(params):
-    pattern, text = params.get("pattern", ""), params.get("text", "")
+    from core.regex_safety import MAX_MATCHES, compile_safe, guard_subject
+
+    pattern = str(params.get("pattern", ""))
+    text = guard_subject(params.get("text", ""))
     flags = re.M | (re.I if params.get("ignorecase") else 0)
-    matches = [{"match": m.group(0), "index": m.start()} for m in re.finditer(pattern, text, flags)]
-    return {"matches": matches[:200], "count": len(matches)}
+    compiled = compile_safe(pattern, flags)
+    matches = []
+    for m in compiled.finditer(text):
+        matches.append({"match": m.group(0), "index": m.start()})
+        if len(matches) >= MAX_MATCHES:
+            break
+    return {"matches": matches, "count": len(matches), "truncated": len(matches) >= MAX_MATCHES}
 
 
 # ---------- 编码 / 转换 ----------
@@ -353,21 +367,102 @@ def t_date_diff(params):
     return {"days": delta.days, "seconds": int(delta.total_seconds()), "weeks": round(delta.days / 7, 2)}
 
 
-LENGTH = {"mm": 1, "cm": 0.1, "m": 0.001, "km": 0.000001, "inch": 0.0393701, "ft": 0.00328084, "mile": 6.2137e-7}
-WEIGHT = {"mg": 1000, "g": 1, "kg": 0.001, "t": 0.000001, "lb": 0.00220462, "oz": 0.035274}
+# 单位换算表：值 = 「1 个该单位折合多少基准单位」
+# length→m / weight→kg / area→m² / volume→m³ / data→B
+UNIT_TABLES = {
+    "length": {"mm": 0.001, "cm": 0.01, "dm": 0.1, "m": 1.0, "km": 1000.0,
+               "inch": 0.0254, "ft": 0.3048, "yd": 0.9144, "mile": 1609.344},
+    "weight": {"mg": 1e-6, "g": 0.001, "kg": 1.0, "t": 1000.0,
+               "lb": 0.45359237, "oz": 0.028349523125},
+    "area": {"mm2": 1e-6, "cm2": 1e-4, "m2": 1.0, "km2": 1e6, "ha": 1e4,
+             "acre": 4046.8564224, "ft2": 0.09290304, "mu": 666.6666667},
+    "volume": {"ml": 1e-6, "cm3": 1e-6, "l": 0.001, "m3": 1.0,
+               "gal_us": 0.003785411784, "ft3": 0.028316846592},
+    "data": {"bit": 0.125, "B": 1.0, "KB": 1024.0, "MB": 1048576.0,
+             "GB": 1073741824.0, "TB": 1099511627776.0, "PB": 1125899906842624.0},
+}
+TEMPERATURE_UNITS = ("c", "f", "k")
+
+
+def _nice(x):
+    """按有效数字收敛浮点尾巴（1e-7 级别误差不该露给用户）。"""
+    if x == 0:
+        return 0.0
+    return float(f"{x:.8g}")
+
+
+def _pick_unit(table, name):
+    """单位名大小写不敏感（KB/kb、GB/gb 都能命中）。"""
+    if name in table:
+        return name
+    for cand in (name.upper(), name.lower()):
+        if cand in table:
+            return cand
+    return None
 
 
 def t_unit_convert(params):
-    value = float(params.get("value", 0))
-    table_name = params.get("table", "length")
-    table = WEIGHT if table_name == "weight" else LENGTH
-    frm, to = params.get("from", "m"), params.get("to", "cm")
+    """单位换算：长度/重量/温度/面积/体积/数据量/货币。
+
+    货币走 core.adapters.currency_rates()，未配置实时源时返回静态参考值并在 meta 标注。
+    """
+    raw_value = params.get("value", 0)
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        raise ValueError("value 必须是数字")
+    table_name = str(params.get("table", "length")).lower()
+    frm = str(params.get("from", "m")).strip()
+    to = str(params.get("to", "cm")).strip()
+
     if table_name == "temperature":
+        frm, to = frm.lower(), to.lower()
+        if frm not in TEMPERATURE_UNITS or to not in TEMPERATURE_UNITS:
+            raise ValueError("温度单位仅支持 c / f / k")
         c = value if frm == "c" else (value - 32) * 5 / 9 if frm == "f" else value - 273.15
         out = c if to == "c" else c * 9 / 5 + 32 if to == "f" else c + 273.15
-        return {"result": round(out, 4)}
-    base = value / table[frm]
-    return {"result": round(base * table[to], 6)}
+        return {"result": round(out, 6), "table": "temperature", "from": frm, "to": to}
+
+    if table_name == "currency":
+        from core.adapters import currency_rates
+
+        info = currency_rates()
+        rates = info["rates"]
+        frm, to = frm.upper(), to.upper()
+        if frm not in rates or to not in rates:
+            supported = ", ".join(sorted(rates))
+            raise ValueError(f"不支持的币种，可选：{supported}")
+        out = value * rates[frm] / rates[to]
+        return {
+            "result": _nice(out), "table": "currency", "from": frm, "to": to,
+            "meta": {"source": info["source"], "as_of": info["as_of"],
+                     "message": info["message"], "degraded": not info["ok"]},
+        }
+
+    table = UNIT_TABLES.get(table_name)
+    if not table:
+        raise ValueError(f"不支持的换算类型：{table_name}（可选 {'/'.join(list(UNIT_TABLES) + ['temperature', 'currency'])}）")
+    src = _pick_unit(table, frm)
+    dst = _pick_unit(table, to)
+    if not src or not dst:
+        raise ValueError(f"该类型不支持 {frm}/{to}，可选：{', '.join(table)}")
+    return {"result": _nice(value * table[src] / table[dst]),
+            "table": table_name, "from": src, "to": dst}
+
+
+def t_unit_tables(params):
+    """列出全部换算类型与单位（供前端级联选择）。"""
+    from core.adapters import currency_rates
+
+    info = currency_rates()
+    return {
+        "tables": {k: sorted(v) for k, v in UNIT_TABLES.items()} | {
+            "temperature": list(TEMPERATURE_UNITS),
+        },
+        "currency": sorted(info["rates"]),
+        "currency_meta": {"source": info["source"], "as_of": info["as_of"],
+                          "message": info["message"]},
+    }
 
 
 def t_color_palette(params):
@@ -420,7 +515,8 @@ TOOL_REGISTRY = {
     "idcard": ("校验", "身份证校验", "身份证校验位与信息", t_idcard),
     "random-number": ("生成", "随机数", "区间随机数批量生成", t_random_number),
     "date-diff": ("时间", "日期相差", "计算两个日期差值", t_date_diff),
-    "unit-convert": ("换算", "单位换算", "长度/重量/温度换算", t_unit_convert),
+    "unit-convert": ("换算", "单位换算", "长度/重量/温度/面积/体积/数据量/货币换算", t_unit_convert),
+    "unit-tables": ("换算", "换算单位表", "列出可用换算类型、单位与汇率来源", t_unit_tables),
 }
 
 
@@ -446,7 +542,10 @@ class ToolRunView(APIView):
             return Response({"tool": tool, "result": result})
         except json.JSONDecodeError as e:
             return Response({"message": f"JSON 解析失败：{e}"}, status=400)
-        except (ValueError, KeyError, TypeError) as e:
+        except re.error as e:
+            # 非法正则（regex-test）属于入参错误，不能冒到 500
+            return Response({"message": f"正则表达式非法：{e}"}, status=400)
+        except (ValueError, KeyError, TypeError, OSError) as e:
             return Response({"message": f"输入有误：{e}"}, status=400)
 
     def post(self, request, tool=None):

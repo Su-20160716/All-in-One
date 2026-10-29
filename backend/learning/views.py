@@ -984,7 +984,8 @@ class LearnToolRunView(APIView):
             return Response({"message": f"未知学习工具: {tool}"}, status=404)
         try:
             return Response({"tool": tool, "result": entry[3](params or {})})
-        except (ValueError, KeyError, TypeError, ZeroDivisionError) as e:
+        except (ValueError, KeyError, TypeError, ZeroDivisionError,
+                IndexError, OverflowError, SyntaxError, RecursionError) as e:
             return Response({"message": f"输入有误：{e}"}, status=400)
 
     def post(self, request, tool=None):
@@ -2049,4 +2050,100 @@ class StudyPlanDetailView(APIView):
                 "remain": max(0, total - obj.finished),
                 "progress_rate": round(obj.finished / total * 100) if total else 0,
             },
+        })
+
+
+# ===========================================================================
+# F33 知识图谱 / F34 番茄钟区间报告（纯新增）
+# ===========================================================================
+
+class KnowledgeGraphView(APIView):
+    """F33 知识点图谱：章节→知识点，点与点按顺序连边，附掌握度"""
+
+    def get(self, request):
+        stage = request.query_params.get("stage")
+        subject = request.query_params.get("subject")
+        if not stage or not subject:
+            nodes, edges = [], []
+            for st in sorted({x["stage"] for x in _ALL_POINTS}):
+                nodes.append({"id": f"stage.{st}", "label": st, "type": "stage"})
+                for sb in sorted({x["subject"] for x in _ALL_POINTS if x["stage"] == st}):
+                    sid = f"{st}.{sb}"
+                    nodes.append({"id": sid, "label": sb, "type": "subject",
+                                  "count": sum(1 for x in _ALL_POINTS if x["stage"] == st and x["subject"] == sb)})
+                    edges.append({"source": f"stage.{st}", "target": sid})
+            return Response({"scope": "all", "nodes": nodes, "edges": edges})
+
+        chapters = cu.KNOWLEDGE.get(f"{stage}.{subject}", [])
+        if not chapters:
+            return Response({"message": "该学段学科暂无知识点"}, status=404)
+        ratings = {
+            r.point: r.stars
+            for r in MasteryRating.objects.filter(owner=request.user, stage_subject=f"{stage}.{subject}")
+        }
+        nodes, edges = [], []
+        for ci, ch in enumerate(chapters):
+            cid = f"{stage}.{subject}.c{ci}"
+            nodes.append({"id": cid, "label": ch["chapter"], "type": "chapter", "count": len(ch["points"])})
+            prev = None
+            for pi, name in enumerate(ch["points"]):
+                pid = f"{stage}.{subject}.{ci}.{pi}"
+                stars = ratings.get(name, 0)
+                nodes.append({"id": pid, "label": name, "type": "point", "chapter": ch["chapter"],
+                              "stars": stars,
+                              "mastery": "mastered" if stars >= 4 else ("learning" if stars else "todo")})
+                edges.append({"source": cid, "target": pid, "type": "contains"})
+                if prev:
+                    edges.append({"source": prev, "target": pid, "type": "next"})
+                prev = pid
+        mastered = sum(1 for n in nodes if n.get("mastery") == "mastered")
+        return Response({
+            "scope": f"{stage}.{subject}", "nodes": nodes, "edges": edges,
+            "total": sum(1 for n in nodes if n["type"] == "point"),
+            "mastered": mastered,
+            "learning": sum(1 for n in nodes if n.get("mastery") == "learning"),
+        })
+
+
+class PomodoroReportView(APIView):
+    """F34 番茄钟报告：按日/周/月汇总专注时长、中断与高效时段"""
+
+    def get(self, request):
+        import datetime as _dt
+
+        span = (request.query_params.get("range") or "week").lower()
+        days = {"day": 1, "week": 7, "month": 30}.get(span, 7)
+        today = _dt.date.today()
+        start = today - _dt.timedelta(days=days - 1)
+        rows = list(StudySession.objects.filter(
+            owner=request.user, subject="番茄钟", study_date__gte=start, study_date__lte=today))
+        by_day = {}
+        hour_dist = [0] * 24
+        finished = interrupted = 0
+        for s in rows:
+            key = s.study_date.isoformat()
+            by_day.setdefault(key, {"date": key, "minutes": 0, "rounds": 0, "interrupted": 0})
+            by_day[key]["minutes"] += s.minutes
+            by_day[key]["rounds"] += 1
+            if "打断" in (s.note or ""):
+                by_day[key]["interrupted"] += 1
+                interrupted += 1
+            else:
+                finished += 1
+            local = timezone.localtime(s.created_at)
+            hour_dist[local.hour] += 1
+        series = [by_day.get((start + _dt.timedelta(days=i)).isoformat(),
+                             {"date": (start + _dt.timedelta(days=i)).isoformat(),
+                              "minutes": 0, "rounds": 0, "interrupted": 0}) for i in range(days)]
+        total_min = sum(s.minutes for s in rows)
+        peak = hour_dist.index(max(hour_dist)) if any(hour_dist) else None
+        return Response({
+            "range": span, "days": days, "start": start.isoformat(), "end": today.isoformat(),
+            "rounds": len(rows), "finished": finished, "interrupted": interrupted,
+            "focus_minutes": total_min,
+            "avg_minutes": round(total_min / len(rows), 1) if rows else 0,
+            "completion_rate": round(finished / len(rows) * 100, 1) if rows else 0,
+            "hour_distribution": hour_dist,
+            "peak_hour": peak,
+            "by_day": series,
         })

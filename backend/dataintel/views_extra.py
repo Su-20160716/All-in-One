@@ -221,8 +221,14 @@ def chart_funnel(request):
         raise ValueError("漏斗至少两级")
     out = []
     for i, (name, v) in enumerate(pairs):
-        rate = v / pairs[i - 1][1] * 100 if i and pairs[i - 1][1] else None
-        out.append({"stage": name, "value": v, "from_prev_pct": round(rate, 2) if rate else 100.0})
+        if i == 0:
+            rate = 100.0
+        elif pairs[i - 1][1]:
+            rate = round(v / pairs[i - 1][1] * 100, 2)
+        else:
+            # 上一级为 0 时转化率无从定义，记 0 而不是把真实的 0% 升成 100%
+            rate = 0.0
+        out.append({"stage": name, "value": v, "from_prev_pct": rate})
     overall = pairs[-1][1] / pairs[0][1] * 100 if pairs[0][1] else 0
     biggest_leak = min(range(1, len(out)), key=lambda i: out[i]["from_prev_pct"])
     return ok({"stages": out, "overall_conversion_pct": round(overall, 2),
@@ -824,11 +830,13 @@ def insight_corr_top(request):
     pairs = []
     for i in range(len(cols)):
         for j in range(i + 1, len(cols)):
-            a = [float(r[cols[i]]) for r in rows if isinstance(r.get(cols[i]), (int, float))]
-            b = [float(r[cols[j]]) for r in rows if isinstance(r.get(cols[j]), (int, float))]
-            m = min(len(a), len(b))
-            if m >= 5:
-                pairs.append({"a": cols[i], "b": cols[j], "r": round(pearson(a[:m], b[:m]), 4), "n": m})
+            both = [(float(r[cols[i]]), float(r[cols[j]])) for r in rows
+                    if isinstance(r.get(cols[i]), (int, float)) and not isinstance(r.get(cols[i]), bool)
+                    and isinstance(r.get(cols[j]), (int, float)) and not isinstance(r.get(cols[j]), bool)]
+            if len(both) >= 5:
+                pairs.append({"a": cols[i], "b": cols[j],
+                              "r": round(pearson([x for x, _ in both], [y for _, y in both]), 4),
+                              "n": len(both)})
     pairs.sort(key=lambda pr: -abs(pr["r"]))
     return ok({"columns": cols, "pairs": pairs[:top_n],
                "note": "r>0.7 强相关；|r|>0.4 中等；正负号代表方向"} if pairs else {"pairs": []})
@@ -899,7 +907,9 @@ def geo_parse(request):
         try:
             point, name = (float(parts[0]), float(parts[1])), None
             source = "coordinates"
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, IndexError):
+            # 没有逗号的纯城市名（"北京"）会在 parts[1] 抛 IndexError，
+            # 这里同样回退到城市表
             point, name = _resolve_point(raw)
             source = "builtin-city-table"
     elif isinstance(raw, (list, tuple)):

@@ -283,7 +283,7 @@ def rail_fence(request):
             rows[rail] = list(clean[idx:idx + counts[rail]])
             idx += counts[rail]
         out = []
-        pos = {0: 0}
+        pos = {rail: 0 for rail in range(rails)}
         for p in pattern:
             out.append(rows[p][pos[p]])
             pos[p] += 1

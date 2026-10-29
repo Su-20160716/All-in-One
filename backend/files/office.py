@@ -102,7 +102,10 @@ def convert_to_pdf(abs_path: str, ext: str = "", out_dir: str | None = None) -> 
     if not soffice:
         return adapters.degraded("LIBREOFFICE_NOT_FOUND", INSTALL_HINT, path=None)
 
-    target_dir = Path(out_dir or (Path(settings.MEDIA_ROOT) / "converted"))
+    # 每次转换用独立目录：历史上同一 target_dir 下按「原名.pdf」落盘，
+    # 两份同名不同目录的 docx 会互相覆盖（A 的预览变成 B 的内容）
+    base_dir = Path(out_dir or (Path(settings.MEDIA_ROOT) / "converted"))
+    target_dir = base_dir / uuid.uuid4().hex
     target_dir.mkdir(parents=True, exist_ok=True)
     # 每次转换用独立 profile，避免并发调用时 LibreOffice 抢占用户配置
     profile = target_dir / f".profile-{uuid.uuid4().hex[:8]}"

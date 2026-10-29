@@ -35,7 +35,9 @@ _DEV_SECRET_KEY = (
     "9f3a7c1e5b8d2046af17c93e6d05b28a"
 )
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", _DEV_SECRET_KEY)
-DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
+# fail-close：一旦配置了生产密钥（说明是正式部署）而忘设 DJANGO_DEBUG，默认按生产处理；
+# 纯本地开发（无密钥）仍默认 DEBUG=1，行为不变。
+DEBUG = os.environ.get("DJANGO_DEBUG", "0" if os.environ.get("DJANGO_SECRET_KEY") else "1") == "1"
 if not DEBUG and SECRET_KEY == _DEV_SECRET_KEY:
     raise ImproperlyConfigured(
         "生产环境（DJANGO_DEBUG=0）必须通过环境变量 DJANGO_SECRET_KEY 提供独立密钥，"

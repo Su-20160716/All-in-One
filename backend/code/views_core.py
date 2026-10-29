@@ -911,7 +911,7 @@ def judge(request):
         raise ValueError("所有测试用例均已停用，请至少启用一条")
     active_cases = [c for _, c in indexed]
 
-    timeout = opt_num(request, "timeout", 5, minimum=0.5, maximum=15)
+    timeout = opt_num(request, "timeout", 5, minimum=0.5, maximum=5)
     ignore_ws = opt_bool(request, "ignore_whitespace", True)
 
     verdict, passed, results, total_ms = run_judge(
@@ -941,22 +941,39 @@ def judge(request):
     })
 
 
-def run_judge(language, code, cases, timeout=5, ignore_ws=True):
+_VERDICT_ORDER = ["accepted", "wrong_answer", "runtime_error", "time_limit", "compile_error", "unavailable"]
+
+
+def run_judge(language, code, cases, timeout=5, ignore_ws=True, total_budget=20.0):
     """判题核心（抽出复用：普通判题 / 每日一题 / 挑战赛）。
 
     纯函数：只跑代码 + 比对，不落库。返回 (verdict, passed, results, total_ms)。
+    单用例超时上限 5s，整批总预算 20s，超出后剩余用例标记为超时不再执行。
     """
     results = []
     passed = 0
     total_ms = 0
     verdict = "accepted"
+    case_timeout = min(float(timeout), 5.0)
+    deadline = time.monotonic() + max(1.0, float(total_budget))
 
     for idx, case in enumerate(cases, start=1):
         if not isinstance(case, dict):
             continue
         stdin = str(case.get("stdin", ""))
         expected = str(case.get("expected", ""))
-        r = rt.run_code(language, code, stdin=stdin, timeout=timeout)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            results.append({
+                "index": idx, "verdict": "time_limit",
+                "stdin": stdin[:2000], "expected": expected[:4000],
+                "actual": "", "stderr": "判题总时长超出预算，剩余用例未执行",
+                "duration_ms": 0, "exit_code": None,
+            })
+            if _VERDICT_ORDER.index("time_limit") > _VERDICT_ORDER.index(verdict):
+                verdict = "time_limit"
+            continue
+        r = rt.run_code(language, code, stdin=stdin, timeout=min(case_timeout, remaining))
         total_ms += r.get("duration_ms") or 0
         actual = r.get("stdout") or ""
         st = r.get("status")
@@ -985,8 +1002,7 @@ def run_judge(language, code, cases, timeout=5, ignore_ws=True):
             passed += 1
         else:
             # 取「最严重」的判定作为总判定
-            order = ["accepted", "wrong_answer", "runtime_error", "time_limit", "compile_error", "unavailable"]
-            if order.index(case_verdict) > order.index(verdict):
+            if _VERDICT_ORDER.index(case_verdict) > _VERDICT_ORDER.index(verdict):
                 verdict = case_verdict
 
         results.append({
@@ -1329,3 +1345,126 @@ def export_file(request, pk):
     from urllib.parse import quote
     resp["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(f.name)}"
     return resp
+
+
+# ===========================================================================
+# F37 运行历史性能对比 / F38 依赖安全提示（纯新增）
+# ===========================================================================
+
+_DEP_RISK = {
+    "pickle": ("high", "反序列化不可信数据可执行任意代码"),
+    "marshal": ("high", "反序列化不可信数据可执行任意代码"),
+    "shelve": ("medium", "底层依赖 pickle，注意数据来源"),
+    "subprocess": ("medium", "命令注入风险，避免 shell=True 与拼接输入"),
+    "os": ("low", "os.system / 拼接路径需谨慎"),
+    "ctypes": ("medium", "直接调用内存，越界可能崩溃进程"),
+    "requests": ("low", "外网请求需设置超时"),
+    "urllib": ("low", "外网请求需设置超时"),
+    "telnetlib": ("high", "Python 3.13 已移除，且明文传输"),
+    "cgi": ("medium", "Python 3.13 已移除"),
+    "crypt": ("medium", "Python 3.13 已移除"),
+    "imghdr": ("low", "Python 3.13 已移除"),
+    "distutils": ("low", "Python 3.12 起弃用"),
+    "asynchat": ("low", "Python 3.12 起弃用"),
+    "asyncore": ("low", "Python 3.12 起弃用"),
+}
+
+
+def _run_hash(source):
+    import hashlib
+
+    return hashlib.sha1((source or "").encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+@endpoint(("GET", "POST"))
+def run_compare(request):
+    """F37 同一段代码的多次运行对比（按源码 sha1 分组）"""
+    from django.db.models import Avg, Max, Min
+
+    qs = CodeRun.objects.filter(owner=request.user)
+    file_id = opt_num(request, "file", None, integer=True)
+    if file_id:
+        qs = qs.filter(file_id=int(file_id))
+    want = opt_str(request, "code_hash", "").strip()
+    rows = list(qs.order_by("-id")[:1000])
+    groups = {}
+    for r in rows:
+        h = _run_hash(r.source_code)
+        if want and h != want:
+            continue
+        groups.setdefault(h, []).append(r)
+    out = []
+    for h, runs in groups.items():
+        runs.sort(key=lambda x: x.created_at)
+        durations = [x.duration_ms for x in runs]
+        out.append({
+            "code_hash": h,
+            "runs": len(runs),
+            "languages": sorted({x.language for x in runs}),
+            "duration_ms": {"avg": int(sum(durations) / len(durations)), "min": min(durations),
+                            "max": max(durations)},
+            "memory_kb": {"avg": int(sum(x.memory_kb for x in runs) / len(runs)),
+                          "max": max(x.memory_kb for x in runs)},
+            "statuses": {s: sum(1 for x in runs if x.status == s)
+                         for s in {x.status for x in runs}},
+            "first_at": runs[0].created_at, "last_at": runs[-1].created_at,
+            "source_preview": (runs[-1].source_code or "")[:200],
+            "latest": {"id": runs[-1].id, "duration_ms": runs[-1].duration_ms,
+                       "memory_kb": runs[-1].memory_kb, "status": runs[-1].status,
+                       "stdout_preview": (runs[-1].stdout or "")[:200]},
+        })
+    out.sort(key=lambda g: -g["runs"])
+    if want:
+        for g in out:
+            g["timeline"] = [
+                {"id": r.id, "duration_ms": r.duration_ms, "memory_kb": r.memory_kb,
+                 "status": r.status, "created_at": r.created_at}
+                for r in groups.get(want, [])
+            ]
+    return ok({"groups": out, "count": len(out), "scanned": len(rows)})
+
+
+@endpoint(("POST",))
+def dependency_check(request):
+    """F38 静态扫描 import：区分标准库/第三方并匹配本地风险清单（不联网）"""
+    import ast
+    import sys
+
+    source = opt_str(request, "code", "")
+    file_id = opt_num(request, "file", None, integer=True)
+    if not source and file_id:
+        f = CodeFile.objects.filter(owner=request.user, id=int(file_id)).first()
+        if not f:
+            raise ValueError("代码文件不存在")
+        source = f.content or ""
+    if not source.strip():
+        raise ValueError("请传 code 或 file")
+    if len(source) > 200_000:
+        raise ValueError("源码超过 200KB 上限")
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        raise ValueError(f"语法错误：第 {e.lineno} 行 {e.msg}")
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                names.add(a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                names.add(node.module.split(".")[0])
+    stdlib = set(getattr(sys, "stdlib_module_names", set())) | set(sys.builtin_module_names)
+    rows, risky = [], []
+    for name in sorted(names, key=str.lower):
+        kind = "stdlib" if name in stdlib else "third_party"
+        level, note = _DEP_RISK.get(name, ("", ""))
+        row = {"name": name, "kind": kind, "risk": level, "note": note}
+        rows.append(row)
+        if level:
+            risky.append(row)
+    return ok({
+        "imports": rows, "total": len(rows),
+        "stdlib": sum(1 for r in rows if r["kind"] == "stdlib"),
+        "third_party": sum(1 for r in rows if r["kind"] == "third_party"),
+        "risky": risky, "risk_count": len(risky),
+    })

@@ -8,7 +8,6 @@ import re
 import secrets
 import struct
 from datetime import datetime, timedelta, timezone
-from itertools import combinations, permutations, product
 
 from .common import (as_lines, endpoint, ok, opt_bool, opt_num, opt_str, p,
                      req, req_list, req_num, req_str)
@@ -110,20 +109,39 @@ def num_bitwise(request):
 
 @endpoint()
 def num_combinatorics(request):
-    """排列/组合/笛卡尔积：计数与抽样。"""
+    """排列/组合/笛卡尔积：计数与抽样（不枚举全集）。"""
     items = req_list(request, "items")
-    k = int(opt_num(request, "k", 2, minimum=1, maximum=len(items) or 1) or 2)
+    n = len(items)
+    if n == 0:
+        raise ValueError("items 不能为空")
+    if n > 2000:
+        raise ValueError("items 最多 2000 个")
+    k = int(opt_num(request, "k", 2, minimum=1, maximum=min(n, 6)) or 2)
     sample_n = int(opt_num(request, "sample", 5, minimum=0, maximum=50) or 5)
     rng = secrets.SystemRandom()
 
-    perms = list(permutations(items, k))
-    combs = list(combinations(items, k))
-    prod = list(product(items, repeat=k))
+    perm_count = math.perm(n, k)
+    comb_count = math.comb(n, k)
+    cart_count = n ** k
+
+    perm_sample = [[items[i] for i in rng.sample(range(n), k)] for _ in range(min(sample_n, perm_count))]
+
+    seen = set()
+    comb_sample = []
+    target = min(sample_n, comb_count)
+    guard = 0
+    while len(comb_sample) < target and guard < target * 200 + 1000:
+        idx = tuple(sorted(rng.sample(range(n), k)))
+        if idx not in seen:
+            seen.add(idx)
+            comb_sample.append([items[i] for i in idx])
+        guard += 1
+
     return ok({
-        "n": len(items), "k": k,
-        "P_count": len(perms), "P_sample": [list(x) for x in rng.sample(perms, min(sample_n, len(perms)))],
-        "C_count": len(combs), "C_sample": [list(x) for x in rng.sample(combs, min(sample_n, len(combs)))],
-        "cartesian_count": len(prod),
+        "n": n, "k": k,
+        "P_count": perm_count, "P_sample": perm_sample,
+        "C_count": comb_count, "C_sample": comb_sample,
+        "cartesian_count": cart_count,
     })
 
 
@@ -373,10 +391,16 @@ def date_seq(request):
     workday_only = opt_bool(request, "workdays_only")
     out = []
     d = start
-    while len(out) < n:
+    # step 为 7 的倍数时星期几不变：start 落在周六/周日且只保留工作日会永远凑不满 n
+    guard = 0
+    max_iter = n * 7 + 7
+    while len(out) < n and guard < max_iter:
         if not workday_only or d.weekday() < 5:
             out.append(d.isoformat())
         d += timedelta(days=step)
+        guard += 1
+    if len(out) < n:
+        raise ValueError("当前步长无法生成足够的工作日（step 为 7 的倍数时会跳过整周）")
     return ok({"dates": out, "count": len(out)})
 
 
@@ -554,17 +578,30 @@ def math_matrix(request):
         m = [[float(x) for x in row] for row in a]
     except (TypeError, ValueError):
         raise ValueError("a 必须是数字二维数组")
+    if n > 12:
+        raise ValueError("矩阵最大支持 12×12")
 
-    def det(mat):
-        if len(mat) == 1:
-            return mat[0][0]
-        total = 0
-        for j in range(len(mat)):
-            minor = [row[:j] + row[j + 1:] for row in mat[1:]]
-            total += ((-1) ** j) * mat[0][j] * det(minor)
-        return total
+    # 高斯消元求行列式（O(n³)），避免递归展开的 O(n!)
+    work = [row[:] for row in m]
+    d = 1.0
+    singular = False
+    for col in range(n):
+        piv = max(range(col, n), key=lambda r: abs(work[r][col]))
+        if abs(work[piv][col]) < 1e-12:
+            singular = True
+            break
+        if piv != col:
+            work[col], work[piv] = work[piv], work[col]
+            d = -d
+        pv = work[col][col]
+        d *= pv
+        for r in range(col + 1, n):
+            f = work[r][col] / pv
+            if f:
+                work[r] = [v - f * w for v, w in zip(work[r], work[col])]
+    if singular:
+        d = 0.0
 
-    d = det(m)
     result = {"det": round(d, 8), "trace": round(sum(m[i][i] for i in range(n)), 8), "size": n}
     if abs(d) < 1e-12:
         result["inverse"] = None
@@ -587,6 +624,8 @@ def math_matrix(request):
             bm = [[float(x) for x in row] for row in b]
         except (TypeError, ValueError):
             raise ValueError("b 必须是数字二维数组")
+        if not bm or not bm[0]:
+            raise ValueError("b 不能为空")
         if len(bm[0]) != len(m):
             raise ValueError("b 的列数必须等于 a 的行数")
         result["multiply"] = [[round(sum(m[i][k] * bm[k][j] for k in range(len(bm))), 8)
