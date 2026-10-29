@@ -22,9 +22,11 @@
 import { computed } from 'vue'
 
 const props = defineProps({
-  show: Boolean,
+  show: { type: Boolean, default: false },
   // F1：v-model 支持。新代码用 v-model，旧代码继续用 :show + @close 不受影响
-  modelValue: Boolean,
+  // ⚠ 必须显式 default: undefined —— Boolean prop 未传时 Vue 会强转成 false，
+  //   那样 `modelValue ?? props.show` 永远取 false，导致所有 :show 弹窗静默失效。
+  modelValue: { type: Boolean, default: undefined },
   title: { type: String, default: '' },
   width: { type: String, default: '520px' },
 })

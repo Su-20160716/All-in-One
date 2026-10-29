@@ -41,7 +41,7 @@ export const filesx = {
   // F563 标签统计与点击过滤
   tagsStats: () => request.get('/files/tags/stats/'),
   // F564 收藏/标签 JSON 导出导入
-  favoritesExportUrl: apiUrl('/files/favorites/export/'),
+  favoritesExportUrl: apiUrl('/api/files/favorites/export/'),
   favoritesExport: () => request.get('/files/favorites/export/', { responseType: 'blob' }),
   favoritesImport: (payload) => request.post('/files/favorites/import/', { payload }),
 }

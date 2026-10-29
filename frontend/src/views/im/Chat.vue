@@ -220,7 +220,8 @@ import Modal from '../../components/Modal.vue'
 
 const user = useUserStore()
 const app = useAppStore()
-const myId = user.profile?.id
+// profile 可能在 WS 推送/刷新后才到；用 computed 保证自己的消息不会先渲染到左侧
+const myId = computed(() => user.profile?.id)
 const sessions = ref([])
 const activeSession = ref(null)
 const messages = ref([])
@@ -257,8 +258,9 @@ const emojiList = ['😀','😂','❤️','👍','🙏','🎉','🔥','✨','�
 let unsub = null
 let draftTimer = null
 let typingTimer = null
+let loadSeq = 0
 
-function otherMember(s) { return (s.members_info || []).find((m) => m.id !== myId) }
+function otherMember(s) { return (s.members_info || []).find((m) => m.id !== myId.value) }
 function sessionName(s) {
   if (!s) return ''
   if (s.type === 'group') return s.name || '群聊'
@@ -304,16 +306,24 @@ async function loadSessions() {
 }
 async function openSession(s) {
   try {
+    // 切会话前先把上一会话的草稿落库（防抖窗口内切走会写错会话）
+    clearTimeout(draftTimer)
+    if (activeSession.value) {
+      imApi.setting(activeSession.value.id, { draft: draft.value }).catch(() => {})
+    }
+    const seq = ++loadSeq
     activeSession.value = s
     draft.value = s.draft || ''
     groupAnn.value = s.announcement || ''
     replying.value = null
     const r = await imApi.messages(s.id, { page_size: 30 })
+    if (seq !== loadSeq) return  // 旧请求的响应晚到，不能覆盖新会话
     // F5：r.list 是接口响应里的新数组，无其他引用，直接 reverse 即可，
     // 原来的 .slice().reverse() 多一次无用拷贝
     messages.value = (r.list || []).reverse()
     pinned.value = r.pinned || []
     await imApi.setting(s.id, { mark_read: true })
+    if (seq !== loadSeq) return
     s.unread = 0
     nextTick(scrollBottom)
   } catch (e) { app.toastMsg(e?.message || '打开会话失败', 'error') }
@@ -337,8 +347,9 @@ function replyMsg(m) { replying.value = m }
 function pickEmoji(e) { draft.value += e; showEmoji.value = false }
 function saveDraft() {
   if (!activeSession.value) return
+  const sessionId = activeSession.value.id
   clearTimeout(draftTimer)
-  draftTimer = setTimeout(() => imApi.setting(activeSession.value.id, { draft: draft.value }), 500)
+  draftTimer = setTimeout(() => imApi.setting(sessionId, { draft: draft.value }), 500)
 }
 async function togglePin() {
   try {
@@ -535,16 +546,30 @@ onMounted(() => {
     } else if (type === 'chat.message') {
       loadSessions()
     } else if (type === 'message.recalled') {
-      const m = messages.value.find((x) => x.id === data?.message_id)
+      const m = messages.value.find((x) => x.id === (data?.id ?? data?.message_id))
       if (m) m.is_recalled = true
+    } else if (type === 'message.pinned') {
+      const m = messages.value.find((x) => x.id === data?.id)
+      if (m) m.is_pinned = !!data?.is_pinned
+    } else if (type === 'message.edited') {
+      const i = messages.value.findIndex((x) => x.id === data?.id)
+      if (i >= 0) messages.value.splice(i, 1, { ...messages.value[i], ...data })
+    } else if (type === 'message.deleted') {
+      const i = messages.value.findIndex((x) => x.id === data?.id)
+      if (i >= 0) messages.value.splice(i, 1)
     } else if (type === 'session.updated') {
       loadSessions()
-    } else if (type === 'chat.typing' && activeSession.value && data.session_id === activeSession.value.id) {
-      typing.value = data.user
+    } else if ((type === 'chat.typing' || type === 'session.typing') && activeSession.value && data?.session_id === activeSession.value.id) {
+      typing.value = data.user || data.display_name || ''
       clearTimeout(typingTimer)
       typingTimer = setTimeout(() => (typing.value = ''), 2000)
     }
   })
 })
-onBeforeUnmount(() => unsub && unsub())
+onBeforeUnmount(() => {
+  loadSeq += 1
+  clearTimeout(draftTimer)
+  clearTimeout(typingTimer)
+  if (unsub) unsub()
+})
 </script>

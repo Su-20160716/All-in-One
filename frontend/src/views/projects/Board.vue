@@ -379,7 +379,8 @@ async function onDrop(e, targetBoardId) {
   try {
     if (!dragCard) return
     const target = boards.value.find((b) => b.id === targetBoardId)
-    await projectApi.moveCard(dragCard.id, targetBoardId, target.cards.length)
+    if (!target) return
+    await projectApi.moveCard(dragCard.id, targetBoardId, (target.cards || []).length)
     dragCard = null
     load()
   } catch (e) { app.toastMsg(e?.message || '移动卡片失败', 'error') }

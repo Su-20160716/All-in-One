@@ -186,10 +186,17 @@ function resetFilters() {
   filters.status = ''; filters.priority = ''; filters.category = ''
   loadList()
 }
+let detailSeq = 0
 async function select(id) {
+  const seq = ++detailSeq
   selectedId.value = id
-  const r = await suiteApi.call(D, `ticket/${id}/`, 'GET')
-  detail.value = r.data
+  try {
+    const r = await suiteApi.call(D, `ticket/${id}/`, 'GET')
+    if (seq !== detailSeq) return  // 旧请求晚到：不能把详情串到另一张工单
+    detail.value = r.data
+  } catch (e) {
+    if (seq === detailSeq) app.toastMsg(e?.message || '加载工单失败', 'error')
+  }
 }
 
 const showCreate = ref(false)

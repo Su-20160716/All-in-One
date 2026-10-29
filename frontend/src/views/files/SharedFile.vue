@@ -87,7 +87,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
-import { API_URL, withBackendBase } from '../../api/base'
+import { API_URL, apiUrl } from '../../api/base'
 import { saveBlob } from '../../utils/download'
 import { formatSize } from '../../utils/format'
 
@@ -114,9 +114,13 @@ async function load() {
     if (r.status === 200) {
       data.value = r.data
       needPassword.value = false
-      // 图片走带补全的媒体地址（/media/... 相对路径）
+      // 图片走受 token 保护的预览接口（/api/share/<token>/raw/<id>/），
+      // 带密码的分享还要把 password 透传过去，否则图片会 401
       if (r.data.type === 'file' && r.data.kind === 'image' && r.data.url) {
-        mediaUrl.value = withBackendBase(r.data.url)
+        const base = apiUrl(r.data.url)
+        mediaUrl.value = password.value
+          ? `${base}${base.includes('?') ? '&' : '?'}password=${encodeURIComponent(password.value)}`
+          : base
       }
     }
   } catch (e) {

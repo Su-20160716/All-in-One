@@ -51,4 +51,17 @@ window.addEventListener('auth:token', (e) => {
   if (access && userStore.token !== access) userStore.token = access
 })
 
+// 已登录状态下启动即校准权限：is_admin/权限码持久化后仍以服务端为准，
+// 避免管理员刷新后进不了后台；请求失败时保留缓存值，不阻塞挂载。
+if (userStore.token) {
+  userStore.fetchPermissions()
+}
+
 app.mount('#app')
+
+// F59 PWA：仅生产构建注册 Service Worker（开发环境注册会干扰 Vite HMR 与代理）
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => { /* 离线能力不可用不影响在线使用 */ })
+  })
+}

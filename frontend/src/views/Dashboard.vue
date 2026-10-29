@@ -355,6 +355,19 @@ import { coreApi, dashApi, noteApi } from '../api'
 import { dashx } from '../api/dashx'
 import { formatSize, formatTime } from '../utils/format'
 
+// localStorage 可能存着损坏的 JSON（手工改过/写入中断），解析失败时清掉回落默认值，
+// 否则首页会在 setup 阶段直接抛错变成白屏
+function loadJson(key, fallback = null) {
+  const raw = localStorage.getItem(key)
+  if (!raw) return fallback
+  try {
+    return JSON.parse(raw)
+  } catch {
+    localStorage.removeItem(key)
+    return fallback
+  }
+}
+
 const router = useRouter()
 const user = useUserStore()
 const app = useAppStore()
@@ -466,7 +479,7 @@ function fmtClock(iso) {
 
 // #53 拖拽排序（F668：同步服务端，跨浏览器一致）
 let dragLabel = null
-const cardOrder = ref(JSON.parse(localStorage.getItem('dashboard_card_order') || 'null'))
+const cardOrder = ref(loadJson('dashboard_card_order'))
 async function loadCardOrder() {
   try {
     const r = await dashx.cardOrder()
@@ -514,7 +527,7 @@ const defaultQuicks = [
   { icon: '💬', label: '消息', url: '/im' },
   { icon: '🔍', label: '搜索', url: '/search' },
 ]
-const quickLinks = ref(JSON.parse(localStorage.getItem('quick_links') || 'null') || defaultQuicks)
+const quickLinks = ref(loadJson('quick_links') || defaultQuicks)
 // F25：快捷入口允许填外链。RouterLink 会把 "https://x" 当成站内路径拼到 #/ 后面，必须分流。
 const isExternalUrl = (url) => /^https?:\/\//i.test(String(url || '').trim())
 function normalizeQuickUrl(raw) {

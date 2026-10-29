@@ -2323,6 +2323,14 @@ async function doCreateFile() {
 
 async function openFile(node) {
   if (!node?.id) return
+  // 切文件先把上一篇的未存内容落库：否则 2.5s 防抖定时器会在「id 已切、编辑器还是旧内容」
+  // 的窗口内触发，把 A 的代码写进 B
+  if (activeFileId.value && activeFileId.value !== node.id) {
+    clearTimeout(autoSaveTimer)
+    if (tabs.value.find((t) => t.id === activeFileId.value)?.dirty) {
+      await saveCurrent(true)
+    }
+  }
   // F17：两个分支原本做的都是同一件事（切换 activeFileId），合并；
   // 是否新开标签由下方 tabs 查找决定
   activeFileId.value = node.id
@@ -2366,9 +2374,12 @@ function onCodeChange(val) {
 let autoSaveTimer = null
 function scheduleAutoSave() {
   clearTimeout(autoSaveTimer)
+  const id = activeFileId.value
+  if (!id) return
   autoSaveTimer = setTimeout(() => {
     // 自动保存：静默落库，不打快照（快照由 ⌘S 或手动触发）
-    if (activeFileId.value) saveCurrent(true)
+    // 期间若已切到别的文件，这条定时器作废，避免把旧内容写进新文件
+    if (activeFileId.value === id) saveCurrent(true)
   }, 2500)
 }
 

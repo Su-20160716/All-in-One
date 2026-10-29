@@ -12,14 +12,16 @@
 </template>
 
 <script setup>
-import { onMounted, watch } from 'vue'
+import { onBeforeUnmount, onMounted, watch } from 'vue'
 import { useAppStore } from './stores/app'
 import { useUserStore } from './stores/user'
 import { stopWs } from './utils/ws'
 import { coreApi } from './api'
+import { initTheme } from './utils/theme'
 
 const app = useAppStore()
 const user = useUserStore()
+let stopTheme = null
 
 /** 登录态变化时同步实时通道：有 token 就连，没有就停（避免空转重连） */
 function syncWs() {
@@ -33,16 +35,8 @@ function syncWs() {
   }
 }
 
-// #57 主题偏好：从 localStorage 读取并应用
-function applyTheme() {
-  const theme = localStorage.getItem('theme') || 'system'
-  const root = document.documentElement
-  if (theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-    root.classList.add('dark')
-  } else {
-    root.classList.remove('dark')
-  }
-}
+// #57 主题偏好：本地偏好（亮暗 + 强调色）由 utils/theme.js 统一应用
+// （F58：data-accent 驱动九级 brand 色阶，跟随系统时监听 OS 切换）
 
 // #100 站点品牌定制：读取公开设置并应用
 async function applyBranding() {
@@ -68,10 +62,11 @@ async function applyBranding() {
 }
 
 onMounted(() => {
-  applyTheme()
+  stopTheme = initTheme()
   applyBranding()
   syncWs()
 })
+onBeforeUnmount(() => stopTheme?.())
 watch(() => user.token, syncWs)
 </script>
 

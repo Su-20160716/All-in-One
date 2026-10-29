@@ -1,13 +1,26 @@
 import { defineStore } from 'pinia'
 import { authApi } from '../api'
 
+// localStorage 里的 JSON 可能被手工改坏/写入半截 → 解析失败时清掉并回落默认值，
+// 否则异常会在 app.mount 之前抛出，整站白屏且无法自愈。
+function loadJson(key, fallback) {
+  const raw = localStorage.getItem(key)
+  if (!raw) return fallback
+  try {
+    return JSON.parse(raw)
+  } catch {
+    localStorage.removeItem(key)
+    return fallback
+  }
+}
+
 export const useUserStore = defineStore('user', {
   state: () => ({
     token: localStorage.getItem('access_token') || '',
     refresh: localStorage.getItem('refresh_token') || '',
-    profile: JSON.parse(localStorage.getItem('user_profile') || 'null'),
-    permissions: [],
-    isAdmin: false,
+    profile: loadJson('user_profile', null),
+    permissions: loadJson('user_permissions', []),
+    isAdmin: localStorage.getItem('is_admin') === '1',
   }),
   getters: {
     loggedIn: (s) => !!s.token,
@@ -51,8 +64,10 @@ export const useUserStore = defineStore('user', {
         const r = await authApi.myPermissions()
         this.permissions = r.permissions || []
         this.isAdmin = !!r.is_admin
+        localStorage.setItem('user_permissions', JSON.stringify(this.permissions))
+        localStorage.setItem('is_admin', this.isAdmin ? '1' : '0')
       } catch (e) {
-        this.permissions = []
+        // 网络抖动时保留上一次已知权限（后端仍有鉴权），不要把管理员菜单打没
       }
     },
     async refreshProfile() {
@@ -71,6 +86,8 @@ export const useUserStore = defineStore('user', {
       localStorage.removeItem('access_token')
       localStorage.removeItem('refresh_token')
       localStorage.removeItem('user_profile')
+      localStorage.removeItem('user_permissions')
+      localStorage.removeItem('is_admin')
     },
   },
 })

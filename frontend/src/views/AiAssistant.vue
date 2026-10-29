@@ -275,17 +275,21 @@ async function removeConversation(id) {
   loadConversations()
 }
 async function ask(preset) {
+  const fromDraft = !preset
   const text = (preset || draft.value || '').trim()
   if (!text || sending.value) return
-  draft.value = ''
   messages.value.push({ role: 'user', content: text })
   sending.value = true
   try {
     const r = await aiApi.chat(text, { conversation_id: conversationId.value, use_knowledge: useKnowledge.value })
     conversationId.value = r.conversation_id
     messages.value.push({ role: 'assistant', content: r.reply, references: r.references })
+    // 成功后再清空输入，且只清掉本次发送的内容（发送期间用户可能又输入了新文字）
+    if (fromDraft && draft.value.trim() === text) draft.value = ''
     loadConversations()
   } catch (e) {
+    // 失败时把原文放回输入框，用户不用重打
+    if (fromDraft && !draft.value.trim()) draft.value = text
     messages.value.push({ role: 'assistant', content: `请求失败：${e.message || e}` })
   } finally {
     sending.value = false

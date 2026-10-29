@@ -254,7 +254,7 @@ async function run() {
     result.value = (await learnApi.toolRun(activeKey.value, params)).result
     try { await learnApi.saveToolUsage(activeKey.value); await loadRecent() } catch { /* 历史记录失败不影响本次结果 */ }
   } catch (e) {
-    err.value = e.response?.data?.message || '执行失败'
+    err.value = e?.message || '执行失败'
   } finally { running.value = false }
 }
 async function copyResult() {

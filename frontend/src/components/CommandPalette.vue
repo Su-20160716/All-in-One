@@ -29,8 +29,7 @@
             <span class="text-base">{{ item.icon }}</span>
             <span class="flex-1 dark:text-slate-200">{{ item.label }}</span>
             <span class="text-xs text-gray-400">{{ item.hint }}</span>
-          </button>
-          <div v-if="!filtered.length" class="px-4 py-6 text-center text-sm text-gray-400">
+          </button>          <div v-if="!filtered.length" class="px-4 py-6 text-center text-sm text-gray-400">
             无匹配命令
           </div>
         </div>
@@ -42,18 +41,59 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { noteApi, suiteApi } from '../api'
+import { useAppStore } from '../stores/app'
+import { useUserStore } from '../stores/user'
+import { applyTheme, getAccent } from '../utils/theme'
 
 const router = useRouter()
+const app = useAppStore()
+const user = useUserStore()
 const open = ref(false)
 const query = ref('')
 const pickedIdx = ref(0)
 const inputEl = ref(null)
+const busy = ref(false)
 
+// F57：除跳转外，面板直接执行动作（走既有 API，不新增后端接口）
 const COMMANDS = [
+  {
+    key: 'new-note', icon: '✨', label: '新建笔记', hint: '立即创建',
+    action: async () => {
+      const n = await noteApi.create({})
+      app.toastMsg(`已新建《${n?.title || '未命名笔记'}》`, 'success')
+      router.push('/notes')
+    },
+  },
+  {
+    key: 'new-todo', icon: '✅', label: '新建待办', hint: '办公套件',
+    action: async () => {
+      const r = await suiteApi.call('officesuite', 'todo/create/', 'POST', { title: '新待办（命令面板）' })
+      app.toastMsg(`已新建待办：${r?.data?.title || '新待办'}`, 'success')
+    },
+  },
+  {
+    key: 'read-all', icon: '📭', label: '全部通知标为已读', hint: '通知中心',
+    action: async () => {
+      await app.markAllRead()
+      app.toastMsg('已全部标记为已读', 'success')
+    },
+  },
+  {
+    key: 'theme-light', icon: '☀️', label: '主题：浅色', hint: '外观',
+    action: async () => { applyTheme('light', getAccent()); app.toastMsg('已切换为浅色主题', 'success') },
+  },
+  {
+    key: 'theme-dark', icon: '🌙', label: '主题：深色', hint: '外观',
+    action: async () => { applyTheme('dark', getAccent()); app.toastMsg('已切换为深色主题', 'success') },
+  },
+  {
+    key: 'theme-system', icon: '🖥️', label: '主题：跟随系统', hint: '外观',
+    action: async () => { applyTheme('system', getAccent()); app.toastMsg('已跟随系统主题', 'success') },
+  },
   { key: 'search', icon: '🔍', label: '全局搜索', hint: '/search', action: () => router.push('/search') },
   { key: 'ai', icon: '🤖', label: '打开 AI 助手', hint: '/ai', action: () => router.push('/ai') },
   { key: 'notes', icon: '📝', label: '笔记知识库', hint: '/notes', action: () => router.push('/notes') },
-  { key: 'new-note', icon: '✨', label: '新建笔记', hint: '/notes', action: () => router.push('/notes') },
   { key: 'upload', icon: '📤', label: '上传文件', hint: '/files', action: () => router.push('/files') },
   { key: 'files', icon: '📁', label: '文件管理', hint: '/files', action: () => router.push('/files') },
   { key: 'code', icon: '💻', label: '代码工坊', hint: '/code', action: () => router.push('/code') },
@@ -63,6 +103,15 @@ const COMMANDS = [
   { key: 'office', icon: '🏢', label: '办公套件', hint: '/toolbox/office', action: () => router.push('/toolbox/office') },
   { key: 'dashboard', icon: '🏠', label: '工作台', hint: '/dashboard', action: () => router.push('/dashboard') },
   { key: 'profile', icon: '👤', label: '个人设置', hint: '/profile', action: () => router.push('/profile') },
+  { key: 'reload', icon: '🔄', label: '刷新页面', hint: '重载', action: () => window.location.reload() },
+  {
+    key: 'logout', icon: '🚪', label: '退出登录', hint: '注销',
+    action: async () => {
+      if (!window.confirm('确定退出登录？')) return
+      await user.logout()
+      router.push('/login')
+    },
+  },
 ]
 
 const filtered = computed(() => {
@@ -79,10 +128,18 @@ function move(d) {
   if (!n) return
   pickedIdx.value = (pickedIdx.value + d + n) % n
 }
-function run(item) {
-  if (!item) return
+async function run(item) {
+  if (!item || busy.value) return
   close()
-  item.action()
+  busy.value = true
+  try {
+    await item.action()
+  } catch (e) {
+    // 拦截器已把后端错误码映射成中文，直接展示 e.message
+    app.toastMsg(e?.message || '执行失败', 'error')
+  } finally {
+    busy.value = false
+  }
 }
 function close() {
   open.value = false

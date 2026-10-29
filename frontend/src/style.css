@@ -5,17 +5,7 @@
 
 /* 设计令牌：原 tailwind.config.js 迁移至 @theme（Tailwind 4 的配置即 CSS） */
 @theme {
-  /* 中性色 slate + 单一强调色 sky，符合 B 端控制台规范 */
-  --color-brand-50: #f0f9ff;
-  --color-brand-100: #e0f2fe;
-  --color-brand-200: #bae6fd;
-  --color-brand-300: #7dd3fc;
-  --color-brand-400: #38bdf8;
-  --color-brand-500: #0ea5e9;
-  --color-brand-600: #0284c7;
-  --color-brand-700: #0369a1;
-  --color-brand-800: #075985;
-  --color-brand-900: #0c4a6e;
+  /* 中性色 slate，符合 B 端控制台规范；强调色 brand-* 见下方 @theme inline */
   --color-ink-50: #f8fafc;
   --color-ink-100: #f1f5f9;
   --color-ink-200: #e2e8f0;
@@ -36,13 +26,83 @@
   --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
 }
 
-/* F22：品牌主色可定制——后台设置 primary_color 由 App.vue applyBranding 写入
-   :root 的 --brand-color，此前没有任何地方消费它。用 @theme inline 把最显眼的
-   brand-500/600 锚到该变量（默认值与原色阶一致，未定制时行为逐字节不变）。
-   50-400/700-900 浅深色阶保持静态：单色值无法可靠派生九级色阶。 */
+/* F58 强调色：九级色阶由 --brand-* 承载，:root 是默认 sky，
+   [data-accent=...] 由 utils/theme.js 写在 <html> 上。
+   后台设置 primary_color（App.vue 写入 --brand-color）仍优先于 500/600 两档。 */
+:root {
+  --brand-50: #f0f9ff;
+  --brand-100: #e0f2fe;
+  --brand-200: #bae6fd;
+  --brand-300: #7dd3fc;
+  --brand-400: #38bdf8;
+  --brand-500: #0ea5e9;
+  --brand-600: #0284c7;
+  --brand-700: #0369a1;
+  --brand-800: #075985;
+  --brand-900: #0c4a6e;
+}
+:root[data-accent="emerald"] {
+  --brand-50: #ecfdf5;
+  --brand-100: #d1fae5;
+  --brand-200: #a7f3d0;
+  --brand-300: #6ee7b7;
+  --brand-400: #34d399;
+  --brand-500: #10b981;
+  --brand-600: #059669;
+  --brand-700: #047857;
+  --brand-800: #065f46;
+  --brand-900: #064e3b;
+}
+:root[data-accent="violet"] {
+  --brand-50: #f5f3ff;
+  --brand-100: #ede9fe;
+  --brand-200: #ddd6fe;
+  --brand-300: #c4b5fd;
+  --brand-400: #a78bfa;
+  --brand-500: #8b5cf6;
+  --brand-600: #7c3aed;
+  --brand-700: #6d28d9;
+  --brand-800: #5b21b6;
+  --brand-900: #4c1d95;
+}
+:root[data-accent="amber"] {
+  --brand-50: #fffbeb;
+  --brand-100: #fef3c7;
+  --brand-200: #fde68a;
+  --brand-300: #fcd34d;
+  --brand-400: #fbbf24;
+  --brand-500: #f59e0b;
+  --brand-600: #d97706;
+  --brand-700: #b45309;
+  --brand-800: #92400e;
+  --brand-900: #78350f;
+}
+:root[data-accent="rose"] {
+  --brand-50: #fff1f2;
+  --brand-100: #ffe4e6;
+  --brand-200: #fecdd3;
+  --brand-300: #fda4af;
+  --brand-400: #fb7185;
+  --brand-500: #f43f5e;
+  --brand-600: #e11d48;
+  --brand-700: #be123c;
+  --brand-800: #9f1239;
+  --brand-900: #881337;
+}
+
+/* F22 + F58：brand-* 工具类全部锚到运行时变量，默认值与原始 sky 色阶一致；
+   未做任何定制时渲染结果与改造前相同。 */
 @theme inline {
-  --color-brand-500: var(--brand-color, #0ea5e9);
-  --color-brand-600: var(--brand-color, #0284c7);
+  --color-brand-50: var(--brand-50);
+  --color-brand-100: var(--brand-100);
+  --color-brand-200: var(--brand-200);
+  --color-brand-300: var(--brand-300);
+  --color-brand-400: var(--brand-400);
+  --color-brand-500: var(--brand-color, var(--brand-500));
+  --color-brand-600: var(--brand-color, var(--brand-600));
+  --color-brand-700: var(--brand-700);
+  --color-brand-800: var(--brand-800);
+  --color-brand-900: var(--brand-900);
 }
 
 /* Tailwind 4：被 @apply 复用的基类必须用 @utility 定义（v3 的 components layer 类不再可被 @apply） */

@@ -578,6 +578,7 @@ async function saveGoal() {
 const pomoStat = ref({})
 const pomoState = reactive({ mode: 'work', running: false, remain: 25 * 60, workMin: 25, breakMin: 5, round: 0, marked: false })
 let pomoTimer = null
+let pomoDisposed = false
 const pomoClock = computed(() => {
   const m = Math.floor(pomoState.remain / 60), s = pomoState.remain % 60
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
@@ -593,7 +594,10 @@ function tickPomo() {
   clearInterval(pomoTimer); pomoTimer = null; pomoState.running = false
   const interrupted = pomoState.marked
   void (async () => {
-    await learnApi.pomodoroSave({ minutes: pomoState.workMin, interrupted })
+    try {
+      await learnApi.pomodoroSave({ minutes: pomoState.workMin, interrupted })
+    } catch { /* 记录失败不阻塞进入休息 */ }
+    if (pomoDisposed) return  // 组件已卸载：不再建表/改状态，防止幽灵计时
     pomoState.round++
     pomoState.mode = 'break'; pomoState.remain = pomoState.breakMin * 60; pomoState.marked = false
     pomoState.running = true; pomoTimer = setInterval(tickPomo, 1000)
@@ -852,6 +856,8 @@ async function switchTab(v) {
 onMounted(() => { loadOverview(); loadGoal(); loadBadges(); loadWeakness(); loadStreak(); loadReviewQueue() })
 
 onUnmounted(() => {
+  pomoDisposed = true
   clearInterval(pomoTimer)
+  pomoTimer = null
 })
 </script>

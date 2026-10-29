@@ -298,7 +298,7 @@
           <div v-if="!exifInfo.dimensions && !exifInfo.camera && !exifInfo.taken" class="text-ink-400">未读取到 EXIF 信息（可能已被剥离）</div>
         </div>
 
-        <div v-else class="rounded-control bg-ink-50 p-4 text-[13px] text-ink-500">
+        <div v-if="previewUnsupported" class="rounded-control bg-ink-50 p-4 text-[13px] text-ink-500">
           该格式暂不支持在线预览，请下载后查看。
         </div>
       </div>
@@ -454,6 +454,7 @@ const descValue = ref('')
 const sharing = ref(null)
 const shareForm = ref({})
 const shareResult = ref(null)
+const creatingShare = ref(false)
 const previewing = ref(null)
 const previewState = ref({})
 const previewContent = ref('')
@@ -468,6 +469,15 @@ const uploadProgress = ref(0)
 const uploadName = ref('')
 const uploadQueue = ref([])
 const CHUNK_SIZE = 5 * 1024 * 1024
+
+// 预览兜底提示只应在「确实没有可用渲染器」时出现；
+// 之前 v-else 挂在 EXIF 块后面，导致 txt/pdf 等都显示"不支持预览"
+const PREVIEW_TYPES = ['image', 'video', 'audio', 'pdf', 'text', 'office']
+const previewUnsupported = computed(() => {
+  if (!previewing.value) return false
+  if (previewState.value?.preview_url) return false
+  return !PREVIEW_TYPES.includes(previewing.value.preview_type)
+})
 
 // ---- F547–F564 文件中心新增能力 ----
 const dims = ref({})              // F553 图片分辨率徽章
@@ -836,11 +846,25 @@ async function saveText() {
 }
 function openShare(f) { sharing.value = f; shareResult.value = null; shareForm.value = { permission: 'view', expire_hours: null, password: '', max_downloads: null } }
 async function createShare() {
-  const payload = { file_id: sharing.value.id, ...shareForm.value }
-  Object.keys(payload).forEach((k) => (payload[k] === '' || payload[k] === null) && delete payload[k])
-  shareResult.value = await fileApi.createShare(payload)
-  navigator.clipboard?.writeText(shareUrl())
-  app.toastMsg('链接已复制', 'success')
+  if (creatingShare.value) return  // 防双击生成两条链接
+  creatingShare.value = true
+  try {
+    const payload = { file_id: sharing.value.id, ...shareForm.value }
+    Object.keys(payload).forEach((k) => (payload[k] === '' || payload[k] === null) && delete payload[k])
+    shareResult.value = await fileApi.createShare(payload)
+    let copied = false
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareUrl())
+        copied = true
+      }
+    } catch { /* 剪贴板不可用（非 HTTPS/权限拒绝）时降级为手动复制 */ }
+    app.toastMsg(copied ? '链接已复制' : '分享已创建，请手动复制链接', copied ? 'success' : 'warn')
+  } catch (e) {
+    app.toastMsg(e?.message || '生成分享链接失败', 'error')
+  } finally {
+    creatingShare.value = false
+  }
 }
 // F4：对外链接统一走 base.js 的 shareUrl()（VITE_PUBLIC_BASE + /share/:token），
 // 不再本地拼 location.origin，部署到 CF Pages 时也能给出正确地址
@@ -854,9 +878,13 @@ async function onFilePicked(e) {
   list.forEach((f, i) => uploadOne(f, i))
 }
 async function uploadOne(file, idx) {
+  // 单文件才用全局进度条；多文件并行时进度以 uploadQueue 各自为准，避免数值乱跳
+  const single = uploadQueue.value.length <= 1
   uploading.value = true
-  uploadName.value = file.name
-  uploadProgress.value = 0
+  if (single) {
+    uploadName.value = file.name
+    uploadProgress.value = 0
+  }
   try {
     // F14：先算真实 sha1 让秒传真正生效（后端 uploadInit 按 sha1+owner 命中已存在文件）。
     // 计算失败（极端环境）降级为空串——后端按无秒传处理，只是少一个优化。
@@ -881,11 +909,11 @@ async function uploadOne(file, idx) {
       fd.append('chunk', blob, `${file.name}.part${i}`)
       await fileApi.uploadChunk(fd)
       const pct = Math.round(((i + 1) / totalChunks) * 90)
-      uploadProgress.value = pct
+      if (single) uploadProgress.value = pct
       if (idx != null) uploadQueue.value[idx] = { ...uploadQueue.value[idx], progress: pct, status: 'uploading' }
     }
     const done = await fileApi.uploadComplete(init.upload_id)
-    uploadProgress.value = 100
+    if (single) uploadProgress.value = 100
     // F557 重名自动改名提示
     if (done && done.renamed) {
       app.toastMsg(`重名，已自动改名为「${done.renamed.final}」`, 'info')
@@ -897,7 +925,8 @@ async function uploadOne(file, idx) {
     app.toastMsg(`${file.name} 上传失败：${e.message}`, 'error')
     if (idx != null) uploadQueue.value[idx] = { ...uploadQueue.value[idx], status: 'error' }
   } finally {
-    uploading.value = false
+    // 并行上传时，任何一个结束都不能把整体状态置为「已完成」
+    uploading.value = uploadQueue.value.some((q) => q.status === 'uploading')
   }
 }
 

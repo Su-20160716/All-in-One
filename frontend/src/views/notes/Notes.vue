@@ -950,9 +950,16 @@ async function toggleArchive() {
 const { schedule: scheduleSave, flush: flushSave } = useAutosave(
   async () => {
     if (!current.value || collabMode.value) return
+    const id = current.value.id
+    const title = current.value.title
+    const content = current.value.content
     saving.value = true
     try {
-      current.value = await noteApi.update(current.value.id, { title: current.value.title, content: current.value.content })
+      const saved = await noteApi.update(id, { title, content })
+      // 请求期间可能已切到另一篇：只回写时间戳，绝不整体覆盖编辑器当前内容
+      if (current.value && current.value.id === id) {
+        current.value.updated_at = saved?.updated_at ?? current.value.updated_at
+      }
       loadTree()
     } finally {
       setTimeout(() => (saving.value = false), 600)
@@ -1609,9 +1616,28 @@ async function loadCitation() {
     }
   } catch (e) { citation.value = { ...citation.value, items: [] } }
 }
-function copyText(text) {
-  navigator.clipboard?.writeText(text)
-  app.toastMsg('已复制引用格式', 'success')
+async function copyText(text) {
+  let copied = false
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      copied = true
+    }
+  } catch { /* 非 HTTPS / 权限拒绝 */ }
+  if (!copied) {
+    // 降级：临时 textarea + execCommand，仍失败则如实提示
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      copied = document.execCommand('copy')
+      document.body.removeChild(ta)
+    } catch { copied = false }
+  }
+  app.toastMsg(copied ? '已复制引用格式' : '复制失败，请手动选择文本', copied ? 'success' : 'error')
 }
 
 // ---- F582 分组文件夹 ----
@@ -1672,7 +1698,11 @@ onMounted(() => {
   loadFolders(); loadLocalWords(); loadTodos()
   window.addEventListener('keydown', onKeydown)
 })
-onBeforeUnmount(() => { if (collab) collab.destroy(); window.removeEventListener('keydown', onKeydown) })
+onBeforeUnmount(() => {
+  flushSave()
+  if (collab) collab.destroy()
+  window.removeEventListener('keydown', onKeydown)
+})
 </script>
 
 <style scoped>

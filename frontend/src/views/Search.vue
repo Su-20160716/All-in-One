@@ -235,15 +235,20 @@ function groupIcon(type) {
   return { history: '🕘', hot: '🔥', route: '🧭', term: '🏷️' }[type] || '🔎'
 }
 
+let searchSeq = 0
+
 async function doSearch(append = false) {
   const isAppend = append === true   // 事件对象不当作 append（修掉 Enter/点击误判）
+  if (isAppend && loading.value) return   // 「加载更多」防重入
   const keyword = q.value.trim()
   if (!keyword) {
+    searchSeq += 1
     results.value = []; total.value = 0; searched.value = false
     groupCounts.value = {}; syntax.value = { phrases: [], excludes: [], terms_text: '', phrase_fallback: false }
     return
   }
   localStorage.setItem('search_module', module.value)  // #64 记忆筛选
+  const seq = ++searchSeq
   loading.value = true
   showSuggest.value = false
   try {
@@ -251,6 +256,7 @@ async function doSearch(append = false) {
       q: keyword, module: module.value || undefined,
       limit: 20, offset: isAppend ? results.value.length : 0,
     })
+    if (seq !== searchSeq) return   // 旧请求晚到，不能覆盖新结果
     results.value = isAppend ? [...results.value, ...(r.results || [])] : (r.results || [])
     total.value = r.total
     terms.value = r.terms || []
@@ -259,9 +265,9 @@ async function doSearch(append = false) {
     groupCounts.value = r.group_counts || {}
     searched.value = true
   } catch (e) {
-    app.toastMsg(e.message || '搜索失败', 'error')
+    if (seq === searchSeq) app.toastMsg(e.message || '搜索失败', 'error')
   } finally {
-    loading.value = false
+    if (seq === searchSeq) loading.value = false
   }
 }
 

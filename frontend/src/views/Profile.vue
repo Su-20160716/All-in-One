@@ -247,13 +247,21 @@
       </div>
     </div>
 
-    <!-- #57 主题切换 -->
+    <!-- #57 主题切换 / F58 强调色 -->
     <div class="card p-5">
       <h2 class="text-[15px] font-semibold text-ink-800">外观主题</h2>
       <div class="mt-3 flex gap-2">
         <button v-for="t in themes" :key="t.value" class="btn-outline text-[12px]"
                 :class="theme === t.value ? 'border-brand-400 bg-brand-50 text-brand-700' : ''"
                 @click="setTheme(t.value)">{{ t.label }}</button>
+      </div>
+      <div class="mt-4 text-[12px] text-ink-500">强调色</div>
+      <div class="mt-2 flex flex-wrap gap-2">
+        <button v-for="a in accents" :key="a.value" class="flex items-center gap-2 rounded-control border px-2.5 py-1.5 text-[12px] transition-colors"
+                :class="accent === a.value ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-ink-200 text-ink-600 hover:border-ink-300'"
+                @click="setAccent(a.value)">
+          <span class="h-3 w-3 rounded-full" :style="{ background: a.color }"></span>{{ a.label }}
+        </button>
       </div>
     </div>
 
@@ -571,7 +579,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { authApi } from '../api'
 import { authxApi } from '../api/authx'
@@ -579,6 +587,7 @@ import { corexApi, reportLatencySamples } from '../api/corex'
 import { useUserStore } from '../stores/user'
 import { useAppStore } from '../stores/app'
 import { formatTime } from '../utils/format'
+import { ACCENTS, THEMES, applyTheme, getAccent, getTheme } from '../utils/theme'
 
 const user = useUserStore()
 const app = useAppStore()
@@ -595,12 +604,10 @@ const history = ref([])
 const badges = ref([])
 const invites = ref([])
 const sessions = ref([])
-const theme = ref(localStorage.getItem('theme') || 'system')
-const themes = [
-  { value: 'light', label: '浅色' },
-  { value: 'dark', label: '深色' },
-  { value: 'system', label: '跟随系统' },
-]
+const theme = ref(getTheme())
+const accent = ref(getAccent())
+const themes = THEMES
+const accents = ACCENTS
 
 // #54 头像裁剪
 const cropModal = ref(false)
@@ -693,12 +700,20 @@ async function doCropAndUpload() {
   const canvas = cropCanvas.value
   if (!canvas) return
   canvas.toBlob(async (blob) => {
-    const fd = new FormData()
-    fd.append('avatar', blob, 'avatar.png')
-    await authApi.uploadAvatar(fd)
-    await user.fetchProfile()
-    cropModal.value = false
-    app.toastMsg('头像已更新', 'success')
+    if (!blob) {
+      app.toastMsg('头像处理失败，请换一张图片', 'error')
+      return
+    }
+    try {
+      const fd = new FormData()
+      fd.append('avatar', blob, 'avatar.png')
+      await authApi.uploadAvatar(fd)
+      await user.fetchProfile()
+      cropModal.value = false
+      app.toastMsg('头像已更新', 'success')
+    } catch (e) {
+      app.toastMsg(e?.message || '头像上传失败', 'error')
+    }
   }, 'image/png')
 }
 
@@ -738,16 +753,14 @@ async function revokeSession(s) {
   app.toastMsg('已踢出该设备', 'success')
 }
 
-// #57 主题
+// #57 主题 / F58 强调色
 function setTheme(t) {
   theme.value = t
-  localStorage.setItem('theme', t)
-  const root = document.documentElement
-  if (t === 'dark' || (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-    root.classList.add('dark')
-  } else {
-    root.classList.remove('dark')
-  }
+  applyTheme(t, accent.value)
+}
+function setAccent(a) {
+  accent.value = a
+  applyTheme(theme.value, a)
 }
 
 async function exportData() {
@@ -1059,4 +1072,12 @@ onMounted(() => {
   // F632/F633：把 localStorage 里的接口耗时采样与运行时异常上报给后端（静默）
   reportLatencySamples()
 })
+
+// F58：命令面板等外部入口切换外观时，同步本页按钮的选中态
+function syncTheme(e) {
+  theme.value = e.detail.mode
+  accent.value = e.detail.accent
+}
+onMounted(() => window.addEventListener('theme:change', syncTheme))
+onBeforeUnmount(() => window.removeEventListener('theme:change', syncTheme))
 </script>

@@ -503,19 +503,22 @@ async function loadSub(v) {
   if (v === 'overview') return
   if (cache[v]) return
   const k = cur.value
-  const map = {
-    roadmap: () => learnApi.langRoadmap(k).then((r) => (cache.roadmap = r.roadmap)),
-    cheatsheet: () => learnApi.langCheatsheet(k).then((r) => (cache.cheatsheet = r.cheatsheet)),
-    keywords: () => learnApi.langKeywordsDetail(k).then((r) => (cache.keywords = r.keywords)),
-    modules: () => learnApi.langModules(k).then((r) => (cache.modules = r.modules)),
-    types: () => learnApi.langTypes(k).then((r) => (cache.types = r.types)),
-    lessons: () => learnApi.langLessons(k).then((r) => (cache.lessons = r.list)),
-    snippets: () => learnApi.langSnippets(k).then((r) => (cache.snippets = r.list)),
-    ide: () => learnApi.langIde(k).then((r) => (cache.ide = r.ide)),
-    style: () => learnApi.langStyle(k).then((r) => (cache.style = r.style)),
-    errors: () => learnApi.langErrors(k).then((r) => (cache.errors = r.errors)),
+  const fetchers = {
+    roadmap: () => learnApi.langRoadmap(k).then((r) => r.roadmap),
+    cheatsheet: () => learnApi.langCheatsheet(k).then((r) => r.cheatsheet),
+    keywords: () => learnApi.langKeywordsDetail(k).then((r) => r.keywords),
+    modules: () => learnApi.langModules(k).then((r) => r.modules),
+    types: () => learnApi.langTypes(k).then((r) => r.types),
+    lessons: () => learnApi.langLessons(k).then((r) => r.list),
+    snippets: () => learnApi.langSnippets(k).then((r) => r.list),
+    ide: () => learnApi.langIde(k).then((r) => r.ide),
+    style: () => learnApi.langStyle(k).then((r) => r.style),
+    errors: () => learnApi.langErrors(k).then((r) => r.errors),
   }
-  await map[v]()
+  if (!fetchers[v]) return
+  const data = await fetchers[v]()
+  // 请求期间已切到别的语言：丢弃结果，避免把旧语言数据缓存到新语言下
+  if (cur.value === k) cache[v] = data
 }
 async function selectKeyword(k) {
   const word = k.word || k

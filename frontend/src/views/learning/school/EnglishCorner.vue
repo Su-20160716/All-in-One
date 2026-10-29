@@ -247,7 +247,7 @@ async function openWord(w) {
   try {
     wordDetail.value = await learnApi.word(w)
   } catch (e) {
-    app.toastMsg(e.response?.data?.detail || '该词详情暂未收录', 'warn')
+    app.toastMsg(e?.message || '该词详情暂未收录', 'warn')
     wordDetail.value = null
   } finally { wordLoading.value = false }
 }

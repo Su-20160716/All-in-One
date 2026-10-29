@@ -35,8 +35,12 @@ export function useAutosave(saveFn, opts = {}) {
 
   async function flush() {
     clearTimeout(timer)
+    // 保存进行中又来了一次 flush：等它结束，再把期间新产生的改动补存一次，
+    // 否则切笔记/卸载前的最后一段输入会静默丢失。
+    if (inFlight) {
+      await inFlight
+    }
     if (!pending) return
-    if (inFlight) return inFlight
     pending = false
     inFlight = (async () => {
       try {

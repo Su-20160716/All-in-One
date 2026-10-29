@@ -1,0 +1,19 @@
+{
+  "name": "全能协作平台 All-in-One",
+  "short_name": "协作平台",
+  "description": "笔记 / 文件 / 项目 / 消息 / 办公套件一体化协作平台",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#0ea5e9",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
