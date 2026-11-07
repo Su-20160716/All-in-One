@@ -27,11 +27,42 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - name: 安装依赖
-        run: pip install -r requirements.txt
+      - name: 安装依赖（按 lock 复现构建）
+        run: pip install -r requirements.lock
+
+      - name: 校验 requirements.txt 与 lock 一致
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          def names(path):
+              out = set()
+              for line in Path(path).read_text(encoding="utf-8").splitlines():
+                  line = line.split("#", 1)[0].strip()
+                  if not line or line.startswith("-"):
+                      continue
+                  out.add(re.split(r"[<>=!~\[; ]", line, 1)[0].lower().replace("_", "-"))
+              return out
+
+          missing = names("requirements.txt") - names("requirements.lock")
+          if missing:
+              raise SystemExit(f"requirements.lock 缺少: {sorted(missing)}")
+          print("requirements.lock covers requirements.txt")
+          PY
 
       - name: Django system check
         run: python manage.py check
+
+      # #127：模型改了却忘记提交迁移，线上 migrate 会静默缺表/缺列 —— 这里直接失败
+      - name: 迁移漂移检查
+        run: python manage.py makemigrations --check --dry-run
+
+      # #126：OpenAPI 契约门禁，字段改名/序列化器漂移在这里拦下。
+      # 用 --validate 校验生成结果符合 OpenAPI 规范；项目大量裸 APIView 的
+      # W001（无法推断 serializer）属文档完整度提示，不设为阻塞，避免门禁常红。
+      - name: OpenAPI 契约校验（drf-spectacular）
+        run: python manage.py spectacular --file "$RUNNER_TEMP/schema.yaml" --validate
 
       - name: 冒烟（串行——并行会撞 SQLite 锁）
         run: |
@@ -40,6 +71,7 @@ jobs:
           python learning_smoke_test.py
           python suite_smoke_test.py
           python minitools_smoke.py
+          python bizhub_smoke_test.py
 
   frontend:
     name: 前端构建
@@ -57,6 +89,16 @@ jobs:
 
       - name: 安装依赖（npm ci 锁版本）
         run: npm ci
+
+      # #187 回归门禁：ESLint 语法/明显错误 → vue-tsc 类型检查 → Vitest 单测
+      - name: ESLint
+        run: npm run lint
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm run test
 
       - name: 构建
         run: npm run build

@@ -1,4 +1,4 @@
-.PHONY: help dev build check smoke lint fmt smoke-all clean
+.PHONY: help dev build check smoke lint fmt smoke-all clean backup restore openapi
 
 # 全能协作平台 —— 常用命令封装（S3-B1/D8）
 # make help 查看全部；CI 只跑 check + smoke-all + fe-build（见 .github/workflows/ci.yml）
@@ -43,6 +43,17 @@ fe-build: ## 前端生产构建
 	cd frontend && npm run build
 
 build: fe-build ## 全量构建（当前仅前端需要构建步骤）
+
+# ---------- 数据备份 / 恢复 / 契约 ----------
+backup: ## 备份业务数据到 backend/backup_*.json（保留 7 份 + 每周 1 份）
+	bash scripts/backup.sh
+
+restore: ## 从备份恢复：make restore F=backend/backup_xxx.json（自动校验 + 恢复前快照）
+	@if [ -z "$(F)" ]; then echo "用法: make restore F=backend/backup_YYYYMMDD_HHMMSS.json"; exit 2; fi
+	bash scripts/restore.sh "$(abspath $(F))"
+
+openapi: ## 导出 OpenAPI schema 到 docs/openapi.yaml（并做规范校验）
+	cd backend && python manage.py spectacular --file ../docs/openapi.yaml --validate
 
 docker-up: ## 本地容器一键起（compose）
 	docker compose up -d --build

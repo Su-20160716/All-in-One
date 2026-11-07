@@ -1,5 +1,7 @@
 # 自动构建后端 Docker 镜像并推送到 GHCR（GitHub 容器仓库）
 # 推送 main 分支或手动触发时构建；镜像供 ClawCloud Run 等容器平台拉取。
+# #128：镜像构建依赖「静态检查 + 冒烟」结果（needs），坏镜像不再覆盖线上；
+#       同时推送 github.sha tag，便于按提交精确回滚。
 name: Build backend image
 
 on:
@@ -15,7 +17,61 @@ permissions:
   packages: write
 
 jobs:
+  # #128 门禁①：Django 系统检查 + 迁移漂移
+  check:
+    name: 后端 check + 迁移漂移
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖（按 lock 复现构建）
+        run: pip install -r requirements.lock
+
+      - name: Django system check
+        run: python manage.py check
+
+      - name: 迁移漂移检查
+        run: python manage.py makemigrations --check --dry-run
+
+  # #128 门禁②：串行冒烟（并行会撞 SQLite 锁）
+  smoke:
+    name: 后端冒烟（串行）
+    needs: check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖（按 lock 复现构建）
+        run: pip install -r requirements.lock
+
+      - name: 冒烟
+        run: |
+          python smoke_test.py
+          python extensions_smoke_test.py
+          python learning_smoke_test.py
+          python suite_smoke_test.py
+          python minitools_smoke.py
+          python bizhub_smoke_test.py
+
   build:
+    name: 构建并推送镜像
+    needs: [check, smoke]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,12 +86,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # 自动转小写的镜像名：ghcr.io/<所有者>/coop-backend
+      # tag：latest（生产拉取）+ sha-<完整提交号>（按提交回滚）
       - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/coop-backend
           tags: |
             latest
+            type=sha,format=long
 
       - uses: docker/build-push-action@v6
         with:

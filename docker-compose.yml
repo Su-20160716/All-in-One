@@ -30,17 +30,43 @@ services:
       LLM_MODEL: "${LLM_MODEL:-}"
       # 跨域信任（生产填前端域名，多个用逗号分隔）
       CSRF_TRUSTED_ORIGINS: "${CSRF_TRUSTED_ORIGINS:-}"
-      SECRET_KEY: "${SECRET_KEY:-}"
+      # 与 settings.py 读取的变量名保持一致；生产必须显式提供，否则后端拒绝启动
+      DJANGO_SECRET_KEY: "${DJANGO_SECRET_KEY:-}"
+    # #130 容器探活：与 Dockerfile HEALTHCHECK 一致（免登录健康检查，带 https 头
+    # 避免生产分支 SECURE_SSL_REDIRECT 把探测 301 掉）
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request as u,sys; r=u.Request('http://127.0.0.1:8000/api/core/health/', headers={'X-Forwarded-Proto':'https'}); sys.exit(0 if u.urlopen(r, timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    # #130 日志轮转：容器日志不设上限会写满宿主磁盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # 前端构建期变量：指向后端地址（同域部署时留空走 nginx 代理的相对路径）
+        VITE_API_BASE: "${VITE_API_BASE:-}"
     container_name: aio-frontend
     restart: unless-stopped
     ports:
       - "80:80"
+    # #130：等后端健康（而非仅启动）再拉起前端，避免首屏 502
     depends_on:
-      - backend
-    # 前端构建期变量：指向后端地址（同域部署时留空走 nginx 代理的相对路径）
-    build:
-      args:
-        VITE_API_BASE: "${VITE_API_BASE:-}"
+      backend:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

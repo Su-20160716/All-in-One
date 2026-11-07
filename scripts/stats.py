@@ -103,7 +103,12 @@ def django_stats() -> dict:
         "im": "im", "tools": "tools", "dashboard": "dashboard", "core": "core",
         "learning": "learning", "assistant": "assistant", "devtools": "devtools",
         "minitools": "minitools", "dataintel": "dataintel", "officesuite": "officesuite",
-        "code": "code", "share": "public",
+        "code": "code", "share": "public", "biz": "bizhub",
+        "workflow": "workflow", "formstudio": "formstudio", "reporting": "reporting",
+        "rules": "rules", "contracts": "contracts", "pipeline": "pipeline",
+        "billing": "billing", "marketplace": "marketplace", "flags": "flags",
+        "observability": "observability", "knowledgegraph": "knowledgegraph",
+        "governance": "governance",
     }
     endpoints_by_app: dict[str, int] = {}
 

@@ -25,6 +25,9 @@ frontend/.esbuild-tmp/
 # ---- 临时文件 / 调试产物 ----
 *.tmp
 .DS_Store
+# 备份/冒烟脚本在项目根留下的临时目录与临时测试脚本
+/tmp*/
+backend/tmp_*.py
 backend/_points_dump.json
 backend/_points_*.txt
 backend/.chk*.txt
@@ -39,6 +42,12 @@ _*_names.txt
 
 # ---- 临时脚本归档（2026-09-30 dsh 从根目录清理出来的 12 个 _*.py）----
 _archive_temp_*/
+
+# ---- 数据备份产物（含全库数据、口令哈希与 2FA 密钥，绝不入库）----
+backend/backup_*.json
+backend/backups/
+# 日志轮转产物（#134：backend/logs/app.log*，或 DATA_DIR/logs 挂载卷）
+backend/logs/
 
 # ---- 工作区私有数据（AI 助手记忆，不上云）----
 .workbuddy/
