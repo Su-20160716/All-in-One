@@ -8,7 +8,8 @@ _PLAIN = [
     # 审批流
     m.ApprovalRequest, m.SealApply, m.ExpenseReport, m.TravelApply, m.Contract,
     # 资源
-    m.MeetingRoom, m.RoomBooking, m.Asset, m.Vehicle, m.VehicleBooking,
+    m.MeetingRoom, m.RoomBooking, m.MeetingRoomFavorite, m.Asset, m.AssetCheck,
+    m.Vehicle, m.VehicleBooking,
     m.SupplyItem, m.SupplyApply, m.VisitorRecord, m.MailParcel,
     # 人员协作
     m.DutySchedule, m.DutyShift, m.TimesheetEntry, m.TrainingSession,

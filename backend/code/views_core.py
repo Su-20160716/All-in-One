@@ -3,15 +3,17 @@
 
 全部接口走 `endpoint` 装饰器（ValueError→400、其余→422，绝不 500）。
 """
+import csv
 import difflib
 import io
 import json
+import posixpath
 import re
 import time
 import zipfile
 
-from django.db.models import Count, Q, Sum
-from django.http import HttpResponse
+from django.db.models import Count, F, Q, Sum
+from django.http import HttpResponse, StreamingHttpResponse
 from django.utils import timezone
 
 from devtools.common import (
@@ -23,7 +25,7 @@ from core.pagination import OptionalPageNumberPagination
 from . import runtime as rt
 from .models import (
     CodeComment, CodeFile, CodeJudgeTask, CodeRun, CodeRunPreset, CodeShare, CodeSnippet,
-    CodeVersion, CodeWorkspace,
+    CodeTestCaseSet, CodeVersion, CodeWorkspace,
 )
 from .serializers import (
     build_tree, file_brief, file_qs, file_write_qs, get_file, get_ws,
@@ -175,6 +177,308 @@ def workspace_detail(request, pk):
     data["tree"] = build_tree(list(ws.files.all()))
     data["stats"] = _ws_stats(ws)
     return ok(data)
+
+
+# ------------------------------------------------------------
+# 第 263 条：多文件工作区模板（PyPI 包 / 前后端分离）
+# ------------------------------------------------------------
+
+WORKSPACE_TEMPLATES = {
+    "python-package": {
+        "name": "Python 包",
+        "description": "带 src 布局、工具模块、测试与 README 的可发布工程",
+        "language": "python",
+        "files": [
+            {"path": "README.md", "content": (
+                "# 我的 Python 包\n\n## 安装\n\n```bash\npip install -e .\n```\n\n"
+                "## 使用\n\n```bash\npython -m src.main\n```\n"
+            )},
+            {"path": "src/__init__.py", "content": '__version__ = "0.1.0"\n'},
+            {"path": "src/main.py", "content": (
+                "from utils.helpers import greet\n\n\n"
+                "def main():\n    print(greet(\"世界\"))\n\n\n"
+                "if __name__ == \"__main__\":\n    main()\n"
+            )},
+            {"path": "utils/helpers.py", "content": (
+                "def greet(name: str) -> str:\n    \"\"\"返回问候语。\"\"\"\n"
+                "    return f\"你好，{name}！\"\n"
+            )},
+            {"path": "tests/test_main.py", "content": (
+                "import sys\nimport unittest\n\n"
+                "sys.path.insert(0, \".\")\n\n"
+                "from src.main import main\nfrom utils.helpers import greet\n\n\n"
+                "class TestMain(unittest.TestCase):\n"
+                "    def test_greet(self):\n"
+                "        self.assertIn(\"你好\", greet(\"测试\"))\n\n"
+                "    def test_main_runs(self):\n"
+                "        main()\n\n\n"
+                "if __name__ == \"__main__\":\n    unittest.main()\n"
+            )},
+        ],
+    },
+    "web-api": {
+        "name": "Web API 服务",
+        "description": "main 入口 + 工具模块 + README + 接口测试的轻量后端骨架",
+        "language": "python",
+        "files": [
+            {"path": "README.md", "content": (
+                "# Web API\n\n## 启动\n\n```bash\npython main.py\n```\n\n"
+                "## 接口\n\n- `GET /health`：健康检查\n- `GET /items`：示例列表\n"
+            )},
+            {"path": "main.py", "content": (
+                "import json\n\nfrom utils import resolve_path\n\n\n"
+                "def app(environ, start_response):\n"
+                "    path = resolve_path(environ.get(\"PATH_INFO\", \"/\"))\n"
+                "    if path == \"/health\":\n"
+                "        body = {\"status\": \"ok\"}\n"
+                "    else:\n"
+                "        body = {\"items\": [1, 2, 3]}\n"
+                "    data = json.dumps(body, ensure_ascii=False).encode(\"utf-8\")\n"
+                "    start_response(\"200 OK\", [(\"Content-Type\", \"application/json\")])\n"
+                "    return [data]\n\n\n"
+                "if __name__ == \"__main__\":\n"
+                "    print(json.dumps({\"route\": \"/health\", \"status\": \"ok\"}, ensure_ascii=False))\n"
+            )},
+            {"path": "utils/__init__.py", "content": "from .resolve import resolve_path\n"},
+            {"path": "utils/resolve.py", "content": (
+                "def resolve_path(raw: str) -> str:\n"
+                "    \"\"\"归一化请求路径：去掉查询串与结尾斜杠。\"\"\"\n"
+                "    path = (raw or \"/\").split(\"?\")[0]\n"
+                "    return path.rstrip(\"/\") or \"/\"\n"
+            )},
+            {"path": "tests/test_api.py", "content": (
+                "import unittest\n\nfrom utils import resolve_path\n\n\n"
+                "class TestResolve(unittest.TestCase):\n"
+                "    def test_strip_slash(self):\n"
+                "        self.assertEqual(resolve_path(\"/health/\"), \"/health\")\n\n"
+                "    def test_query(self):\n"
+                "        self.assertEqual(resolve_path(\"/items?x=1\"), \"/items\")\n\n\n"
+                "if __name__ == \"__main__\":\n    unittest.main()\n"
+            )},
+        ],
+    },
+}
+
+
+def _template_brief(key, spec):
+    return {
+        "key": key, "name": spec["name"], "description": spec["description"],
+        "language": spec["language"],
+        "file_count": len(spec["files"]),
+        "files": [f["path"] for f in spec["files"]],
+    }
+
+
+@endpoint(("GET",))
+def workspace_templates(request):
+    """工作区模板清单（第 263 条）。"""
+    return ok({
+        "items": [_template_brief(k, v) for k, v in WORKSPACE_TEMPLATES.items()],
+        "count": len(WORKSPACE_TEMPLATES),
+    })
+
+
+@endpoint(("POST",))
+def workspace_from_template(request):
+    """按模板批量创建目录与文件（第 263 条）。"""
+    key = req_str(request, "template", "").strip()
+    spec = WORKSPACE_TEMPLATES.get(key)
+    if not spec:
+        raise ValueError(f"模板不存在: {key}")
+    name = req_str(request, "name", "").strip() or spec["name"]
+    ws = CodeWorkspace.objects.create(
+        name=name[:120],
+        description=opt_str(request, "description", spec["description"]),
+        owner=request.user,
+        language=rt.normalize_language(opt_str(request, "language", spec["language"])),
+        icon=opt_str(request, "icon", "📁")[:16] or "📁",
+        color=opt_str(request, "color", "brand")[:16],
+    )
+    # 同一路径可能在模板里重复出现（如 utils/__init__.py），后者覆盖前者
+    merged = {}
+    for f in spec["files"]:
+        merged[f["path"]] = f.get("content", "")
+    created = []
+    for path, content in merged.items():
+        lang = rt.language_from_path(path)
+        obj = CodeFile.objects.create(
+            workspace=ws, owner=request.user, path=path,
+            name=path.rsplit("/", 1)[-1], language=lang, content=content,
+            is_entry=path in ("main.py", "src/main.py"),
+        )
+        created.append({"id": obj.id, "path": obj.path, "lines": obj.lines, "language": lang})
+    if not any(c["path"] in ("main.py", "src/main.py") for c in created) and created:
+        CodeFile.objects.filter(id=created[0]["id"]).update(is_entry=True)
+    data = ws_detail(ws, include_files=True)
+    data["template"] = key
+    data["created"] = created
+    return ok(data)
+
+
+# 导入限制（第 266 条）：防路径穿越与 zip 炸弹
+IMPORT_MAX_FILES = 200
+IMPORT_MAX_BYTES = 20 * 1024 * 1024
+IMPORT_SKIP_DIRS = {"__MACOSX", ".git", "node_modules", "__pycache__", ".idea", ".vscode"}
+
+
+@endpoint(("POST",))
+def workspace_import(request):
+    """导入 zip 为工作区文件（第 266 条，multipart 字段名 file）。"""
+    upload = request.FILES.get("file")
+    if not upload:
+        raise ValueError("缺少 zip 文件（multipart 字段名 file）")
+    if upload.size > IMPORT_MAX_BYTES:
+        raise ValueError(f"zip 文件超过 {IMPORT_MAX_BYTES // (1024 * 1024)}MB 上限")
+    try:
+        zf = zipfile.ZipFile(upload)
+    except zipfile.BadZipFile:
+        raise ValueError("不是有效的 zip 文件")
+
+    ws_id = opt_num(request, "workspace", None, integer=True)
+    if ws_id:
+        ws = get_ws(request.user, ws_id, write=True)
+    else:
+        name = opt_str(request, "name", "").strip() or (upload.name or "导入工程").rsplit(".", 1)[0]
+        ws = CodeWorkspace.objects.create(
+            name=name[:120], owner=request.user,
+            description=opt_str(request, "description", f"由 {upload.name} 导入"),
+        )
+
+    entries, total, unsafe = [], 0, []
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        raw = (info.filename or "").replace("\\", "/")
+        parts = [seg for seg in raw.split("/") if seg not in ("", ".")]
+        if not parts or raw.startswith("/") or ".." in parts or re.match(r"^[A-Za-z]:", raw):
+            unsafe.append(info.filename)
+            continue
+        if any(seg in IMPORT_SKIP_DIRS for seg in parts[:-1]):
+            continue
+        if parts[-1].startswith("."):
+            continue
+        total += max(0, info.file_size)
+        if len(entries) + 1 > IMPORT_MAX_FILES:
+            raise ValueError(f"压缩包文件数超过 {IMPORT_MAX_FILES} 上限")
+        if total > IMPORT_MAX_BYTES:
+            raise ValueError(f"解压后体积超过 {IMPORT_MAX_BYTES // (1024 * 1024)}MB 上限")
+        entries.append((info, "/".join(parts)))
+    if unsafe:
+        raise ValueError(f"压缩包包含非法路径（疑似路径穿越）：{unsafe[0]}")
+    if not entries:
+        raise ValueError("压缩包内没有可导入的文件")
+
+    # 所有文件同处一个顶层目录时自动剥掉，避免多出一层嵌套
+    prefixes = {p.split("/")[0] for _, p in entries if "/" in p}
+    if len(prefixes) == 1 and all("/" in p for _, p in entries):
+        prefix = prefixes.pop() + "/"
+        entries = [(i, p[len(prefix):]) for i, p in entries]
+
+    existing = set(ws.files.values_list("path", flat=True))
+    created, skipped, truncated = [], 0, []
+    for info, path in entries:
+        if path in existing:
+            skipped += 1
+            continue
+        try:
+            raw = zf.read(info)
+        except (zipfile.BadZipFile, RuntimeError):
+            skipped += 1
+            continue
+        if len(raw) > 2 * 1024 * 1024:
+            truncated.append(path)
+            raw = raw[:2 * 1024 * 1024]
+        content = raw.decode("utf-8", "replace")
+        obj = CodeFile.objects.create(
+            workspace=ws, owner=request.user, path=path,
+            name=path.rsplit("/", 1)[-1], language=rt.language_from_path(path),
+            content=content,
+        )
+        existing.add(path)
+        created.append({"id": obj.id, "path": obj.path, "language": obj.language, "lines": obj.lines})
+    if not ws.files.filter(is_entry=True).exists() and created:
+        CodeFile.objects.filter(id=created[0]["id"]).update(is_entry=True)
+
+    data = ws_detail(ws, include_files=True)
+    data["imported"] = len(created)
+    data["skipped"] = skipped
+    data["truncated"] = truncated[:20]
+    data["created"] = created
+    return ok(data)
+
+
+
+@endpoint(("POST",))
+def workspace_replace(request, pk):
+    """工作区全局搜索替换（第 264 条）：逐文件命中行 + 预览，确认后写回并快照。"""
+    ws = get_ws(request.user, pk, write=True)
+    q = req_str(request, "q", "", max_len=500)
+    if not q:
+        raise ValueError("搜索内容不能为空")
+    replace = opt_str(request, "replace", "", max_len=5000)
+    use_regex = opt_bool(request, "regex", False)
+    dry_run = opt_bool(request, "dry_run", True)
+
+    if use_regex:
+        try:
+            pattern = re.compile(q, re.MULTILINE)
+        except re.error as e:
+            raise ValueError(f"正则表达式非法：{e}")
+    else:
+        pattern = re.compile(re.escape(q), re.MULTILINE)
+    # 替换串统一走函数，避免 \1 / \g 之类被 re.sub 当成分组引用
+    substitute = lambda _m: replace  # noqa: E731
+
+    files = ws.files.all()
+    ids = p(request, "file_ids")
+    if isinstance(ids, list) and ids:
+        clean = [int(i) for i in ids[:200] if str(i).isdigit()]
+        if not clean:
+            raise ValueError("file_ids 必须是文件 ID 数组")
+        files = files.filter(id__in=clean)
+
+    results, total_hits, changed = [], 0, 0
+    for f in files[:200]:
+        content = f.content or ""
+        if not content or not pattern.search(content):
+            continue
+        hits, lines = 0, []
+        for no, line in enumerate(content.split("\n"), start=1):
+            found = pattern.findall(line)
+            if not found:
+                continue
+            hits += len(found)
+            lines.append({
+                "line": no,
+                "before": line[:400],
+                "after": pattern.sub(substitute, line)[:400],
+                "count": len(found),
+            })
+        if not hits:
+            continue
+        new_content = pattern.sub(substitute, content)
+        row = {
+            "file": f.id, "path": f.path, "hits": hits,
+            "lines": lines[:200], "line_count": len(lines),
+            "changed": new_content != content,
+        }
+        total_hits += hits
+        if not dry_run and new_content != content:
+            CodeVersion.objects.create(
+                file=f, content=content, message=f"替换前快照：{q[:40]}",
+                size=len(content.encode("utf-8")), created_by=request.user,
+            )
+            f.content = new_content
+            f.save()
+            changed += 1
+        results.append(row)
+
+    return ok({
+        "workspace": ws.id, "q": q, "replace": replace,
+        "regex": use_regex, "dry_run": dry_run,
+        "results": results, "file_count": len(results),
+        "total_hits": total_hits, "changed_files": changed,
+    })
 
 
 @endpoint(("PATCH", "POST"))
@@ -430,9 +734,274 @@ def file_batch(request):
         qs.update(is_favorite=True)
     elif action == "unfavorite":
         qs.update(is_favorite=False)
+    elif action == "move":
+        # 第 262 条：批量移动到目标目录（空字符串 = 根目录）
+        target = opt_str(request, "target", "", max_len=400).strip().replace("\\", "/").strip("/")
+        if ".." in target.split("/"):
+            raise ValueError("目标目录不能包含 ..")
+        files = list(qs)
+        if not files:
+            raise ValueError("没有可移动的文件")
+        ws_ids = {f.workspace_id for f in files}
+        if len(ws_ids) > 1:
+            raise ValueError("不支持跨工作区批量移动")
+        ws_id = ws_ids.pop()
+        moving_ids = [f.id for f in files]
+        taken = set(
+            CodeFile.objects.filter(workspace_id=ws_id).exclude(id__in=moving_ids)
+            .values_list("path", flat=True)
+        )
+        plans, conflicts = [], []
+        for f in files:
+            name = f.name or f.path.rsplit("/", 1)[-1]
+            new_path = f"{target}/{name}" if target else name
+            if new_path in taken or any(p == new_path for p, _ in plans):
+                conflicts.append(new_path)
+                continue
+            plans.append((new_path, f))
+        if conflicts:
+            raise ValueError("目标目录已存在同名文件：" + "、".join(conflicts[:10]))
+        for new_path, f in plans:
+            f.path = new_path
+            f.name = new_path.rsplit("/", 1)[-1]
+            f.language = rt.language_from_path(new_path)
+            f.save()
+        return ok({
+            "affected": len(plans), "action": action, "target": target,
+            "files": [file_brief(f, with_content=False) for _, f in plans],
+        })
     else:
         raise ValueError(f"不支持的操作: {action}")
     return ok({"affected": n, "action": action})
+
+
+@endpoint(("POST",))
+def file_copy(request, pk):
+    """同工作区复制文件为「name(副本).ext」（第 276 条）。"""
+    obj = get_file(request.user, pk, write=True)
+    directory = opt_str(request, "dir", "", max_len=400).strip().replace("\\", "/").strip("/")
+    if ".." in directory.split("/"):
+        raise ValueError("目标目录不能包含 ..")
+    if not directory:
+        directory = obj.path.rsplit("/", 1)[0] if "/" in obj.path else ""
+
+    base = obj.name or obj.path.rsplit("/", 1)[-1]
+    stem, dot, ext = base.rpartition(".")
+    if not dot or not stem:
+        stem, ext = base, ""
+    suffix = f".{ext}" if ext else ""
+
+    def _join(name):
+        return f"{directory}/{name}" if directory else name
+
+    new_name = f"{stem}(副本){suffix}"
+    seq = 2
+    while CodeFile.objects.filter(workspace_id=obj.workspace_id, path=_join(new_name)).exists():
+        new_name = f"{stem}(副本{seq}){suffix}"
+        seq += 1
+        if seq > 200:
+            raise ValueError("副本数量过多，请先清理同名文件")
+    new = CodeFile.objects.create(
+        workspace=obj.workspace, owner=request.user, path=_join(new_name),
+        name=new_name, language=obj.language, content=obj.content,
+        is_entry=False, order=obj.order,
+    )
+    return ok(file_brief(new))
+
+
+# ------------------------------------------------------------
+# 第 271/272 条：工作区内的 import / 相对路径引用扫描
+# ------------------------------------------------------------
+
+_PY_IMPORT_RE = re.compile(r"^[ \t]*(?:from[ \t]+([.\w]+)[ \t]+import|import[ \t]+([\w.,\t ]+))", re.M)
+_JS_IMPORT_RE = re.compile(
+    r"""(?:import\s[^'"]*?from\s*|require\s*\(\s*|import\s*\(\s*)['"]([^'"]+)['"]""", re.M
+)
+_C_INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.M)
+_PATH_REF_RE = re.compile(r"""['"]((?:\.{1,2}/)+[^'"\n]{1,120})['"]""")
+_WEB_EXTS = (".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs")
+
+
+def _scan_refs(path, content, language):
+    """扫描单个文件的引用：返回 [(原始引用, 类型)]，类型 import / relative。"""
+    refs = []
+    text = content or ""
+    if language == "python":
+        for m in _PY_IMPORT_RE.finditer(text):
+            if m.group(1):
+                refs.append((m.group(1), "import"))
+            else:
+                for part in (m.group(2) or "").split(","):
+                    name = part.strip().split(" as ")[0].strip()
+                    if name:
+                        refs.append((name, "import"))
+    elif language in ("javascript", "typescript"):
+        refs.extend((m.group(1), "import") for m in _JS_IMPORT_RE.finditer(text))
+    elif language in ("c", "cpp"):
+        refs.extend((m.group(1), "import") for m in _C_INCLUDE_RE.finditer(text))
+    # 通用：字符串里的相对路径（open("./data.txt") / fetch('../x.json')）
+    refs.extend((m.group(1), "relative") for m in _PATH_REF_RE.finditer(text))
+    seen, out = set(), []
+    for raw, kind in refs:
+        key = (raw, kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((raw, kind))
+    return out[:80]
+
+
+def _resolve_ref(raw, kind, src_path, path_set):
+    """把引用解析成工作区内的文件路径；解析不到返回 None。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    base_dir = posixpath.dirname(src_path)
+
+    def _norm(p):
+        return posixpath.normpath(p).lstrip("/")
+
+    def _exists(p):
+        return p if p in path_set else None
+
+    def _try(dirs, rel):
+        for d in dirs:
+            cand = _norm(posixpath.join(d, rel) if d else rel)
+            hit = _exists(cand)
+            if hit:
+                return hit
+            for ext in (".py", *_WEB_EXTS, ".h", ".hpp", ".c", ".cpp", ".json", ".txt", ".md"):
+                hit = _exists(cand + ext)
+                if hit:
+                    return hit
+            for idx in ("index.js", "index.ts", "__init__.py", "mod.rs", "main.py"):
+                hit = _exists(posixpath.join(cand, idx))
+                if hit:
+                    return hit
+        return None
+
+    # Python 相对导入：.helpers / ..pkg.mod（不含斜杠，与 JS 的 ./x 区分）
+    if kind == "import" and "/" not in raw and re.match(r"^\.+\w*$", raw):
+        dots = len(raw) - len(raw.lstrip("."))
+        rest = raw.lstrip(".").replace(".", "/")
+        base = base_dir
+        for _ in range(max(0, dots - 1)):
+            base = base.rsplit("/", 1)[0] if "/" in base else ""
+        if rest:
+            return _try([base], rest)
+        return _try([base], "__init__.py") or _try([base], "main.py") or _try([""], "__init__.py")
+
+    if kind == "relative" or raw.startswith(("./", "../")):
+        hit = _try([base_dir, ""], raw)
+        if hit or raw.startswith("."):
+            return hit
+
+    if kind == "import":
+        mod = raw.replace(".", "/")
+        return _try([base_dir, ""], mod)
+    return None
+
+
+def _workspace_graph(ws):
+    """构建工作区引用图：节点、边、未解析引用。"""
+    files = list(ws.files.all())
+    path_set = {f.path for f in files}
+    by_path = {f.path: f for f in files}
+    nodes = {f.id: {
+        "id": f.id, "path": f.path, "name": f.name, "language": f.language,
+        "is_entry": f.is_entry, "lines": f.lines, "in": 0, "out": 0,
+    } for f in files}
+    edges, unresolved = [], []
+    for f in files:
+        for raw, kind in _scan_refs(f.path, f.content, f.language):
+            target = _resolve_ref(raw, kind, f.path, path_set)
+            if not target:
+                unresolved.append({
+                    "file": f.id, "path": f.path, "ref": raw, "kind": kind,
+                    "reason": "外部依赖或文件不存在",
+                })
+                continue
+            tf = by_path[target]
+            if tf.id == f.id:
+                continue
+            edges.append({
+                "from": f.id, "to": tf.id, "from_path": f.path,
+                "to_path": tf.path, "kind": kind, "raw": raw,
+            })
+            nodes[f.id]["out"] += 1
+            nodes[tf.id]["in"] += 1
+    return nodes, edges, unresolved
+
+
+@endpoint(("GET",))
+def dependency_graph(request):
+    """工作区依赖图（第 271 条）：节点 / 边 / 未解析引用。"""
+    ws = get_ws(request.user, opt_num(request, "workspace", integer=True))
+    nodes, edges, unresolved = _workspace_graph(ws)
+    node_list = sorted(nodes.values(), key=lambda n: (n["path"]))
+    isolated = [n["path"] for n in node_list if not n["in"] and not n["out"] and not n["is_entry"]]
+    return ok({
+        "workspace": ws.id, "workspace_name": ws.name,
+        "nodes": node_list, "edges": edges[:2000],
+        "unresolved": unresolved[:200],
+        "stats": {
+            "files": len(node_list), "edges": len(edges),
+            "unresolved": len(unresolved), "isolated": len(isolated),
+        },
+        "isolated": isolated[:100],
+    })
+
+
+@endpoint(("GET",))
+def files_orphans(request):
+    """未被引用文件（第 272 条）：从入口文件遍历引用，返回可达之外的孤儿文件。"""
+    ws = get_ws(request.user, opt_num(request, "workspace", integer=True))
+    nodes, edges, _unresolved = _workspace_graph(ws)
+    files = {f.id: f for f in ws.files.all()}
+
+    ref_count = {}
+    for e in edges:
+        ref_count[e["to"]] = ref_count.get(e["to"], 0) + 1
+    outgoing = {}
+    for e in edges:
+        outgoing.setdefault(e["from"], set()).add(e["to"])
+
+    entries = [n["id"] for n in nodes.values() if n["is_entry"]]
+    if not entries:
+        # 没有显式入口：退化为 main.* / index.* / app.* / __init__.*
+        for n in nodes.values():
+            low = n["name"].lower()
+            if low.startswith(("main.", "index.", "app.", "__init__.")):
+                entries.append(n["id"])
+    if not entries and nodes:
+        entries = [min(nodes.values(), key=lambda n: n["path"].count("/"))["id"]]
+
+    reachable, queue = set(entries), list(entries)
+    while queue:
+        cur = queue.pop()
+        for nxt in outgoing.get(cur, ()):
+            if nxt not in reachable:
+                reachable.add(nxt)
+                queue.append(nxt)
+
+    items = []
+    for fid, n in nodes.items():
+        if fid in reachable:
+            continue
+        f = files.get(fid)
+        items.append({
+            "id": fid, "path": n["path"], "name": n["name"], "language": n["language"],
+            "lines": n["lines"], "size": f.size if f else 0,
+            "refs": ref_count.get(fid, 0), "is_entry": n["is_entry"],
+            "updated_at": f.updated_at if f else None,
+        })
+    items.sort(key=lambda x: (x["refs"], x["path"]))
+    return ok({
+        "workspace": ws.id, "workspace_name": ws.name,
+        "entries": [{"id": fid, "path": nodes[fid]["path"]} for fid in entries if fid in nodes],
+        "items": items, "total": len(items), "scanned": len(nodes),
+    })
+
 
 
 @endpoint(("GET",))
@@ -709,6 +1278,47 @@ def run_history(request):
 
 
 @endpoint(("GET",))
+def run_export(request):
+    """运行历史导出 CSV（第 274 条），流式输出避免大结果集占内存。"""
+    qs = CodeRun.objects.filter(owner=request.user)
+    lang = opt_str(request, "language").strip()
+    if lang:
+        qs = qs.filter(language=rt.normalize_language(lang))
+    status = opt_str(request, "status").strip()
+    if status:
+        qs = qs.filter(status=status)
+    limit = opt_num(request, "limit", 5000, integer=True, minimum=1, maximum=20000)
+    ids = list(qs.order_by("-created_at").values_list("id", flat=True)[:limit])
+    rows = qs.filter(id__in=ids).order_by("-created_at")
+
+    def _gen():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+
+        def _flush():
+            val = buf.getvalue()
+            buf.seek(0)
+            buf.truncate(0)
+            return val
+
+        writer.writerow(["时间", "语言", "状态", "耗时(ms)", "内存(KB)", "退出码", "代码摘要"])
+        yield "\ufeff" + _flush()
+        for r in rows.iterator(chunk_size=500):
+            summary = " ".join((r.source_code or "").split())[:120]
+            writer.writerow([
+                timezone.localtime(r.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+                r.language, r.status, r.duration_ms, r.memory_kb, r.exit_code, summary,
+            ])
+            yield _flush()
+
+    resp = StreamingHttpResponse(_gen(), content_type="text/csv; charset=utf-8")
+    from urllib.parse import quote
+    fname = quote(f"运行历史_{timezone.localdate()}.csv")
+    resp["Content-Disposition"] = f"attachment; filename*=UTF-8''{fname}"
+    return resp
+
+
+@endpoint(("GET",))
 def run_detail(request, pk):
     r = CodeRun.objects.filter(owner=request.user, id=pk).first()
     if not r:
@@ -852,6 +1462,55 @@ def run_presets(request):
     return ok({"items": [_preset_brief(o) for o in qs[:limit]]})
 
 
+@endpoint(("GET",))
+def run_presets_export(request):
+    """运行预设导出（第 279 条）：JSON，便于换设备/分享给同事。"""
+    qs = CodeRunPreset.objects.filter(owner=request.user)
+    lang = opt_str(request, "language").strip()
+    if lang:
+        qs = qs.filter(language=rt.normalize_language(lang))
+    items = [{
+        "language": o.language, "name": o.name, "stdin": o.stdin,
+        "args": o.args or [], "timeout": o.timeout, "is_default": o.is_default,
+    } for o in qs[:300]]
+    return ok({"items": items, "count": len(items), "exported_at": timezone.now()})
+
+
+@endpoint(("POST",))
+def run_presets_import(request):
+    """运行预设导入（第 279 条）：按「语言 + 名称」去重。"""
+    items = p(request, "items")
+    if not isinstance(items, list) or not items:
+        raise ValueError("items 必须是非空数组")
+    if len(items) > 300:
+        raise ValueError("单次最多导入 300 条预设")
+    existing = {(lang, name) for lang, name in
+                CodeRunPreset.objects.filter(owner=request.user).values_list("language", "name")}
+    created, skipped = [], 0
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        lang = rt.normalize_language(str(it.get("language") or "python"))
+        name = str(it.get("name") or "导入预设").strip()[:120] or "默认预设"
+        if (lang, name) in existing:
+            skipped += 1
+            continue
+        existing.add((lang, name))
+        stdin = str(it.get("stdin") or "")[:20000]
+        try:
+            timeout = float(it.get("timeout") or 5)
+        except (TypeError, ValueError):
+            timeout = 5.0
+        obj = CodeRunPreset.objects.create(
+            owner=request.user, language=lang, name=name, stdin=stdin,
+            args=_clean_args(it.get("args")),
+            timeout=min(30.0, max(0.5, timeout)),
+            is_default=bool(it.get("is_default")),
+        )
+        created.append(_preset_brief(obj))
+    return ok({"created": len(created), "skipped": skipped, "items": created})
+
+
 @endpoint(("POST", "DELETE"))
 def run_preset_detail(request, pk):
     """更新 / 删除一条运行参数预设（仅本人）。"""
@@ -892,14 +1551,27 @@ def run_preset_detail(request, pk):
 
 @endpoint(("POST",))
 def judge(request):
-    """多用例判题：逐个用例执行并比对输出。"""
+    """多用例判题：逐个用例执行并比对输出。
+
+    第 275 条：可选 set_id 叠加已保存的用例集。
+    """
     language = rt.normalize_language(req_str(request, "language", "python"))
     code = req_str(request, "code", "")
     cases = p(request, "testcases")
-    if not isinstance(cases, list) or not cases:
+    set_id = opt_num(request, "set_id", None, integer=True)
+    merged = []
+    if set_id:
+        case_set = CodeTestCaseSet.objects.filter(id=set_id, owner=request.user).first()
+        if not case_set:
+            raise ValueError(f"用例集不存在或无权访问: {set_id}")
+        merged.extend(c for c in (case_set.cases or []) if isinstance(c, dict))
+    if isinstance(cases, list) and cases:
+        merged.extend(cases)
+    if not merged:
         raise ValueError("testcases 必须是非空数组")
-    if len(cases) > 50:
+    if len(merged) > 50:
         raise ValueError("单次最多 50 个测试用例")
+    cases = merged
 
     # F672 批量启停：enabled === False 的用例判题时跳过（编号仍按原始序号）
     indexed = [
@@ -938,7 +1610,76 @@ def judge(request):
         "accepted": verdict == "accepted",
         "skipped": skipped,
         "disabled_cases": skipped,
+        "set_id": set_id,
     })
+
+
+# ------------------------------------------------------------
+# 第 275 条：判题用例集（保存 / 载入复用）
+# ------------------------------------------------------------
+
+
+def _case_set_brief(o):
+    return {
+        "id": o.id, "title": o.title, "language": o.language,
+        "cases": o.cases or [], "case_count": len(o.cases or []),
+        "created_at": o.created_at, "updated_at": o.updated_at,
+    }
+
+
+def _clean_cases(raw, limit=50):
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("cases 必须是非空数组")
+    out = []
+    for c in raw[:limit]:
+        if not isinstance(c, dict):
+            continue
+        row = {"stdin": str(c.get("stdin") or "")[:4000], "expected": str(c.get("expected") or "")[:8000]}
+        if c.get("enabled") is False:
+            row["enabled"] = False
+        out.append(row)
+    if not out:
+        raise ValueError("cases 至少要有一条有效用例")
+    return out
+
+
+@endpoint(("GET", "POST"))
+def judge_case_sets(request):
+    """用例集列表 / 新建（第 275 条，仅本人）。"""
+    if request.method == "POST":
+        obj = CodeTestCaseSet.objects.create(
+            owner=request.user,
+            title=req_str(request, "title", "未命名用例集").strip()[:200] or "未命名用例集",
+            language=rt.normalize_language(opt_str(request, "language", "python")),
+            cases=_clean_cases(p(request, "cases")),
+        )
+        return ok(_case_set_brief(obj))
+
+    qs = CodeTestCaseSet.objects.filter(owner=request.user)
+    lang = opt_str(request, "language").strip()
+    if lang:
+        qs = qs.filter(language=rt.normalize_language(lang))
+    limit = opt_num(request, "limit", 100, integer=True, minimum=1, maximum=300)
+    return ok({"items": [_case_set_brief(o) for o in qs[:limit]]})
+
+
+@endpoint(("POST", "DELETE"))
+def judge_case_set_detail(request, pk):
+    """更新 / 删除用例集（仅本人）。"""
+    obj = CodeTestCaseSet.objects.filter(id=pk, owner=request.user).first()
+    if not obj:
+        raise ValueError(f"用例集不存在或无权访问: {pk}")
+    if request.method == "DELETE":
+        obj.delete()
+        return ok({"deleted": pk})
+    if p(request, "title") is not None:
+        obj.title = str(p(request, "title")).strip()[:200] or obj.title
+    if p(request, "language") is not None:
+        obj.language = rt.normalize_language(str(p(request, "language")))
+    if p(request, "cases") is not None:
+        obj.cases = _clean_cases(p(request, "cases"))
+    obj.save()
+    return ok(_case_set_brief(obj))
 
 
 _VERDICT_ORDER = ["accepted", "wrong_answer", "runtime_error", "time_limit", "compile_error", "unavailable"]
@@ -1104,11 +1845,40 @@ def snippet_list(request):
         qs = qs.filter(folder=folder)
     if opt_bool(request, "favorite", False):
         qs = qs.filter(is_favorite=True)
+    # 第 280 条：sort=popular 按「引用数 + 复制数」倒序，同分再按更新时间
+    sort = opt_str(request, "sort", "").strip().lower()
+    if sort == "popular":
+        qs = qs.annotate(popularity=F("use_count") + F("copy_count")).order_by("-popularity", "-updated_at")
+    elif sort == "created":
+        qs = qs.order_by("-created_at")
+    elif sort == "title":
+        qs = qs.order_by("title")
     limit = opt_num(request, "limit", 50, integer=True, minimum=1, maximum=200)
-    return ok({"items": [_snippet_brief(s) for s in qs[:limit]]})
+    items = []
+    for s in qs[:limit]:
+        s._viewer_id = request.user.id
+        items.append(_snippet_brief(s))
+    return ok({"items": items, "sort": sort or "updated"})
+
+
+# 第 268 条：片段占位符 ${name}
+SNIPPET_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]{0,39})\}")
+
+
+def snippet_variables(code):
+    """解析 ${name} 占位符（按出现顺序去重，最多 30 个）。"""
+    out = []
+    for m in SNIPPET_VAR_RE.finditer(code or ""):
+        name = m.group(1)
+        if name not in out:
+            out.append(name)
+        if len(out) >= 30:
+            break
+    return out
 
 
 def _snippet_brief(s):
+    variables = snippet_variables(s.code)
     return {
         "id": s.id, "title": s.title, "description": s.description,
         "language": s.language, "tags": s.tags or [],
@@ -1119,6 +1889,7 @@ def _snippet_brief(s):
         "copy_count": s.copy_count, "use_count": s.use_count,
         "lines": (s.code or "").count("\n") + 1,
         "code": s.code,
+        "variables": variables, "variable_count": len(variables),
         "created_at": s.created_at, "updated_at": s.updated_at,
     }
 
@@ -1240,7 +2011,9 @@ def snippet_copy(request, pk):
             owner=request.user, scope="private", source_url=f"snippet:{s.id}",
         )
         CodeSnippet.objects.filter(id=s.id).update(copy_count=s.copy_count + 1)
-        return ok(_snippet_brief(new))
+        data = _snippet_brief(new)
+        data["is_mine"] = True
+        return ok(data)
     CodeSnippet.objects.filter(id=s.id).update(copy_count=s.copy_count + 1, use_count=s.use_count + 1)
     return ok({"id": s.id, "code": s.code, "copy_count": s.copy_count + 1})
 
@@ -1294,6 +2067,163 @@ def snippet_from_file(request):
         source_url=f"file:{f.id}",
     )
     return ok(_snippet_brief(s))
+
+
+@endpoint(("GET",))
+def snippet_export(request):
+    """片段库导出 JSON（第 267 条）：便于备份与跨账号迁移。"""
+    qs = CodeSnippet.objects.filter(owner=request.user).order_by("-updated_at")
+    items = [{
+        "title": s.title, "description": s.description, "language": s.language,
+        "code": s.code, "tags": s.tags or [], "folder": s.folder or "",
+    } for s in qs[:1000]]
+    return ok({
+        "items": items, "count": len(items),
+        "exported_at": timezone.now(), "version": 1,
+    })
+
+
+@endpoint(("POST",))
+def snippet_import(request):
+    """片段库导入 JSON（第 267 条）：按「标题 + 语言」去重。"""
+    items = p(request, "items")
+    if not isinstance(items, list) or not items:
+        raise ValueError("items 必须是非空数组")
+    if len(items) > 1000:
+        raise ValueError("单次最多导入 1000 条片段")
+    existing = {(t, l) for t, l in
+                CodeSnippet.objects.filter(owner=request.user).values_list("title", "language")}
+    created, skipped = [], 0
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        title = str(it.get("title") or "").strip()[:200]
+        code = str(it.get("code") or "")
+        if not title or not code.strip():
+            skipped += 1
+            continue
+        raw_lang = str(it.get("language") or "").strip()
+        lang = rt.normalize_language(raw_lang) if raw_lang else _guess_lang_from_code(code)
+        if (title, lang) in existing:
+            skipped += 1
+            continue
+        existing.add((title, lang))
+        tags = it.get("tags") or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        s = CodeSnippet.objects.create(
+            title=title, description=str(it.get("description") or ""),
+            language=lang, code=code, tags=list(tags)[:20],
+            folder=str(it.get("folder") or "").strip()[:60],
+            owner=request.user, scope="private", source_url="import:json",
+        )
+        created.append(_snippet_brief(s))
+    return ok({"created": len(created), "skipped": skipped, "items": created})
+
+
+def _safe_filename(raw, ext):
+    """把标题清洗成可用的文件名（保留中文，去掉路径分隔与非法字符）。"""
+    name = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", (raw or "").strip()).strip("._ ") or "snippet"
+    if not name.lower().endswith(ext.lower()):
+        name += ext
+    return name[:120]
+
+
+@endpoint(("POST",))
+def snippet_to_file(request, pk):
+    """片段生成代码文件（第 265 条）：按片段语言建 CodeFile 并记快照。"""
+    s = _get_snippet(request.user, pk)
+    ws = get_ws(request.user, req(request, "workspace"), write=True)
+    ext = rt.language_meta(s.language).get("ext", ".txt")
+    path = opt_str(request, "path", "", max_len=400).strip().replace("\\", "/").lstrip("/")
+    if not path:
+        path = _safe_filename(s.title, ext)
+    if ".." in path.split("/") or path.endswith("/"):
+        raise ValueError("文件路径不合法")
+    if CodeFile.objects.filter(workspace=ws, path=path).exists():
+        raise ValueError(f"目标路径已存在文件: {path}")
+    obj = CodeFile.objects.create(
+        workspace=ws, owner=request.user, path=path,
+        name=path.rsplit("/", 1)[-1], language=s.language, content=s.code,
+        is_entry=not ws.files.exists(),
+    )
+    # 操作记录：新文件落一条初始快照，溯源到片段
+    CodeVersion.objects.create(
+        file=obj, content=obj.content, message=f"由片段「{s.title}」生成",
+        size=len(obj.content.encode("utf-8")), created_by=request.user,
+    )
+    CodeSnippet.objects.filter(id=s.id).update(use_count=F("use_count") + 1)
+    return ok({"file": file_brief(obj), "snippet": s.id, "path": obj.path})
+
+
+# ============================================================
+# 第 273 条：本地代码格式化（去行尾空格 / 统一缩进 / 结尾换行 / 压缩空行）
+# ============================================================
+
+
+@endpoint(("POST",))
+def format_code(request):
+    """无外部依赖的轻量格式化，纯文本变换，不触碰工作区数据。"""
+    language = rt.normalize_language(opt_str(request, "language", "python"))
+    source = opt_str(request, "code", "", max_len=0)
+    if not source.strip():
+        raise ValueError("代码不能为空")
+    if len(source) > 400_000:
+        raise ValueError("源码超过 400KB 上限")
+    indent = opt_num(request, "indent", 4, integer=True, minimum=1, maximum=8)
+    max_blank = opt_num(request, "max_blank", 2, integer=True, minimum=0, maximum=5)
+    strip_trailing = opt_bool(request, "strip_trailing", True)
+    unify_tabs = opt_bool(request, "unify_tabs", True)
+    final_newline = opt_bool(request, "final_newline", True)
+
+    lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    changes = {"trailing_spaces": 0, "tabs": 0, "blank_lines": 0, "trailing_blank": 0,
+               "final_newline": False, "total_lines": len(lines)}
+    out = []
+    blank_run = 0
+    for line in lines:
+        new_line = line
+        if unify_tabs and "\t" in new_line:
+            lead = len(new_line) - len(new_line.lstrip(" \t"))
+            head = new_line[:lead].replace("\t", " " * indent)
+            new_line = head + new_line[lead:]
+            if new_line != line:
+                changes["tabs"] += 1
+        if strip_trailing:
+            stripped = new_line.rstrip(" \t")
+            if stripped != new_line:
+                changes["trailing_spaces"] += 1
+            new_line = stripped
+        if not new_line:
+            blank_run += 1
+            if blank_run > max_blank:
+                changes["blank_lines"] += 1
+                continue
+        else:
+            blank_run = 0
+        out.append(new_line)
+    # 去掉结尾空行，按需补一个换行符
+    tail = 0
+    while out and not out[-1]:
+        out.pop()
+        tail += 1
+    changes["trailing_blank"] = tail
+    formatted = "\n".join(out)
+    if final_newline:
+        formatted += "\n"
+        changes["final_newline"] = not source.endswith("\n")
+
+    return ok({
+        "language": language,
+        "formatted": formatted,
+        "changes": changes,
+        "changed": formatted != source,
+        "line_count": len(out),
+        "options": {"indent": indent, "max_blank": max_blank,
+                    "strip_trailing": strip_trailing, "unify_tabs": unify_tabs,
+                    "final_newline": final_newline},
+    })
+
 
 
 # ============================================================
@@ -1468,3 +2398,14 @@ def dependency_check(request):
         "third_party": sum(1 for r in rows if r["kind"] == "third_party"),
         "risky": risky, "risk_count": len(risky),
     })
+
+
+# ---------------------------------------------------------------------------
+# #47 重资源接口限流：只给代码执行 / REPL / 判题入口挂 ScopedRateThrottle，
+# scope 与速率见 config.settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]。
+# ---------------------------------------------------------------------------
+from rest_framework.throttling import ScopedRateThrottle as _ScopedRateThrottle  # noqa: E402
+
+for _view_fn, _scope in ((run, "code_run"), (run_repl, "code_run"), (judge, "code_judge")):
+    _view_fn.cls.throttle_classes = [_ScopedRateThrottle]
+    _view_fn.cls.throttle_scope = _scope

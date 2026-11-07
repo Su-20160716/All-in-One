@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""officesuite 路由：30 个业务子系统 × 249 接口 + 文档增强 3 + 目录 1 = 253 个 URL。
+"""officesuite 路由：30 个业务子系统 × 269 接口 + 文档增强 3 + 目录 1 = 270 个 URL。
 
 家族划分（与 views_*.py 的 *_FAMILY_COUNT 对应）：
-- flow     approval(12) seal(6) expense(8) travel(7) contract(8)      = 41
-- res      meeting(11) asset(9) vehicle(7) supplies(7) visitor(7) mailroom(5) = 46
+- flow     approval(13) seal(6) expense(8) travel(7) contract(8)       = 42
+- res      meeting(12) asset(12) vehicle(8) supplies(8) visitor(8) mailroom(6) = 54
 - people   duty(13) timesheet(9) training(10) recognition(6) standup(7)
-           okr(10) decision(7) todobox(11)                            = 73
-- know     faq(7) policy(7) template(7) wiki(11) minutes(9)
-           formcollect(8) announcement(8) poll(9) helpdesk(11)         = 78
-- calendar calendar(11)                                               = 11
+           okr(10) decision(7) todobox(11)                             = 73
+- know     faq(7) policy(8) template(7) wiki(12) minutes(12)
+           formcollect(9) announcement(8) poll(9) helpdesk(11)          = 83
+- calendar calendar(14)                                                = 14
 - catalog  目录                                                        = 1
 
 F681–F692 新增 15 个接口（235 → 250）：
@@ -19,6 +19,14 @@ F681–F692 新增 15 个接口（235 → 250）：
 
 F45–F47 文档增强 3 个接口（250 → 253）：
   annotations（GET/POST 同路径）· formula/eval · outline-from-note
+
+S26 办公升级 17 个接口（253 → 270，条目 351–372）：
+  approval/overdue-check · meeting/reminders/due · meeting/room/favorites ·
+  asset/check/create · asset/check/<pk> · asset/depreciation · vehicle/available ·
+  supplies/low-stock · visitor/invite/<code> · mailroom/remind ·
+  wiki/<pk>/export · policy/<pk>/remind · form/<pk>/stats ·
+  minutes/<pk>/action-items/sync · minutes/<pk>/action-items/to-calendar ·
+  calendar/export/ics · focus/today
 """
 from django.urls import path
 
@@ -59,6 +67,7 @@ urlpatterns = [
     path("approval/submit/", f.approval_submit),
     path("approval/my-submitted/", f.approval_my_submitted),
     path("approval/my-pending/", f.approval_my_pending),
+    path("approval/overdue-check/", f.approval_overdue_check),
     path("approval/stats/", f.approval_stats),
     path("approval/<int:pk>/", f.approval_detail),
     path("approval/<int:pk>/approve/", f.approval_approve),
@@ -105,23 +114,28 @@ urlpatterns = [
     path("contract/<int:pk>/payments/", f.contract_payments),
     path("contract/<int:pk>/delete/", f.contract_delete),
 
-    # ---- meeting（11：10 + F682 时长模板）----
+    # ---- meeting（12：10 + F682 时长模板 + S26 常用会议室/临近提醒）----
     path("meeting/room/create/", r.meeting_room_create),
     path("meeting/room/list/", r.meeting_room_list),
+    path("meeting/room/favorites/", r.meeting_room_favorites),
     path("meeting/room/<int:pk>/update/", r.meeting_room_update),
     path("meeting/room/<int:pk>/delete/", r.meeting_room_delete),
     path("meeting/room/<int:pk>/availability/", r.meeting_room_availability),
     path("meeting/duration-templates/", r.meeting_duration_templates),
+    path("meeting/reminders/due/", c.meeting_reminders_due),
     path("meeting/book/", r.meeting_book),
     path("meeting/booking/<int:pk>/cancel/", r.meeting_booking_cancel),
     path("meeting/booking/<int:pk>/detail/", r.meeting_booking_detail),
     path("meeting/my-bookings/", r.meeting_my_bookings),
     path("meeting/stats/", r.meeting_stats),
 
-    # ---- asset（9）----
+    # ---- asset（12：9 + S26 盘点 create/detail + 折旧）----
     path("asset/create/", r.asset_create),
     path("asset/list/", r.asset_list),
     path("asset/stats/", r.asset_stats),
+    path("asset/depreciation/", r.asset_depreciation),
+    path("asset/check/create/", r.asset_check_create),
+    path("asset/check/<int:pk>/", r.asset_check_detail),
     path("asset/my-held/", r.asset_my_held),
     path("asset/<int:pk>/update/", r.asset_update),
     path("asset/<int:pk>/delete/", r.asset_delete),
@@ -129,38 +143,42 @@ urlpatterns = [
     path("asset/<int:pk>/return/", r.asset_return),
     path("asset/<int:pk>/detail/", r.asset_detail),
 
-    # ---- vehicle（7）----
+    # ---- vehicle（8：7 + S26 空闲车辆）----
     path("vehicle/create/", r.vehicle_create),
     path("vehicle/list/", r.vehicle_list),
+    path("vehicle/available/", r.vehicle_available),
     path("vehicle/<int:pk>/update/", r.vehicle_update),
     path("vehicle/book/", r.vehicle_book),
     path("vehicle/booking/<int:pk>/approve/", r.vehicle_booking_approve),
     path("vehicle/booking/<int:pk>/cancel/", r.vehicle_booking_cancel),
     path("vehicle/my-bookings/", r.vehicle_my_bookings),
 
-    # ---- supplies（7）----
+    # ---- supplies（8：7 + S26 低库存明细）----
     path("supplies/item/create/", r.supplies_item_create),
     path("supplies/item/list/", r.supplies_item_list),
+    path("supplies/low-stock/", r.supplies_low_stock),
     path("supplies/item/<int:pk>/restock/", r.supplies_item_restock),
     path("supplies/apply/", r.supplies_apply),
     path("supplies/apply/<int:pk>/cancel/", r.supplies_apply_cancel),
     path("supplies/my-applies/", r.supplies_my_applies),
     path("supplies/stats/", r.supplies_stats),
 
-    # ---- visitor（7）----
+    # ---- visitor（8：7 + S26 免登录邀请码核验）----
     path("visitor/create/", r.visitor_create),
     path("visitor/list/", r.visitor_list),
     path("visitor/today/", r.visitor_today),
+    path("visitor/invite/<str:code>/", r.visitor_invite),
     path("visitor/<int:pk>/update/", r.visitor_update),
     path("visitor/<int:pk>/checkin/", r.visitor_checkin),
     path("visitor/<int:pk>/checkout/", r.visitor_checkout),
     path("visitor/<int:pk>/delete/", r.visitor_delete),
 
-    # ---- mailroom（5）----
+    # ---- mailroom（6：5 + S26 滞留催领）----
     path("mailroom/create/", r.mailroom_create),
     path("mailroom/list/", r.mailroom_list),
     path("mailroom/pending/", r.mailroom_pending),
     path("mailroom/stats/", r.mailroom_stats),
+    path("mailroom/remind/", r.mailroom_remind),
     path("mailroom/<int:pk>/pickup/", r.mailroom_pickup),
 
     # ---- duty（13：9 + F683 换班申请 4）----
@@ -261,13 +279,14 @@ urlpatterns = [
     path("faq/<int:pk>/delete/", k.faq_delete),
     path("faq/<int:pk>/vote/", k.faq_vote),
 
-    # ---- policy（7）----
+    # ---- policy（8：7 + S26 催办未阅）----
     path("policy/create/", k.policy_create),
     path("policy/list/", k.policy_list),
     path("policy/<int:pk>/", k.policy_detail),
     path("policy/<int:pk>/update/", k.policy_update),
     path("policy/<int:pk>/ack/", k.policy_ack),
     path("policy/<int:pk>/ack-list/", k.policy_ack_list),
+    path("policy/<int:pk>/remind/", k.policy_remind),
     path("policy/<int:pk>/delete/", k.policy_delete),
 
     # ---- template（7）----
@@ -279,7 +298,7 @@ urlpatterns = [
     path("template/<int:pk>/delete/", k.template_delete),
     path("template/<int:pk>/render/", k.template_render),
 
-    # ---- wiki（11：9 + F687 点赞/收藏）----
+    # ---- wiki（12：9 + F687 点赞/收藏 + S26 导出）----
     path("wiki/create/", k.wiki_create),
     path("wiki/list/", k.wiki_list),
     path("wiki/search/", k.wiki_search),
@@ -291,8 +310,9 @@ urlpatterns = [
     path("wiki/<int:pk>/move/", k.wiki_move),
     path("wiki/<int:pk>/like/", k.wiki_like),
     path("wiki/<int:pk>/star/", k.wiki_star),
+    path("wiki/<int:pk>/export/", k.wiki_export),
 
-    # ---- minutes（9：7 + F692 行动项 toggle/stats）----
+    # ---- minutes（12：7 + F692 行动项 toggle/stats + S26 落库/转日程）----
     path("minutes/create/", k.minutes_create),
     path("minutes/list/", k.minutes_list),
     path("minutes/stats/", k.minutes_stats),
@@ -301,10 +321,12 @@ urlpatterns = [
     path("minutes/<int:pk>/update/", k.minutes_update),
     path("minutes/<int:pk>/delete/", k.minutes_delete),
     path("minutes/<int:pk>/action-items/", k.minutes_action_items),
+    path("minutes/<int:pk>/action-items/sync/", k.minutes_action_items_sync),
     path("minutes/<int:pk>/action-items/toggle/", k.minutes_action_items_toggle),
+    path("minutes/<int:pk>/action-items/to-calendar/", k.minutes_action_items_to_calendar),
     path("minutes/<int:pk>/to-todo/", k.minutes_to_todo),
 
-    # ---- formcollect（8）----
+    # ---- formcollect（9：8 + S26 字段统计）----
     path("form/create/", k.form_create),
     path("form/list/", k.form_list),
     path("form/<int:pk>/", k.form_detail),
@@ -313,6 +335,7 @@ urlpatterns = [
     path("form/<int:pk>/submit/", k.form_submit),
     path("form/<int:pk>/entries/", k.form_entries),
     path("form/<int:pk>/export/", k.form_export),
+    path("form/<int:pk>/stats/", k.form_stats),
 
     # ---- announcement（8）----
     path("announcement/create/", k.announcement_create),
@@ -348,10 +371,11 @@ urlpatterns = [
     path("ticket/<int:pk>/priority/", k.ticket_priority),
     path("ticket/<int:pk>/rate/", k.ticket_rate),
 
-    # ---- calendar（11：9 + F681/F686 冲突预检 + F691 忙闲查询）----
+    # ---- calendar（14：9 + F681/F686 冲突预检 + F691 忙闲查询 + S26 导出/聚焦/会议提醒）----
     path("calendar/event/create/", c.calendar_event_create),
     path("calendar/conflict-check/", c.calendar_conflict_check),
     path("calendar/free-busy/", c.calendar_free_busy),
+    path("calendar/export/ics/", c.calendar_export_ics),
     path("calendar/event/list/", c.calendar_event_list),
     path("calendar/agenda/today/", c.agenda_today),
     path("calendar/agenda/week/", c.agenda_week),
@@ -361,12 +385,15 @@ urlpatterns = [
     path("calendar/event/<int:pk>/rsvp/", c.calendar_event_rsvp),
     path("calendar/event/<int:pk>/attendees/", c.calendar_event_attendees),
 
+    # ---- S26 今日聚焦（1，聚合日程/待办/审批）----
+    path("focus/today/", c.focus_today),
+
     # ---- 文档增强（F45–F47，3）----
     path("annotations/", dc.annotations, name="doc-annotations"),
     path("formula/eval/", dc.formula_eval, name="doc-formula-eval"),
     path("outline-from-note/", dc.outline_from_note, name="doc-outline-from-note"),
 ]
 
-_count = (1 + 41 + 46 + 73 + 78 + 11 + 3)
-assert len(urlpatterns) == 253 == _count, \
-    f"officesuite 接口数应为 253（1+41+46+73+78+11+3），实际 {len(urlpatterns)}"
+_count = (1 + 42 + 54 + 73 + 83 + 14 + 3)
+assert len(urlpatterns) == 270 == _count, \
+    f"officesuite 接口数应为 270（1+42+54+73+83+14+3），实际 {len(urlpatterns)}"

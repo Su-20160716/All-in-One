@@ -260,6 +260,11 @@ DANGEROUS_PATTERNS = [
     (r"shutdown\s+[-/][rs]", "关闭/重启系统"),
     (r"\breg\s+delete\b", "删除注册表项"),
     (r"chmod\s+-R\s+777\s+/(?:\s|$)", "危险的权限放大"),
+    # 沙箱逃逸：绝对路径/路径穿越读取、敏感文件、进程环境变量
+    (r"""(?:open|Path)\s*\(\s*[rbfuU]?['"](?:/|[A-Za-z]:[\\/])""", "读取绝对路径文件"),
+    (r"""(?:open|Path)\s*\(\s*[rbfuU]?['"][^'"]*\.\.[\\/]""", "路径穿越读取"),
+    (r"""\b(?:cat|type|more|less|head|tail)\s+[^\n]*(?:\.env|db\.sqlite3|settings\.py)""", "读取敏感文件"),
+    (r"""\b(?:process\.env|os\.environ)\b""", "读取进程环境变量"),
 ]
 
 # 环境变量白名单（子进程继承的最小集合）
@@ -471,6 +476,21 @@ def run_code(language, code, stdin="", timeout=None, args=None, env=None,
         raise ValueError(f"代码超过 {MAX_SOURCE_BYTES // 1024}KB 上限")
     if not spec:
         return _unavailable(lang, f"暂不支持的语言：{lang}")
+
+    # 生产默认关闭：没有容器级隔离时，代码执行等同于把服务器交给登录用户
+    try:
+        from django.conf import settings as _dj_settings
+        if not getattr(_dj_settings, "CODE_EXEC_ENABLED", True):
+            return {
+                "status": "disabled",
+                "stdout": "",
+                "stderr": "代码执行功能未启用（需部署方显式设置 CODE_EXEC_ENABLED=1 并配置隔离环境）",
+                "exit_code": -1,
+                "duration_ms": 0,
+                "disabled": True,
+            }
+    except Exception:
+        pass
 
     # 危险模式拦截
     hits = scan_dangerous(code)

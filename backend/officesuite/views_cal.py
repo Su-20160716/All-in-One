@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
-"""officesuite · 日程面接口：calendar(11) + 领域目录 catalog(1) = 12 个。
+"""officesuite · 日程面接口：calendar(14) + 领域目录 catalog(1) = 15 个。
 
 日程是横切能力：审批、会议、培训都可往里放 SuiteEvent。
 F681 冲突预检 / F682 时长模板入口 / F691 人员忙闲查询也挂在这里。
+S26：会议临近提醒 / .ics 导出 / 今日聚焦。
 """
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.db.models import Q
+from django.http import HttpResponse
 from django.utils import timezone
 
 from core.scoping import scope_queryset
+from core.validators import as_datetime
 
 from devtools.common import endpoint, ok, opt_bool, opt_num, opt_str, p, req_str
 from officesuite.common import flow_event, get_obj, obj_dict, parse_day, parse_dt
-from officesuite.models import RoomBooking, SuiteEvent, VehicleBooking
+from officesuite.models import (ApprovalRequest, DutyShift, RoomBooking,
+                                SuiteEvent, TodoItem, VehicleBooking)
 
 
 def _event_conflicts(user, start, end, exclude_id=None, limit=10):
@@ -99,11 +103,15 @@ def calendar_event_create(request):
     F681：返回 `conflicts` 时间重叠提示（仅提示不阻断）；
     F682：支持 `duration_minutes` 快速时长（15/30/60 模板），未传 end_at 时按它算结束时间。
     """
-    start = parse_dt(req_str(request, "start_at"), "start_at")
-    end = parse_dt(opt_str(request, "end_at"), "end_at", allow_empty=True)
+    start = as_datetime(req_str(request, "start_at"), "start_at")
+    end_raw = opt_str(request, "end_at", "").strip()
+    end = as_datetime(end_raw, "end_at") if end_raw else None
     duration = opt_num(request, "duration_minutes", None, minimum=1, maximum=24 * 60)
     if end is None and duration:
         end = start + timedelta(minutes=int(duration))
+    # #73：先保证时间区间合法，再做冲突检测（倒置/零长度日程直接拒绝）
+    if end is not None and end <= start:
+        raise ValueError("结束时间必须晚于开始时间")
 
     conflicts = _event_conflicts(request.user, start, end)
 
@@ -145,6 +153,70 @@ def calendar_event_list(request):
                                          "attendees": o.attendees}
                          for o in qs[:200]],
                "count": qs.count()})
+
+
+def _ics_utc(dt):
+    """S26-359：ICS 时间统一用 UTC 的 20260101T100000Z 形式。"""
+    return dt.astimezone(dt_timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _ics_text(text):
+    """ICS 文本转义：反斜杠 / 逗号 / 分号 / 换行，并按 75 字节折行。"""
+    s = str(text or "").replace("\\", "\\\\").replace(";", "\\;")
+    s = s.replace(",", "\\,").replace("\r\n", "\\n").replace("\n", "\\n")
+    out, buf = [], ""
+    for ch in s:
+        if len((buf + ch).encode("utf-8")) > 73:
+            out.append(buf)
+            buf = " " + ch
+        else:
+            buf += ch
+    out.append(buf)
+    return "\r\n".join(out)
+
+
+@endpoint(("GET",))
+def calendar_export_ics(request):
+    """S26-359 日程导出 .ics：VCALENDAR 含 UID/DTSTART/DTEND/SUMMARY/LOCATION。"""
+    start = parse_day(opt_str(request, "start"), "start", allow_empty=True)
+    end = parse_day(opt_str(request, "end"), "end", allow_empty=True)
+    qs = scope_queryset(SuiteEvent.objects.all(), request.user).order_by("start_at")
+    if start:
+        qs = qs.filter(start_at__gte=timezone.make_aware(
+            datetime(start.year, start.month, start.day, 0, 0)))
+    if end:
+        qs = qs.filter(start_at__lt=timezone.make_aware(
+            datetime(end.year, end.month, end.day, 0, 0)) + timedelta(days=1))
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//QoderCN//Officesuite Calendar//ZH-CN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+    ]
+    exported = 0
+    for e in qs[:1000]:
+        e_end = e.end_at or (e.start_at + timedelta(hours=1))
+        location = str((e.data or {}).get("location") or "")
+        lines.extend([
+            "BEGIN:VEVENT",
+            f"UID:event-{e.id}@officesuite",
+            f"DTSTAMP:{_ics_utc(timezone.now())}",
+            f"DTSTART:{_ics_utc(e.start_at)}",
+            f"DTEND:{_ics_utc(e_end)}",
+            f"SUMMARY:{_ics_text(e.title or '日程')}",
+        ])
+        if location:
+            lines.append(f"LOCATION:{_ics_text(location)}")
+        lines.extend(["STATUS:CONFIRMED", "END:VEVENT"])
+        exported += 1
+    lines.append("END:VCALENDAR")
+    body = "\r\n".join(lines) + "\r\n"
+    resp = HttpResponse(body.encode("utf-8"),
+                        content_type="text/calendar; charset=utf-8")
+    resp["Content-Disposition"] = "attachment; filename=calendar.ics"
+    resp["X-Event-Count"] = str(exported)
+    return resp
 
 
 @endpoint()
@@ -256,6 +328,117 @@ def agenda_week(request):
                         for i in range(7)]})
 
 
+@endpoint()
+def meeting_reminders_due(request):
+    """S26-356 会议临近提醒：扫窗口内开始的 room 资源事件 / 房间预订并通知参会人。
+
+    通过 Notification（recipient + link）去重，避免反复扫描重复轰炸。
+    """
+    window = int(opt_num(request, "window", 15, integer=True, minimum=1, maximum=180))
+    now = timezone.now()
+    lo, hi = now, now + timedelta(minutes=window)
+    from accounts.models import User
+    from core.models import Notification
+    from core.notify import dispatch
+
+    def _targets(names):
+        out = []
+        for name in dict.fromkeys([str(n).strip() for n in names if str(n).strip()]):
+            u = User.objects.filter(Q(username=name) | Q(nickname=name)).first()
+            if u is not None:
+                out.append(u)
+        return out[:50]
+
+    notified = skipped = 0
+    items = []
+
+    events = scope_queryset(
+        SuiteEvent.objects.filter(start_at__gte=lo, start_at__lt=hi), request.user
+    ).order_by("start_at")[:200]
+    for e in events:
+        resource = str((e.data or {}).get("resource") or "")
+        if not resource.startswith("room:"):
+            continue
+        link = f"/officesuite/meeting?event={e.id}"
+        title = f"会议即将开始：{e.title or '会议'}"
+        people = _targets([e.owner.username] + list(e.attendees or []))
+        hit = 0
+        for u in people:
+            if Notification.objects.filter(recipient=u, link=link,
+                                           created_at__gte=now - timedelta(hours=2)).exists():
+                skipped += 1
+                continue
+            if dispatch(u, title,
+                        f"{timezone.localtime(e.start_at):%H:%M} 开始（{resource}），请准时参加。",
+                        category="system", level="info", link=link) is not None:
+                notified += 1
+                hit += 1
+        items.append({"kind": "event", "id": e.id, "title": e.title,
+                      "resource": resource, "start_at": e.start_at.isoformat(),
+                      "targets": len(people), "notified": hit})
+
+    bookings = RoomBooking.objects.filter(status="booked", start_at__gte=lo,
+                                          start_at__lt=hi).order_by("start_at")[:200]
+    for b in bookings:
+        link = f"/officesuite/meeting?booking={b.id}"
+        title = f"会议即将开始：{b.title or b.room.name}"
+        people = _targets([b.owner.username] + list((b.data or {}).get("attendees") or []))
+        hit = 0
+        for u in people:
+            if Notification.objects.filter(recipient=u, link=link,
+                                           created_at__gte=now - timedelta(hours=2)).exists():
+                skipped += 1
+                continue
+            if dispatch(u, title,
+                        f"{timezone.localtime(b.start_at):%H:%M} 在 {b.room.name} 开始，请准时参加。",
+                        category="system", level="info", link=link) is not None:
+                notified += 1
+                hit += 1
+        items.append({"kind": "booking", "id": b.id, "title": b.title,
+                      "resource": f"room:{b.room_id}", "room": b.room.name,
+                      "start_at": b.start_at.isoformat(),
+                      "targets": len(people), "notified": hit})
+
+    return ok({"window": window, "from": lo.isoformat(), "to": hi.isoformat(),
+               "scanned": len(items), "notified": notified, "skipped": skipped,
+               "items": items})
+
+
+@endpoint(("GET",))
+def focus_today(request):
+    """S26-360 今日聚焦：当日日程 + 今日/逾期待办 + 待我审批，聚合一屏。"""
+    now = timezone.localtime()
+    lo = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    hi = lo + timedelta(days=1)
+    events = scope_queryset(
+        SuiteEvent.objects.filter(start_at__gte=lo, start_at__lt=hi), request.user
+    ).order_by("start_at")[:100]
+    today = timezone.localdate()
+    todos = (TodoItem.objects.filter(owner=request.user, done=False, due_date__lte=today)
+             .order_by("due_date", "id")[:100])
+    pending = (scope_queryset(ApprovalRequest.objects.filter(status="pending"), request.user)
+               .exclude(owner=request.user).order_by("-created_at"))
+    return ok({
+        "date": str(today),
+        "agenda": [{"id": e.id, "title": e.title, "kind": e.kind,
+                    "start_at": e.start_at.isoformat(),
+                    "end_at": e.end_at.isoformat() if e.end_at else None,
+                    "location": (e.data or {}).get("location", "")} for e in events],
+        "agenda_count": len(events),
+        "todos": [{"id": t.id, "title": t.title, "priority": t.priority,
+                   "due_date": t.due_date.isoformat() if t.due_date else None,
+                   "overdue": bool(t.due_date and t.due_date < today),
+                   "important": t.important} for t in todos],
+        "todo_count": len(todos),
+        "overdue_count": sum(1 for t in todos if t.due_date and t.due_date < today),
+        "approvals": {"count": pending.count(),
+                      "items": [{"id": r.id, "title": r.title,
+                                 "owner": r.owner.username,
+                                 "created_at": r.created_at.isoformat()}
+                                for r in pending[:5]]},
+    })
+
+
 @endpoint(("GET", "POST"))
 def calendar_conflict_check(request):
     """F681 + F686 冲突预检：创建日程/预约前先查时间重叠与同资源占用。
@@ -297,8 +480,6 @@ def calendar_free_busy(request):
           work_start / work_end（HH:MM）。
     """
     from datetime import datetime as _dt, time as _time
-
-    from officesuite.models import DutyShift
 
     ref = parse_day(opt_str(request, "date"), "date", allow_empty=True) or timezone.localdate()
     lo = timezone.make_aware(_dt(ref.year, ref.month, ref.day, 0, 0))
@@ -355,7 +536,7 @@ def calendar_free_busy(request):
         for a in (e.attendees or [])[:50]:
             _add(str(a), s, en, e.title or "日程", "event")
 
-    shifts = DutyShift.objects.filter(duty_date=ref)
+    shifts = scope_queryset(DutyShift.objects.filter(duty_date=ref), request.user)
     for sh in shifts[:300]:
         _add(sh.member_name, win_lo, win_hi,
              f"值班 {sh.shift_name}（{sh.schedule.name}）", "duty")
@@ -363,6 +544,9 @@ def calendar_free_busy(request):
     # 指定名单过滤（否则返回当日有记录的全部成员）
     names = opt_str(request, "names", "").strip()
     wanted = [n.strip() for n in names.split(",") if n.strip()] or sorted(busy.keys())
+    self_names = {request.user.username,
+                  getattr(request.user, "display_name", request.user.username)}
+    self_names.discard("")
 
     def _merge(intervals):
         out = []
@@ -399,17 +583,21 @@ def calendar_free_busy(request):
                        if it["end_min"] > work_start.hour * 60 + work_start.minute
                        and it["start_min"] < end_m)
         busy_min = max(0, min(busy_min, win_total))
+        # #40：他人只暴露忙/闲布尔（不返回时段与事件/值班标题）
+        is_self = name in self_names
+        busy_payload = [{"start": f"{it['start_min'] // 60:02d}:{it['start_min'] % 60:02d}",
+                         "end": f"{it['end_min'] // 60:02d}:{it['end_min'] % 60:02d}",
+                         "title": it["title"], "source": it["source"]} for it in merged] \
+            if is_self else bool(merged)
         people.append({
             "name": name,
-            "busy": [{"start": f"{it['start_min'] // 60:02d}:{it['start_min'] % 60:02d}",
-                      "end": f"{it['end_min'] // 60:02d}:{it['end_min'] % 60:02d}",
-                      "title": it["title"], "source": it["source"]} for it in merged],
-            "free": free,
+            "busy": busy_payload,
+            "free": free if is_self else not merged,
             "busy_minutes": busy_min,
             "free_minutes": max(0, win_total - busy_min),
             "free_percent": round((win_total - busy_min) * 100 / win_total, 1) if win_total else 0,
             "status": "busy" if free == [] else ("free" if not merged else "partial"),
-            "best_slot": free[0] if free else None,
+            "best_slot": (free[0] if free else None) if is_self else None,
         })
     return ok({
         "date": str(ref),
@@ -428,28 +616,28 @@ def calendar_free_busy(request):
 # S3-B2/B17：提取为模块级常量——suite_catalog 与冒烟脚本共用同一事实源，
 # 加接口只改这里，两边永远不会脱节。
 OFFICE_SUBSYSTEMS = [
-    ("approval", "通用审批", 12), ("seal", "用印管理", 6),
+    ("approval", "通用审批", 13), ("seal", "用印管理", 6),
     ("expense", "报销管理", 8), ("travel", "差旅申请", 7),
     ("contract", "合同台账", 8),
-    ("meeting", "会议室预订", 11), ("asset", "固定资产", 9),
-    ("vehicle", "车辆管理", 7), ("supplies", "办公用品", 7),
-    ("visitor", "访客登记", 7), ("mailroom", "快递代收", 5),
+    ("meeting", "会议室预订", 12), ("asset", "固定资产", 12),
+    ("vehicle", "车辆管理", 8), ("supplies", "办公用品", 8),
+    ("visitor", "访客登记", 8), ("mailroom", "快递代收", 6),
     ("duty", "值班排班", 13), ("timesheet", "工时填报", 9),
     ("training", "培训管理", 10), ("recognition", "表彰墙", 6),
     ("standup", "每日站会", 7), ("okr", "OKR 目标", 10),
     ("decision", "决策记录", 7), ("todobox", "轻待办", 11),
-    ("faq", "FAQ 知识", 7), ("policy", "制度文档", 7),
-    ("template", "文档模板", 7), ("wiki", "团队 Wiki", 11),
-    ("minutes", "会议纪要", 9), ("formcollect", "收集表单", 8),
+    ("faq", "FAQ 知识", 7), ("policy", "制度文档", 8),
+    ("template", "文档模板", 7), ("wiki", "团队 Wiki", 12),
+    ("minutes", "会议纪要", 12), ("formcollect", "收集表单", 9),
     ("announcement", "部门公告", 8), ("poll", "投票", 9),
-    ("helpdesk", "工单", 11), ("calendar", "共享日程", 11),
+    ("helpdesk", "工单", 11), ("calendar", "共享日程", 14),
     ("docenh", "文档增强", 3),
 ]
 
 
 @endpoint(("GET",))
 def suite_catalog(request):
-    """officesuite 目录：31 个子系统 × 252 接口 + 目录 = 253（供前端动态渲染）。"""
+    """officesuite 目录：30 个子系统 × 269 接口 + 目录 = 270（供前端动态渲染）。"""
     subsystems = OFFICE_SUBSYSTEMS
     return ok({
         "domain": "officesuite", "domain_name": "办公套件",
@@ -460,8 +648,10 @@ def suite_catalog(request):
         "endpoint_count": sum(c for _, _, c in subsystems) + 1,
         "note": "endpoint_count 含本目录接口；F681–F692 新增冲突预检/时长模板/换班申请/"
                 "满意度评分/轮询分配/点赞收藏/重复规则/四象限/忙闲与行动项统计；"
+                "S26 新增会议提醒/常用会议室/.ics 导出/今日聚焦/审批超时/空闲车辆/"
+                "低库存/资产盘点与折旧/邀请码/快递催领/Wiki 导出/制度催办/表单统计/行动项转日程；"
                 "F45–F47 新增文档批注/表格公式/演示大纲（文档增强）",
     })
 
 
-CAL_FAMILY_COUNT = 11 + 1  # = 12（calendar 11 + catalog 1）
+CAL_FAMILY_COUNT = 14 + 1  # = 15（calendar 14 + catalog 1）

@@ -147,13 +147,13 @@ class CodeCollabConsumer(AsyncJsonWebsocketConsumer):
     # ---- 数据库操作 ----
     @database_sync_to_async
     def _can_edit(self):
-        from core.scoping import is_visible
+        from core.scoping import can_write
         from code.models import CodeFile
 
         obj = CodeFile.objects.filter(pk=self.file_id).first()
         if obj is None:
             return False
-        return is_visible(obj, self.user)
+        return can_write(self.user, obj)
 
     @database_sync_to_async
     def _load_state(self):
@@ -178,18 +178,27 @@ class CodeCollabConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def _append_update(self, update: str, user_id: int) -> int:
+        """#62：行锁内取号后追加增量，避免并发 append 丢更新。
+
+        与笔记侧（NoteCollabUpdate 独立表）同一套语义；code app 的 update 表
+        本次未建，故仍在 JSON 列内追加，但「读-改-写」整段收进行锁事务内，
+        并发写入不再互相覆盖 revision / update_log。
+        """
+        from django.db import transaction
+
         from code.models import CodeCollabState
 
-        state, _ = CodeCollabState.objects.get_or_create(file_id=self.file_id)
-        log = list(state.update_log or [])
-        log.append(update)
-        state.update_log = log
-        state.revision += 1
-        contributors = [c for c in (state.contributors or []) if c != user_id]
-        contributors.insert(0, user_id)
-        state.contributors = contributors[:10]
-        state.save(update_fields=["update_log", "revision", "contributors", "updated_at"])
-        return len(log)
+        with transaction.atomic():
+            state, _ = CodeCollabState.objects.select_for_update().get_or_create(file_id=self.file_id)
+            log = list(state.update_log or [])
+            log.append(update)
+            state.update_log = log
+            state.revision += 1
+            contributors = [c for c in (state.contributors or []) if c != user_id]
+            contributors.insert(0, user_id)
+            state.contributors = contributors[:10]
+            state.save(update_fields=["update_log", "revision", "contributors", "updated_at"])
+            return len(log)
 
     @database_sync_to_async
     def _save_snapshot(self, snapshot: str, text: str, user_id: int) -> int:
@@ -213,6 +222,9 @@ class CodeCollabConsumer(AsyncJsonWebsocketConsumer):
                         size=len(f.content.encode("utf-8")),
                     )
                 f.content = text[:400000]
+                # #63：落库前按最终正文重算字节数与行数，避免 size/lines 与正文不一致
+                f.size = len(f.content.encode("utf-8"))
+                f.lines = f.content.count("\n") + 1 if f.content else 0
                 f.save(update_fields=["content", "size", "lines", "updated_at"])
         return state.revision
 

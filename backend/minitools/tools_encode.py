@@ -35,6 +35,8 @@ def _b58_encode(b: bytes) -> str:
 
 
 def _b58_decode(s: str) -> bytes:
+    if len(s) > 4096:
+        raise ValueError("Base58 输入过长（上限 4096 字符）")
     n = 0
     for ch in s:
         n = n * 58 + _B58.index(ch)

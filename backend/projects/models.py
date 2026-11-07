@@ -91,6 +91,9 @@ class TaskCard(models.Model):
     sort_order = models.IntegerField(default=0, verbose_name="列内排序")
     started_at = models.DateTimeField(null=True, blank=True, verbose_name="开始时间")
     completed_at = models.DateTimeField(null=True, blank=True, verbose_name="完成时间")
+    # 300：标记解决的问题卡片，保留解决原因供时间线展示
+    resolved_at = models.DateTimeField(null=True, blank=True, verbose_name="解决时间")
+    resolve_reason = models.CharField(max_length=200, blank=True, verbose_name="解决说明")
     last_overdue_notified_at = models.DateTimeField(null=True, blank=True, verbose_name="上次逾期提醒时间")
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="created_cards", verbose_name="创建者"
@@ -108,6 +111,12 @@ class TaskCard(models.Model):
         indexes = [
             models.Index(fields=["board", "sort_order"],
                          name="taskcard_board_sort_idx"),
+            # #142：MyTasks / 日历 / 逾期统计按 board 取到期日、或按 due_date + status 过滤，
+            # 原表无任何 due_date 索引，只能全表扫描后排序。待迁移：makemigrations projects。
+            models.Index(fields=["board", "due_date"],
+                         name="taskcard_board_due_idx"),
+            models.Index(fields=["due_date", "status"],
+                         name="taskcard_due_status_idx"),
         ]
 
     def __str__(self):
@@ -229,6 +238,8 @@ class BoardShareLink(models.Model):
     is_revoked = models.BooleanField(default=False, verbose_name="已失效")
     expire_at = models.DateTimeField(null=True, blank=True, verbose_name="过期时间")
     view_count = models.IntegerField(default=0, verbose_name="浏览次数")
+    # 282：访问口令（make_password 哈希，空串表示无口令）
+    password_hash = models.CharField(max_length=128, blank=True, default="", verbose_name="访问口令哈希")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
 
     class Meta:
@@ -283,6 +294,8 @@ class Milestone(models.Model):
     description = models.TextField(blank=True, verbose_name="描述")
     due_date = models.DateField(null=True, blank=True, verbose_name="目标日期")
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="planned", verbose_name="状态")
+    # 287：临期里程碑每日提醒去重（距上次提醒 <20 小时不重复发）
+    last_notified_at = models.DateTimeField(null=True, blank=True, verbose_name="上次提醒时间")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
 
@@ -306,6 +319,8 @@ class CardTemplate(models.Model):
     labels = models.JSONField(default=list, blank=True, verbose_name="标签")
     story_points = models.IntegerField(default=0, verbose_name="故事点")
     estimated_minutes = models.IntegerField(default=0, verbose_name="预估工时(分钟)")
+    # 288：模板携带验收清单文本，套用时一并回填
+    dod_items = models.JSONField(default=list, blank=True, verbose_name="验收清单")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
 
     class Meta:
@@ -333,3 +348,20 @@ class AcceptanceItem(models.Model):
 
     def __str__(self):
         return self.content
+
+
+class CardWatcher(models.Model):
+    """295 卡片关注者：卡片变更只推送给关注者，避免全项目噪音"""
+
+    card = models.ForeignKey(TaskCard, on_delete=models.CASCADE, related_name="watchers", verbose_name="卡片")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="watched_cards", verbose_name="关注人")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="关注时间")
+
+    class Meta:
+        verbose_name = "卡片关注"
+        verbose_name_plural = "卡片关注"
+        unique_together = [("card", "user")]
+
+    def __str__(self):
+        return f"{self.user_id} watch {self.card_id}"
+

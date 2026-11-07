@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """devtools 路由：text/str/md/json/log/encode/regex + hash/token/code/diff/id/file/qr/web/db
-+ num/color/date/cron/math/unit + net/fake/fun，共 138 个 URL（含目录）。"""
++ num/color/date/cron/math/unit + net/fake/fun，共 168 个 URL（含目录）。"""
 from django.urls import path
 
 from . import views_code as c
@@ -17,24 +17,27 @@ SUBSYSTEMS = [
     ("json", "JSON 进阶", ["flatten", "unflatten", "merge", "ndjson", "stats", "pick"]),
     ("log", "日志分析", ["parse", "level-stat", "timeframe", "topn", "filter"]),
     ("encode", "编码转换", ["base32", "base85", "qp", "unicode-escape", "punycode"]),
-    ("regex", "正则实验室", ["replace", "extract", "split", "explain", "grep", "template", "debug"]),
+    ("regex", "正则实验室", ["replace", "extract", "split", "explain", "grep", "template", "debug", "cases"]),
     ("data", "结构化数据互转", ["yaml", "toml", "xml", "convert"]),
     ("hash", "哈希扩展", ["crc32", "adler32", "sha3", "hmac", "blake2"]),
     ("token", "令牌与密钥", ["jwt-sign", "jwt-verify", "apikey", "otp", "nanoid", "password-audit"]),
-    ("code", "代码工具", ["minify-css", "beautify", "lang-detect", "loc", "todo-scan", "gitmoji"]),
-    ("diff", "差异对比", ["text", "word", "json", "similarity", "patch"]),
-    ("id", "标识符", ["uuid-multi", "shortid", "checksum", "luhn-gen"]),
+    ("code", "代码工具", ["minify-css", "beautify", "lang-detect", "loc", "todo-scan", "gitmoji",
+                          "complexity", "import-graph"]),
+    ("diff", "差异对比", ["text", "word", "json", "similarity", "patch", "three-way"]),
+    ("id", "标识符", ["uuid-multi", "shortid", "checksum", "luhn-gen", "snowflake-parse"]),
     ("file", "文件工具", ["data-url", "csv-clean", "magic", "zip-list", "encoding-detect", "line-endings"]),
     ("qr", "码制", ["generate", "info", "barcode39"]),
     ("web", "接口助手", ["curl-parse", "jsonpath", "dotpath", "http-status", "headers", "querystring"]),
-    ("db", "SQL 助手", ["sql-format", "sql-minify", "where-builder", "join-explain", "epoch"]),
+    ("db", "SQL 助手", ["sql-format", "sql-minify", "where-builder", "join-explain", "epoch", "sql-to-model"]),
     ("num", "数字进制", ["base", "ieee754", "bitwise", "combinatorics", "format", "rounding"]),
     ("color", "颜色实验室", ["contrast", "mix", "scale", "nearest", "shade", "filter"]),
-    ("date", "日期数学", ["add", "workdays", "week-info", "quarter-info", "seq", "countdown"]),
-    ("cron", "CRON 表达式", ["parse", "validate", "from-interval", "shift"]),
+    ("date", "日期数学", ["add", "workdays", "week-info", "quarter-info", "seq", "countdown",
+                          "timestamp-batch"]),
+    ("cron", "CRON 表达式", ["parse", "validate", "from-interval", "shift", "next-runs"]),
     ("math", "数学扩展", ["matrix", "linear-solve", "primes", "expr", "dist", "dijkstra"]),
     ("unit", "单位换算", ["data-size", "angle", "speed", "apparel"]),
-    ("net", "网络工具", ["ip-calc", "ip-classify", "url-parse", "url-build", "ua-parse", "mime-lookup"]),
+    ("net", "网络工具", ["ip-calc", "ip-classify", "url-parse", "url-build", "ua-parse", "mime-lookup",
+                          "cidr-merge"]),
     ("fake", "模拟数据", ["person", "company", "address", "lorem", "batch", "net", "bank-card"]),
     ("fun", "趣味盒子", ["fortune", "dice", "lottery", "team-splitter", "coinflip", "emoji", "today", "zodiac"]),
     ("cheatsheet", "速查手册", ["md", "git", "vim", "shell", "regex", "http", "python", "sql"]),
@@ -108,12 +111,20 @@ VIEWS = {
     "asciiart/banner/": x.asciiart_banner, "asciiart/box/": x.asciiart_box, "asciiart/table/": x.asciiart_table,
     "asciiart/block/": x.asciiart_block, "asciiart/sparkline/": x.asciiart_sparkline,
     "asciiart/progress/": x.asciiart_progress,
+    # ---- 第三轮 S26（391–398，8 个：静态分析 / 合并 / 反解 / DDL）----
+    "code/complexity/": c.code_complexity, "code/import-graph/": c.code_import_graph,
+    "regex/cases/": t.regex_cases,
+    "diff/three-way/": c.diff_three_way,
+    "cron/next-runs/": m.cron_next_runs,
+    "net/cidr-merge/": x.net_cidr_merge,
+    "id/snowflake-parse/": c.id_snowflake_parse,
+    "db/sql-to-model/": c.db_sql_to_model,
 }
 
 
 @endpoint(("GET",))
 def devtools_catalog(request):
-    """目录：28 个子系统 × 160 接口的路由总览（供前端动态渲染）。"""
+    """目录：28 个子系统 × 167 接口的路由总览（供前端动态渲染）。"""
     return ok({
         "domain": "devtools", "domain_name": "开发者工具箱",
         "subsystems": [{"key": k, "name": n, "endpoints": eps,
@@ -128,4 +139,4 @@ urlpatterns = [path("catalog/", devtools_catalog, name="devtools-catalog")]
 for _route, _view in VIEWS.items():
     urlpatterns.append(path(_route, _view))
 
-assert len(urlpatterns) == 160, f"devtools 接口数应为 160，实际 {len(urlpatterns)}"
+assert len(urlpatterns) == 168, f"devtools 接口数应为 168，实际 {len(urlpatterns)}"

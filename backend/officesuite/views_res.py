@@ -1,22 +1,28 @@
 # -*- coding: utf-8 -*-
-"""officesuite · 资源面接口：meeting(11) asset(9) vehicle(7) supplies(7) visitor(7) mailroom(5) = 46 个。
+"""officesuite · 资源面接口：meeting(12) asset(12) vehicle(8) supplies(8) visitor(8) mailroom(6) = 54 个。
 
 资源类（会议室/车辆/办公用品）由管理员建立，全员预订/领用；
 资产走「领用-归还」台账；访客与快递是登记簿模式。
+S26：常用会议室、资产盘点/折旧、空闲车辆、低库存、邀请码、滞留催领。
 """
 from datetime import datetime, timedelta
+import secrets
 
+from django.db import transaction
 from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
+from rest_framework.decorators import permission_classes
+from rest_framework.permissions import AllowAny
 
 from core.scoping import scope_queryset
 
 from devtools.common import (endpoint, ok, opt_bool, opt_num, opt_str, p,
                              req, req_num, req_str)
 from officesuite.common import flow_event, get_obj, obj_dict, parse_day, parse_dt
-from officesuite.models import (Asset, MailParcel, MeetingRoom, RoomBooking,
-                                SupplyApply, SupplyItem, Vehicle,
-                                VehicleBooking, VisitorRecord)
+from officesuite.models import (Asset, AssetCheck, MailParcel, MeetingRoom,
+                                MeetingRoomFavorite, RoomBooking, SupplyApply,
+                                SupplyItem, Vehicle, VehicleBooking,
+                                VisitorRecord)
 
 # =====================================================================
 # meeting 会议室（10）
@@ -39,17 +45,46 @@ def meeting_room_create(request):
 
 @endpoint(("GET",))
 def meeting_room_list(request):
-    """会议室列表（active 过滤 + 容量筛选）。"""
+    """会议室列表（active 过滤 + 容量筛选 + S26-357 我的收藏标记）。"""
     qs = MeetingRoom.objects.all().order_by("id")
     if opt_bool(request, "only_active", True):
         qs = qs.filter(active=True)
     cap = opt_num(request, "capacity_gt")
     if cap:
         qs = qs.filter(capacity__gte=cap)
+    fav_ids = set(MeetingRoomFavorite.objects.filter(user=request.user)
+                  .values_list("room_id", flat=True))
     return ok({"items": [{"id": r.id, "name": r.name, "capacity": r.capacity,
                           "location": r.location, "facilities": r.facilities,
-                          "active": r.active, "owner": r.owner.username}
-                         for r in qs[:200]], "count": qs.count()})
+                          "active": r.active, "owner": r.owner.username,
+                          "favorite": r.id in fav_ids}
+                         for r in qs[:200]],
+               "count": qs.count(), "favorite_count": len(fav_ids)})
+
+
+@endpoint(("GET", "POST", "DELETE"))
+def meeting_room_favorites(request):
+    """S26-357 常用会议室：GET 我的收藏，POST 收藏 room_id，DELETE 取消收藏。"""
+    if request.method == "GET":
+        qs = (MeetingRoomFavorite.objects.filter(user=request.user)
+              .select_related("room").order_by("-created_at"))
+        items = [{"id": f.id, "room_id": f.room_id, "name": f.room.name,
+                  "capacity": f.room.capacity, "location": f.room.location,
+                  "active": f.room.active,
+                  "created_at": f.created_at.isoformat()} for f in qs[:200]]
+        return ok({"items": items, "count": qs.count(),
+                   "room_ids": [i["room_id"] for i in items]})
+
+    room = get_obj(MeetingRoom, int(req_num(request, "room_id", minimum=1)),
+                   request.user)
+    if request.method == "DELETE":
+        deleted, _ = MeetingRoomFavorite.objects.filter(
+            room=room, user=request.user).delete()
+        return ok({"room_id": room.id, "favorite": False, "deleted": int(deleted)})
+    fav, created = MeetingRoomFavorite.objects.get_or_create(
+        room=room, user=request.user)
+    return ok({"id": fav.id, "room_id": room.id, "name": room.name,
+               "favorite": True, "created": created})
 
 
 @endpoint()
@@ -101,7 +136,7 @@ def meeting_book(request):
     F682：支持 duration_minutes（15/30/60 模板）——未传 end_at 时按它计算；
     F686：冲突时 ValueError → 400，同时带回同时段已有预约清单供提示。
     """
-    room = get_obj(MeetingRoom, int(req_num(request, "room_id", minimum=1)), request.user, write=True)
+    room = get_obj(MeetingRoom, int(req_num(request, "room_id", minimum=1)), request.user, write=False)
     if not room.active:
         raise ValueError("该会议室已停用")
     start = parse_dt(req_str(request, "start_at"), "start_at")
@@ -344,9 +379,113 @@ def asset_stats(request):
                "total_value": float(total_value)})
 
 
+@endpoint()
+def asset_check_create(request):
+    """S26-365 发起资产盘点：把当前可见资产状态存成批次快照。"""
+    code = opt_str(request, "code", "").strip()[:40]
+    if not code:
+        code = f"CHK-{timezone.localdate():%Y%m%d}-{AssetCheck.objects.count() + 1:03d}"
+    if AssetCheck.objects.filter(code=code).exists():
+        raise ValueError(f"盘点批次已存在：{code}")
+    snapshot = {}
+    for a in scope_queryset(Asset.objects.all(), request.user).order_by("id")[:5000]:
+        snapshot[str(a.id)] = {"status": a.status, "code": a.code,
+                               "title": a.title[:200], "holder_name": a.holder_name[:80]}
+    chk = AssetCheck.objects.create(
+        owner=request.user, code=code, status="open", snapshot=snapshot,
+        remark=opt_str(request, "remark"))
+    return ok({"id": chk.id, "code": chk.code, "count": len(snapshot),
+               "created_at": chk.created_at.isoformat()})
+
+
+@endpoint(("GET",))
+def asset_check_detail(request, pk):
+    """S26-365 盘点对比：快照 vs 当前状态，返回差异项。"""
+    chk = get_obj(AssetCheck, pk, request.user)
+    snap = chk.snapshot or {}
+    ids = [int(k) for k in snap.keys() if str(k).isdigit()]
+    current = {a.id: a for a in scope_queryset(Asset.objects.filter(pk__in=ids),
+                                               request.user)}
+    diffs, changed, missing = [], 0, 0
+    for key, before in snap.items():
+        if not str(key).isdigit():
+            continue
+        aid = int(key)
+        item = before if isinstance(before, dict) else {"status": before}
+        old_status = item.get("status")
+        a = current.get(aid)
+        if a is None:
+            missing += 1
+            diffs.append({"id": aid, "code": item.get("code", ""),
+                          "title": item.get("title", ""),
+                          "before": old_status, "after": None,
+                          "change": "missing"})
+        elif a.status != old_status:
+            changed += 1
+            diffs.append({"id": aid, "code": a.code, "title": a.title,
+                          "before": old_status, "after": a.status,
+                          "change": "changed"})
+    return ok({"id": chk.id, "code": chk.code, "status": chk.status,
+               "remark": chk.remark,
+               "created_at": chk.created_at.isoformat(),
+               "snapshot_count": len(snap), "checked": len(current),
+               "diff_count": len(diffs), "changed": changed, "missing": missing,
+               "diffs": diffs[:500]})
+
+
+@endpoint(("GET",))
+def asset_depreciation(request):
+    """S26-366 资产折旧：按 created_at 起算直线折旧，返回年度净值表与合计。"""
+    years = int(opt_num(request, "years", 5, integer=True, minimum=1, maximum=30))
+    rate = float(opt_num(request, "rate", 0.2, minimum=0, maximum=1))
+    today = timezone.localdate()
+    series = [{"year": i, "value": 0.0, "net": 0.0, "depreciated": 0.0}
+              for i in range(years + 1)]
+    rows = []
+    total_value = total_net = 0.0
+    for a in scope_queryset(Asset.objects.all(), request.user).order_by("id")[:500]:
+        value = float(a.value or 0)
+        bought = timezone.localtime(a.created_at).date()
+        age = max(today.year - bought.year, 0)
+        annual = value * rate
+        net = max(value - annual * min(age, years), 0.0)
+        rows.append({"id": a.id, "code": a.code, "title": a.title,
+                     "category": a.category, "value": round(value, 2),
+                     "created_at": a.created_at.isoformat(),
+                     "age_years": age, "annual": round(annual, 2),
+                     "depreciated": round(value - net, 2),
+                     "net_value": round(net, 2)})
+        for i in range(years + 1):
+            net_i = max(value - annual * i, 0.0)
+            series[i]["value"] += value
+            series[i]["net"] += net_i
+            series[i]["depreciated"] += value - net_i
+        total_value += value
+        total_net += net
+    for row in series:
+        row["value"] = round(row["value"], 2)
+        row["net"] = round(row["net"], 2)
+        row["depreciated"] = round(row["depreciated"], 2)
+    return ok({"years": years, "rate": rate, "assets": rows, "count": len(rows),
+               "total_value": round(total_value, 2),
+               "total_net": round(total_net, 2),
+               "total_depreciated": round(total_value - total_net, 2),
+               "series": series})
+
+
 # =====================================================================
 # vehicle 用车（7）
 # =====================================================================
+
+
+def _clip(value, max_len):
+    """#81：按模型 CharField.max_length 截断。
+
+    opt_str 只做「转字符串」不做长度约束，超长值在 SQLite 上静默写入、
+    在 Postgres 直接抛 DataError（接口 500）。落库前统一按 max_length 截断。
+    """
+    text = value if isinstance(value, str) else str(value)
+    return text[:max_len] if max_len else text
 
 
 @endpoint()
@@ -355,7 +494,7 @@ def vehicle_create(request):
     v = Vehicle.objects.create(
         owner=request.user,
         plate=req_str(request, "plate")[:20],
-        model_name=opt_str(request, "model_name"),
+        model_name=_clip(opt_str(request, "model_name"), 60),
         seats=int(req_num(request, "seats", minimum=1, maximum=99, default=5)),
         active=True,
     )
@@ -373,6 +512,33 @@ def vehicle_list(request):
                "count": qs.count()})
 
 
+@endpoint(("GET",))
+def vehicle_available(request):
+    """S26-363 时段内空闲车辆：复用 _resource_conflicts("vehicle:id") 过滤。"""
+    from officesuite.views_cal import _resource_conflicts
+
+    start = parse_dt(req_str(request, "start"), "start")
+    end = parse_dt(opt_str(request, "end", ""), "end", allow_empty=True)
+    if end is None:
+        end = start + timedelta(hours=1)
+    if end <= start:
+        raise ValueError("结束时间必须晚于开始时间")
+    free, busy = [], []
+    qs = Vehicle.objects.filter(active=True).order_by("id")[:200]
+    for v in qs:
+        conflicts = _resource_conflicts(f"vehicle:{v.id}", start, end, limit=5)
+        row = {"id": v.id, "plate": v.plate, "model_name": v.model_name,
+               "seats": v.seats, "conflict_count": len(conflicts)}
+        if conflicts:
+            busy.append({**row, "conflicts": conflicts})
+        else:
+            free.append(row)
+    return ok({"start": start.isoformat(), "end": end.isoformat(),
+               "items": free, "count": len(free),
+               "busy": busy, "busy_count": len(busy),
+               "total": len(free) + len(busy)})
+
+
 @endpoint()
 def vehicle_update(request, pk):
     """编辑车辆 / 停用启用。"""
@@ -380,7 +546,7 @@ def vehicle_update(request, pk):
     if p(request, "plate") is not None:
         v.plate = req_str(request, "plate")[:20]
     if p(request, "model_name") is not None:
-        v.model_name = opt_str(request, "model_name")
+        v.model_name = _clip(opt_str(request, "model_name"), 60)
     if p(request, "seats") is not None:
         v.seats = int(req_num(request, "seats", minimum=1, maximum=99))
     if p(request, "active") is not None:
@@ -395,7 +561,7 @@ def vehicle_book(request):
 
     F686：返回同车辆同时段的已有申请作为冲突提示（不阻断，等审批裁决）。
     """
-    v = get_obj(Vehicle, int(req_num(request, "vehicle_id", minimum=1)), request.user, write=True)
+    v = get_obj(Vehicle, int(req_num(request, "vehicle_id", minimum=1)), request.user, write=False)
     if not v.active:
         raise ValueError("该车辆已停用")
     use_at = parse_dt(req_str(request, "use_at"), "use_at")
@@ -433,6 +599,8 @@ def vehicle_book(request):
 def vehicle_booking_approve(request, pk):
     """审批用车（通过/驳回由 action 决定）。"""
     b = get_obj(VehicleBooking, pk, request.user, write=True)
+    if b.owner_id == request.user.id and not request.user.is_superuser:
+        raise ValueError("不能审批自己的用车申请")
     if b.status != "pending":
         raise ValueError(f"当前状态 {b.status} 不可审批")
     action = req_str(request, "action")
@@ -493,10 +661,33 @@ def supplies_item_list(request):
                "count": qs.count()})
 
 
+def _supply_threshold(item, default=10):
+    """S26-364：单品可自定义 data.min_stock，缺省用全局阈值。"""
+    raw = (getattr(item, "data", None) or {}).get("min_stock")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+@endpoint(("GET",))
+def supplies_low_stock(request):
+    """S26-364 用品低库存：按阈值返回明细与建议补货量。"""
+    threshold = int(opt_num(request, "threshold", 10, integer=True, minimum=0,
+                            maximum=100000))
+    qs = SupplyItem.objects.filter(stock__lte=threshold).order_by("stock", "id")
+    items = [{"id": it.id, "name": it.name, "stock": it.stock, "unit": it.unit,
+              "threshold": threshold,
+              "suggested_qty": max(threshold * 2 - it.stock, 1)}
+             for it in qs[:200]]
+    return ok({"threshold": threshold, "items": items, "count": qs.count(),
+               "total_items": SupplyItem.objects.count()})
+
+
 @endpoint()
 def supplies_item_restock(request, pk):
     """补货（负数可作损耗修正）。"""
-    it = get_obj(SupplyItem, pk, request.user)
+    it = get_obj(SupplyItem, pk, request.user, write=True)
     delta = int(req_num(request, "delta"))
     if it.stock + delta < 0:
         raise ValueError("调整后库存不能为负")
@@ -507,20 +698,36 @@ def supplies_item_restock(request, pk):
 
 @endpoint()
 def supplies_apply(request):
-    """领用物品（库存不足直接拒绝）。"""
+    """领用物品（#65：条件更新扣库存，检查与扣减在同一 SQL 内完成）。"""
     it = get_obj(SupplyItem, int(req_num(request, "item_id", minimum=1)), request.user, write=True)
     qty = int(req_num(request, "qty", minimum=1, maximum=9999))
-    if it.stock < qty:
-        raise ValueError(f"库存不足：当前 {it.stock}，需 {qty}")
-    SupplyItem.objects.filter(pk=it.pk).update(stock=F("stock") - qty)
-    a = SupplyApply.objects.create(
-        owner=request.user, item=it, qty=qty,
-        title=f"领用 {it.name} x{qty}", status="done",
-        data={"purpose": opt_str(request, "purpose"), "events": []})
-    flow_event(a, "apply", request.user)
-    a.save()
+    with transaction.atomic():
+        updated = SupplyItem.objects.filter(pk=it.pk, stock__gte=qty).update(
+            stock=F("stock") - qty)
+        if not updated:
+            it.refresh_from_db(fields=["stock"])
+            raise ValueError(f"库存不足：当前 {it.stock}，需 {qty}")
+        a = SupplyApply.objects.create(
+            owner=request.user, item=it, qty=qty,
+            title=f"领用 {it.name} x{qty}", status="done",
+            data={"purpose": opt_str(request, "purpose"), "events": []})
+        flow_event(a, "apply", request.user)
+        a.save()
     it.refresh_from_db()
-    return ok({"id": a.id, "item": it.name, "qty": qty, "stock_left": it.stock})
+    # S26-364：扣减后跌破阈值 → 通知物品管理员（失败不影响领用主流程）
+    threshold = _supply_threshold(it)
+    low_stock = it.stock <= threshold
+    if low_stock:
+        try:
+            from core.notify import dispatch
+            dispatch(it.owner, f"办公用品低库存：{it.name}",
+                     f"当前库存 {it.stock}{it.unit}，低于预警阈值 {threshold}，"
+                     f"建议补货 {max(threshold * 2 - it.stock, 1)}{it.unit}。",
+                     category="system", level="warning", link="/officesuite/supplies")
+        except Exception:  # noqa: BLE001 —— 通知失败不阻断领用
+            pass
+    return ok({"id": a.id, "item": it.name, "qty": qty, "stock_left": it.stock,
+               "low_stock": low_stock, "threshold": threshold})
 
 
 @endpoint()
@@ -559,9 +766,19 @@ def supplies_stats(request):
 # =====================================================================
 
 
+def _new_invite_code():
+    """S26-367：8 位随机邀请码（冲突重试，几乎不可能失败）。"""
+    for _ in range(5):
+        code = secrets.token_hex(4)
+        if not VisitorRecord.objects.filter(data__invite_code=code).exists():
+            return code
+    raise ValueError("邀请码生成失败，请重试")
+
+
 @endpoint()
 def visitor_create(request):
-    """访客登记。"""
+    """访客登记（S26-367：生成免登录核验凭证 invite_code）。"""
+    invite_code = _new_invite_code()
     v = VisitorRecord.objects.create(
         owner=request.user,
         visitor_name=req_str(request, "visitor_name")[:60],
@@ -570,10 +787,13 @@ def visitor_create(request):
         visit_at=parse_dt(opt_str(request, "visit_at"), "visit_at", allow_empty=True,
                           default=timezone.now()),
         title=f"访客 {req_str(request, 'visitor_name')[:60]}",
-        status="registered", data={"events": []})
+        status="registered",
+        data={"events": [], "invite_code": invite_code})
     flow_event(v, "register", request.user)
     v.save()
-    return ok({"id": v.id, "visitor_name": v.visitor_name, "status": v.status})
+    return ok({"id": v.id, "visitor_name": v.visitor_name, "status": v.status,
+               "invite_code": invite_code,
+               "invite_url": f"/api/officesuite/visitor/invite/{invite_code}/"})
 
 
 @endpoint(("GET",))
@@ -641,15 +861,46 @@ def visitor_delete(request, pk):
 
 @endpoint(("GET",))
 def visitor_today(request):
-    """今日访客一览。"""
+    """今日访客一览（#38：明细按数据范围 + 接待人收敛，另给全站聚合计数）。"""
     now = timezone.localtime()
     lo = now.replace(hour=0, minute=0, second=0, microsecond=0)
     hi = lo + timedelta(days=1)
-    qs = VisitorRecord.objects.filter(visit_at__gte=lo, visit_at__lt=hi).order_by("visit_at")
+    base = VisitorRecord.objects.filter(visit_at__gte=lo, visit_at__lt=hi)
+    if request.user.is_superuser or request.user.is_staff:
+        scoped = base
+    else:
+        names = {request.user.username,
+                 getattr(request.user, "display_name", request.user.username)}
+        names.discard("")
+        scoped = (scope_queryset(base, request.user)
+                  | base.filter(host_name__in=names).distinct())
+    scoped = scoped.order_by("visit_at")
     return ok({"date": str(lo.date()),
-               "items": [obj_dict(o, extra=("visitor_name", "company", "host_name", "status")) for o in qs[:100]],
-               "count": qs.count(),
-               "on_site": qs.filter(status="checked_in").count()})
+               "items": [obj_dict(o, extra=("visitor_name", "company", "host_name", "status"))
+                         for o in scoped[:100]],
+               "count": scoped.count(),
+               "on_site": scoped.filter(status="checked_in").count(),
+               # 全站聚合：不暴露姓名/单位等明细
+               "total_count": base.count(),
+               "on_site_total": base.filter(status="checked_in").count()})
+
+
+@endpoint(("GET",))
+@permission_classes([AllowAny])
+def visitor_invite(request, code):
+    """S26-367 免登录邀请码核验：只返回姓名/到访时间/接待人等摘要。"""
+    code = str(code or "").strip()
+    if not code:
+        raise ValueError("缺少邀请码")
+    v = VisitorRecord.objects.filter(data__invite_code=code).first()
+    if v is None:
+        raise ValueError("邀请码无效")
+    return ok({"code": code, "visitor_name": v.visitor_name,
+               "company": v.company, "host_name": v.host_name,
+               "visit_at": v.visit_at.isoformat() if v.visit_at else None,
+               "status": v.status,
+               "valid": v.status in ("registered", "checked_in"),
+               "checked_in": v.status in ("checked_in", "left")})
 
 
 # =====================================================================
@@ -673,8 +924,13 @@ def mailroom_create(request):
 
 @endpoint(("GET",))
 def mailroom_list(request):
-    """包裹列表（状态过滤 + 收件人搜索）。"""
+    """包裹列表（#39：仅本人收件 / 本人登记 / 管理员可见全量）。"""
     qs = MailParcel.objects.all().order_by("-created_at")
+    if not (request.user.is_superuser or request.user.is_staff):
+        names = {request.user.username,
+                 getattr(request.user, "display_name", request.user.username)}
+        names.discard("")
+        qs = qs.filter(Q(receiver_name__in=names) | Q(owner=request.user))
     status = opt_str(request, "status")
     if status:
         qs = qs.filter(status=status)
@@ -712,6 +968,53 @@ def mailroom_pending(request):
                "stale_count": sum(1 for i in items if i["stale"])})
 
 
+@endpoint()
+def mailroom_remind(request):
+    """S26-368 快递滞留催领：按收件人 dispatch 一次，data.reminded_at 去重。"""
+    days = int(opt_num(request, "days", 3, integer=True, minimum=1, maximum=365))
+    cutoff = timezone.now() - timedelta(days=days)
+    from accounts.models import User
+    from core.notify import dispatch
+
+    qs = MailParcel.objects.filter(status="pending", created_at__lt=cutoff) \
+        .order_by("created_at")
+    total = qs.count()
+    now = timezone.now()
+    reminded = skipped = unresolved = 0
+    items = []
+    for m in qs[:500]:
+        last = (m.data or {}).get("reminded_at")
+        if last:
+            try:
+                last_dt = parse_dt(last, "reminded_at")
+            except ValueError:
+                last_dt = None
+            if last_dt and (now - last_dt) < timedelta(hours=24):
+                skipped += 1
+                items.append({"id": m.id, "receiver": m.receiver_name,
+                              "skipped": True, "notified": False})
+                continue
+        u = User.objects.filter(Q(username=m.receiver_name) |
+                                Q(nickname=m.receiver_name)).first()
+        if u is None:
+            unresolved += 1
+            items.append({"id": m.id, "receiver": m.receiver_name,
+                          "skipped": False, "notified": False,
+                          "reason": "收件人账号不存在"})
+            continue
+        dispatch(u, f"快递待领取：{m.receiver_name}",
+                 f"包裹已代收超过 {days} 天（寄件：{m.sender_info or '未知'}），请尽快领取。",
+                 category="system", level="warning", link="/officesuite/mailroom")
+        m.data = {**(m.data or {}), "reminded_at": now.isoformat()}
+        flow_event(m, "remind", request.user, f"滞留 {days} 天催领")
+        m.save(update_fields=["data", "updated_at"])
+        reminded += 1
+        items.append({"id": m.id, "receiver": m.receiver_name,
+                      "skipped": False, "notified": True})
+    return ok({"days": days, "scanned": total, "reminded": reminded,
+               "skipped": skipped, "unresolved": unresolved, "items": items[:100]})
+
+
 @endpoint(("GET",))
 def mailroom_stats(request):
     """快递统计：待取/已取/滞留。"""
@@ -721,4 +1024,4 @@ def mailroom_stats(request):
     return ok({"pending": pending, "picked": picked, "stale": stale})
 
 
-RES_FAMILY_COUNT = 11 + 9 + 7 + 7 + 7 + 5  # = 46（meeting 含 F682 时长模板）
+RES_FAMILY_COUNT = 12 + 12 + 8 + 8 + 8 + 6  # = 54（S26：+8 收藏/盘点×2/折旧/空闲车/低库存/邀请码/催领）

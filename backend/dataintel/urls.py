@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """dataintel 路由：dataset/profile/transform/calc + stats/forecast/regress/cluster/outlier
-+ nlp/textmine/vector + ai/report + chart/abtest/cohort/sampling/geo，共 119 个 URL（含目录）。
++ nlp/textmine/vector + ai/report + chart/abtest/cohort/sampling/geo，共 124 个 URL（含目录）。
 
 F48 版本管理 +3（versions / diff / rollback），F49 图表落盘 +1，F50 数据质量 +1。
 """
@@ -15,7 +15,7 @@ from . import views_stats as s
 from devtools.common import endpoint, endpoint_index, ok
 
 SUBSYSTEMS = [
-    ("dataset", "数据集管理", 9), ("profile", "数据画像", 5), ("transform", "数据变换", 6),
+    ("dataset", "数据集管理", 10), ("profile", "数据画像", 6), ("transform", "数据变换", 9),
     ("calc", "数据计算器", 5), ("stats", "统计检验", 8), ("forecast", "时间序列", 6),
     ("regress", "回归拟合", 5), ("cluster", "聚类", 4), ("outlier", "异常检测", 4),
     ("nlp", "中文 NLP", 8), ("textmine", "文本挖掘", 5), ("vector", "向量运算", 5),
@@ -41,6 +41,8 @@ urlpatterns = [
     path("dataset/<int:pk>/delete/", d.dataset_delete),
     path("dataset/<int:pk>/rows/import/", d.dataset_rows_import),
     path("dataset/<int:pk>/rows/query/", d.dataset_rows_query),
+    # S26(410) 数据集导出（csv/json）
+    path("dataset/<int:pk>/export/", d.dataset_export),
     # F48 版本（3）
     path("dataset/<int:pk>/versions/", px.dataset_versions),
     path("dataset/<int:pk>/versions/diff/", px.dataset_version_diff),
@@ -51,6 +53,8 @@ urlpatterns = [
     path("profile/corr/", d.profile_corr),
     path("profile/missing/", d.profile_missing),
     path("profile/dtype-infer/", d.profile_dtype_infer),
+    # S26(409) 字段取值分布
+    path("profile/unique-values/", d.profile_unique_values),
     # transform（6）
     path("transform/pivot/", d.transform_pivot),
     path("transform/groupby/", d.transform_groupby),
@@ -58,6 +62,10 @@ urlpatterns = [
     path("transform/sort/", d.transform_sort),
     path("transform/sample/", d.transform_sample),
     path("transform/normalize/", d.transform_normalize),
+    # S26(406–408) 独热 / 时序位移 / PII 脱敏（落新 DatasetVersion）
+    path("transform/one-hot/", d.transform_one_hot),
+    path("transform/lag/", d.transform_lag),
+    path("transform/mask-pii/", d.transform_mask_pii),
     # calc（5）
     path("calc/expr-row/", d.calc_expr_row),
     path("calc/pct-change/", d.calc_pct_change),
@@ -176,4 +184,4 @@ urlpatterns = [
     path("data-quality/", px.data_quality),
 ]
 
-assert len(urlpatterns) == 119, f"dataintel 接口数应为 119，实际 {len(urlpatterns)}"
+assert len(urlpatterns) == 124, f"dataintel 接口数应为 124，实际 {len(urlpatterns)}"

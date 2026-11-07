@@ -7,7 +7,9 @@
 - 响应统一 {"ok": True, "data": ...} / {"ok": False, "error": ...}。
 """
 from functools import wraps
+import math
 
+from django.conf import settings
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
@@ -88,14 +90,34 @@ def req(request, key, default=None):
     return val
 
 
-def req_str(request, key="text", default=None):
+def req_str(request, key="text", default=None, max_len=None):
+    """必填字符串，默认按 settings.SEARCH_MAX_TEXT_CHARS 限制长度。
+
+    max_len=None 取默认上限；max_len<=0 显式关闭上限（仅供确有需要的场景）。
+    超限抛 ValueError → 400，避免超长文本进入正则 / JSON / 切片。
+    """
     val = req(request, key, default)
-    return val if isinstance(val, str) else str(val)
+    val = val if isinstance(val, str) else str(val)
+    return _limit_str(val, key, max_len)
 
 
-def opt_str(request, key, default=""):
+def opt_str(request, key, default="", max_len=None):
+    """可选字符串，长度上限口径与 req_str 完全一致（含默认值 → 200k）。"""
     val = p(request, key, default)
-    return val if isinstance(val, str) else str(val)
+    val = val if isinstance(val, str) else str(val)
+    return _limit_str(val, key, max_len)
+
+
+def text_max_len():
+    """当前生效的文本入参上限（字符）。"""
+    return int(getattr(settings, "SEARCH_MAX_TEXT_CHARS", 200000))
+
+
+def _limit_str(val, key, max_len=None):
+    limit = text_max_len() if max_len is None else int(max_len)
+    if limit > 0 and len(val) > limit:
+        raise ValueError(f"参数 {key} 超过最大长度 {limit} 字符（当前 {len(val)}）")
+    return val
 
 
 def req_num(request, key, default=None, minimum=None, maximum=None, integer=False):
@@ -106,6 +128,9 @@ def req_num(request, key, default=None, minimum=None, maximum=None, integer=Fals
         val = float(val)
     except (TypeError, ValueError):
         raise ValueError(f"参数 {key} 必须是数字")
+    # NaN 与任何数比较都返回 False，会绕过 minimum/maximum 校验并污染 JSON
+    if not math.isfinite(val):
+        raise ValueError(f"参数 {key} 必须是有限数字")
     if integer:
         val = int(round(val))
     if minimum is not None and val < minimum:

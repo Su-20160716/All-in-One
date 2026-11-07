@@ -19,6 +19,14 @@ urlpatterns = [
     # F28/F29 布局持久化与卡片开关 / F30 每日摘要
     path("layout/", views.DashboardLayoutView.as_view(), name="dashboard-layout"),
     path("daily-summary/", views.DailySummaryView.as_view(), name="daily-summary"),
+    # #347 每日简报定时推送（due=1 仅在设定时间且今日未推送时发送）
+    path("daily-summary/push/", views.DailySummaryPushView.as_view(), name="daily-summary-push"),
+    # #344 提到我 / #345 里程碑 / #346 项目健康
+    path("mentions/", views.MentionsCardView.as_view(), name="dashboard-mentions"),
+    path("milestones/", views.MilestonesCardView.as_view(), name="dashboard-milestones"),
+    path("project-health/", views.ProjectHealthView.as_view(), name="dashboard-project-health"),
+    # #348 逾期项一键延期一天
+    path("postpone-due/", views.PostponeDueView.as_view(), name="dashboard-postpone-due"),
     path("admin/global/", views.GlobalStatsView.as_view(), name="global-stats"),
     path("admin/trend/", views.ActivityTrendView.as_view(), name="activity-trend"),
     path("admin/user-growth/", views.AdminUserGrowthView.as_view(), name="user-growth"),

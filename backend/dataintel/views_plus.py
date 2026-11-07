@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """dataintel · 增强面（F48–F50）：数据集版本 / 图表落盘 / 数据质量报告。
 
-F48 版本快照内联存 rows（≤5000 行），MEDIA 可写时另存一份 JSON 副本；
+F48 版本快照的 rows 只落 MEDIA 下的 JSON 文件（DB 只存行数 / 哈希 / storage_path），
+MEDIA 不可写时回退为内联存储；读取时两者皆兼容（#86）；
 F49 只接受 png/jpeg/webp/svg 的 data URL，SVG 做脚本/事件属性清洗；
 F50 复刻 Excel「数据质量」口径：缺失、类型不一致、IQR 异常、重复行。
 """
@@ -47,7 +48,11 @@ def _get_dataset(user, pk):
 
 
 def snapshot_version(ds, user=None, note=""):
-    """按当前内容建版本；内容与上一版相同则不重复建。失败只记日志，不影响主流程。"""
+    """按当前内容建版本；内容与上一版相同则不重复建。失败只记日志，不影响主流程。
+
+    #86：rows 只落 JSON 文件，DB 行仅保留 row_count / rows_hash / storage_path；
+    文件写失败时才回退为「内联 rows」，保证 MEDIA 不可写时回滚仍然可用。
+    """
     rows = ds.rows or []
     h = _rows_hash(rows)
     last = ds.versions.order_by("-version").first()
@@ -64,7 +69,7 @@ def snapshot_version(ds, user=None, note=""):
         path = ""
     obj = DatasetVersion.objects.create(
         dataset=ds, version=version, rows_hash=h, row_count=len(rows),
-        columns=ds.columns or [], rows=rows, storage_path=path,
+        columns=ds.columns or [], rows=[] if path else rows, storage_path=path,
         note=note[:200], created_by=user if getattr(user, "pk", None) else None,
     )
     stale = list(ds.versions.order_by("-version").values_list("pk", "storage_path")[MAX_VERSIONS:])
@@ -77,6 +82,27 @@ def snapshot_version(ds, user=None, note=""):
                     pass
         DatasetVersion.objects.filter(pk__in=[pk for pk, _ in stale]).delete()
     return obj
+
+
+def _version_rows(v):
+    """#86：读取版本行数据。
+
+    新版本 rows 落文件、DB 只留 storage_path；老版本（或文件不可写时的降级版）
+    仍然内联在 ``rows`` 里，读取顺序为「内联 → 文件 → 空」。
+    """
+    rows = v.rows or []
+    if rows:
+        return rows
+    path = (v.storage_path or "").strip()
+    if not path:
+        return []
+    try:
+        with default_storage.open(path, "rb") as fh:
+            payload = json.loads(fh.read().decode("utf-8"))
+        data = payload.get("rows") if isinstance(payload, dict) else None
+        return data or []
+    except Exception:  # noqa: BLE001 —— 文件损坏/被清理时降级为空，不 500
+        return []
 
 
 def _version_dict(v, current_version=None):
@@ -126,7 +152,7 @@ def _load_version_side(ds, raw):
         raise ValueError(f"版本号非法：{raw}")
     v = ds.versions.filter(version=vno).first()
     if v is not None:
-        return (f"v{v.version}", v.columns or [], v.rows or [])
+        return (f"v{v.version}", v.columns or [], _version_rows(v))
     has_versions = ds.versions.exists()
     if not has_versions and vno == 1:
         return ("v1", ds.columns or [], ds.rows or [])
@@ -193,7 +219,7 @@ def dataset_version_rollback(request, pk, vid):
         v = ds.versions.get(pk=int(vid))
     except (DatasetVersion.DoesNotExist, TypeError, ValueError):
         raise ValueError("版本不存在")
-    ds.rows = list(v.rows or [])
+    ds.rows = list(_version_rows(v))
     ds.columns = list(v.columns or [])
     ds.save()
     new = snapshot_version(ds, request.user, note=f"回滚到 v{v.version}")

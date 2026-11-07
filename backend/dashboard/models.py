@@ -27,3 +27,30 @@ class DashboardCardOrder(models.Model):
 
     def __str__(self):
         return f"{self.owner} · {len(self.order)} 张卡片"
+
+
+class DailySummaryPush(models.Model):
+    """#347 每日简报推送记录：仪表盘卡片展示「最近一期简报」，按天去重"""
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="daily_summary_pushes", verbose_name="用户",
+    )
+    push_date = models.DateField(verbose_name="简报日期")
+    title = models.CharField(max_length=200, verbose_name="标题")
+    headline = models.CharField(max_length=300, blank=True, verbose_name="一句话摘要")
+    items = models.JSONField(default=list, blank=True, verbose_name="指标明细")
+    notification = models.ForeignKey(
+        "core.Notification", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="daily_summary_pushes", verbose_name="站内信",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="推送时间")
+
+    class Meta:
+        verbose_name = "每日简报推送"
+        verbose_name_plural = "每日简报推送"
+        ordering = ["-created_at"]
+        unique_together = [("owner", "push_date")]
+
+    def __str__(self):
+        return f"{self.owner} @{self.push_date}"

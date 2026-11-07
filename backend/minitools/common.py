@@ -14,4 +14,5 @@ from devtools.common import (  # noqa: F401
     req_list,
     req_num,
     req_str,
+    text_max_len,
 )

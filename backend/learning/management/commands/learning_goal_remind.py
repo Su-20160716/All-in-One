@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from accounts.models import User
 from core.models import Notification, notify
-from learning.models import DailyGoal, StudySession
+from learning.models import DailyGoal, LearningPref, StudySession
 
 
 class Command(BaseCommand):
@@ -24,8 +24,14 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         today = timezone.localdate()
         sent = skipped = 0
+        # 377：尊重 study/pref/ 的每日提醒开关（关闭的用户一律不打扰）
+        disabled = set(
+            LearningPref.objects.filter(daily_remind=False).values_list("owner_id", flat=True)
+        )
         goals = DailyGoal.objects.select_related("owner").all()
         for goal in goals:
+            if goal.owner_id in disabled:
+                continue
             user = User.objects.filter(id=goal.owner_id, is_active=True).first()
             target = goal.target_minutes or 0
             if not user or target <= 0:

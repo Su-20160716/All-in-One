@@ -140,6 +140,7 @@ class ChunkInitSerializer(serializers.Serializer):
 
 class ShareLinkSerializer(serializers.ModelSerializer):
     url = serializers.SerializerMethodField()
+    upload_url = serializers.SerializerMethodField()
     file_name = serializers.SerializerMethodField()
     target_type = serializers.SerializerMethodField()
     is_expired = serializers.SerializerMethodField()
@@ -151,11 +152,19 @@ class ShareLinkSerializer(serializers.ModelSerializer):
             "id", "token", "file", "file_name", "folder", "target_type", "permission",
             "max_downloads", "download_count", "view_count", "is_revoked",
             "is_expired", "has_password", "expire_at", "created_at", "url",
+            # S24-223 允许访客上传（收集链接）
+            "allow_upload", "upload_url",
         ]
         read_only_fields = ["token", "download_count", "view_count", "created_at"]
 
     def get_url(self, obj):
         return f"/share/{obj.token}"
+
+    def get_upload_url(self, obj):
+        # 仅文件夹分享且开启允许上传时给出投递入口
+        if obj.allow_upload and obj.folder_id:
+            return f"/api/share/{obj.token}/upload/"
+        return ""
 
     def get_file_name(self, obj):
         return obj.file.name if obj.file else (obj.folder.name if obj.folder else "")

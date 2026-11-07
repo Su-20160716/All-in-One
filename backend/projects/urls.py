@@ -56,6 +56,7 @@ urlpatterns = [
     path("milestones/<int:pk>/", views.MilestoneDetailView.as_view(), name="milestone-detail"),
     path("<int:project_id>/workload/", views.ProjectWorkloadView.as_view(), name="project-workload"),
     path("<int:project_id>/cards/by-number/<int:number>/", views.CardByNumberView.as_view(), name="card-by-number"),
+    path("<int:project_id>/cards/by-number/<str:code>/", views.CardByNumberView.as_view(), name="card-by-number-code"),
     path("<int:project_id>/resolve/", views.CardResolveView.as_view(), name="card-resolve"),
     path("<int:project_id>/standup/", views.ProjectStandupView.as_view(), name="project-standup"),
     # F23 迭代管理 / F22 工时偏差
@@ -63,12 +64,18 @@ urlpatterns = [
     path("<int:project_id>/sprints/<int:sid>/<str:action>/", views.SprintActionView.as_view(), name="sprint-action"),
     path("<int:project_id>/effort-report/", views.ProjectEffortReportView.as_view(), name="project-effort-report"),
     path("<int:project_id>/archived-cards/", views.ProjectArchivedCardsView.as_view(), name="project-archived-cards"),
+    # ===== 第三轮 281–305（关注 / 解决） =====
+    path("cards/<int:pk>/watch/", views.CardWatchView.as_view(), name="card-watch"),
+    path("cards/<int:pk>/resolve/", views.CardResolveActionView.as_view(), name="card-resolve-action"),
 ]
 
 # 公开只读看板分享（免登录），挂在 /share/board/<token>/
 board_share_urlpatterns = [
     path("share/board/<str:token>/", extra_views.BoardSharePublicView.as_view(), name="board-share-public"),
+    path("share/board/<str:token>/verify/", extra_views.BoardShareVerifyView.as_view(), name="board-share-verify"),
     # F3：/api/share/board/* 别名——前端不再代理 /share（那是 history 路由），
     # 公开 API 统一挪到 /api 前缀下；旧根级路由保留兼容已发布外链
     path("api/share/board/<str:token>/", extra_views.BoardSharePublicView.as_view(), name="board-share-public-api"),
+    path("api/share/board/<str:token>/verify/", extra_views.BoardShareVerifyView.as_view(),
+         name="board-share-verify-api"),
 ]

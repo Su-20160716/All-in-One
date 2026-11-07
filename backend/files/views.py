@@ -6,22 +6,24 @@ import logging
 logger = logging.getLogger(__name__)
 
 import csv
-import io
 import json
 import mimetypes
 import os
 import re
 import shutil
+import tempfile
 import uuid
 import zipfile
-from datetime import timedelta
+from datetime import date, timedelta
 
 from django.conf import settings
 from django.contrib.auth.hashers import make_password
 from django.db import transaction
-from django.db.models import Count, OuterRef, Q, Subquery, Sum
+from django.db.models import Count, F, OuterRef, Q, Subquery, Sum
+from django.db.models.functions import TruncDate
 from django.http import FileResponse, HttpResponse, StreamingHttpResponse
 from django.utils import timezone
+from django.utils.http import content_disposition_header
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -30,8 +32,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.models import Notification, notify
-from core.pagination import OptionalPageNumberPagination
-from core.quota import check_quota
+from core.pagination import OptionalPageNumberPagination, StandardPagination
+from core.quota import check_quota, used_bytes
 from core.scoping import is_visible, scope_queryset
 from core.utils import file_kind, format_size, sha1_file
 from core.validators import as_int, parse_bool, sanitize_filename
@@ -60,6 +62,7 @@ from files.share_access import (
     bump_download,
     bump_view,
     find_link,
+    request_password,
     validate_link,
 )
 
@@ -135,6 +138,38 @@ def _get_file(user, pk, include_deleted=False):
     return fm
 
 
+def _authorize_file_bytes(request, fm, *, consume_download=False):
+    """原文件字节流输出（raw / pdf / download）的统一授权。
+
+    口径与 `/download/` 完全一致：owner 直接放行；非 owner 必须携带
+    指向**本文件**的分享 token，并完整通过撤销/过期/密码/权限/次数上限校验。
+    数据范围（dept/all）不再能绕过分享限制直接读取原文件。
+
+    :param consume_download: True 时原子占用一次下载额度（整包下载）；
+        流式内联预览（Range 拖动、PDF 渲染）只校验不计数，避免播放器
+        一次拖动就耗尽 max_downloads。
+    :returns: None 表示放行；否则返回可直接 return 的 Response
+    """
+    if fm.owner_id == request.user.id:
+        return None
+    token = request.query_params.get("share") or request.query_params.get("token")
+    if not token:
+        return Response(
+            # 1016 是登录锁定专用码（accounts LoginView），这里用 1011 无操作权限
+            {"message": "非本人文件，需通过共享链接访问", "code": 1011},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    link = find_link(token, file_id=fm.pk)
+    try:
+        validate_link(link, request_password(request),
+                      for_download=True, request=request)
+    except ShareAccessError as exc:
+        return exc.as_response()
+    if consume_download and not bump_download(link):
+        return Response({"message": "下载次数已达上限"}, status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
 def _touch_recent(user, fm):
     """记录最近访问"""
     try:
@@ -183,6 +218,64 @@ def _log_op(user, fm, action, detail="", from_folder="", to_folder=""):
         )
     except Exception:
         logger.exception("B23：静默兜底已登记（files/views.py:140 原为 pass）——review 是否应收窄异常类型")
+
+
+def _restore_files(user, qs):
+    """恢复回收站文件：原目录不存在回根目录，同目录同名自动改名「原名(已恢复)」"""
+    restored, renamed = 0, 0
+    now = timezone.now()
+    for fm in qs:
+        folder = None
+        if fm.origin_folder_id:
+            folder = Folder.objects.filter(pk=fm.origin_folder_id, owner=user).first()
+        fm.folder = folder
+        name = fm.name
+        if FileMeta.objects.filter(
+            owner=user, folder=folder, is_deleted=False, name=name,
+        ).exclude(pk=fm.pk).exists():
+            base, ext = os.path.splitext(name)
+            candidate, i = f"{base}(已恢复){ext}", 2
+            while FileMeta.objects.filter(
+                owner=user, folder=folder, is_deleted=False, name=candidate,
+            ).exclude(pk=fm.pk).exists():
+                candidate = f"{base}(已恢复{i}){ext}"
+                i += 1
+            fm.name = candidate
+            renamed += 1
+        fm.is_deleted = False
+        fm.deleted_at = None
+        fm.updated_at = now
+        fm.save(update_fields=["folder", "name", "is_deleted", "deleted_at", "updated_at"])
+        _log_op(user, fm, "restore", detail="恢复自回收站", to_folder=_folder_label(folder))
+        restored += 1
+    return restored, renamed
+
+
+def _notify_quota_cross(user, used_before, used_after):
+    """S24-234：上传后按配额占用首次越过 80% / 90% 各发一次站内提醒（按日去重）"""
+    try:
+        quota_mb = getattr(user, "storage_quota_mb", 0) or 0
+        if quota_mb <= 0:
+            return
+        limit = quota_mb * 1024 * 1024
+        before = used_before / limit * 100
+        after = used_after / limit * 100
+        today = timezone.localdate()
+        for threshold in (80, 90):
+            if before < threshold <= after:
+                title = f"存储空间已使用 {threshold}%"
+                if Notification.objects.filter(
+                    recipient=user, title=title, created_at__date=today,
+                ).exists():
+                    continue
+                notify(
+                    user, title,
+                    content=(f"当前已用 {format_size(used_after)} / {format_size(limit)}"
+                             f"（{after:.0f}%）。建议清理大文件、重复文件或回收站释放空间。"),
+                    category="file", level="warning", link="/files/analysis",
+                )
+    except Exception:
+        logger.exception("S24-234：配额预警通知失败")
 
 
 def _active_file_shares(fm):
@@ -393,10 +486,161 @@ class FolderDetailView(APIView):
         folder = self.get_object(request, pk)
         if not folder:
             return Response({"message": "文件夹不存在"}, status=status.HTTP_404_NOT_FOUND)
-        # B6：批量删除（一条 DELETE + 级联），替代每文件一次 delete 循环
-        folder.files.all().delete()
-        folder.delete()
+        # #26：删除文件夹时其中的文件必须进回收站，而不是被 CASCADE 硬删
+        # （FileMeta.folder 是 on_delete=CASCADE，直接 folder.delete() 会把
+        # 元数据连同物理文件引用一起抹掉，物理文件变孤儿）。
+        # 先收集整棵子树（防历史脏数据成环），把文件软删并解绑 folder，
+        # 再删除文件夹本身，回收站里仍能看到并还原。
+        subtree_ids, stack, guard = [], [folder], 0
+        while stack and guard < 5000:
+            node = stack.pop()
+            if node.pk in subtree_ids:
+                continue
+            subtree_ids.append(node.pk)
+            stack.extend(list(node.children.all()))
+            guard += 1
+        affected = FileMeta.objects.filter(folder_id__in=subtree_ids)
+        now = timezone.now()
+        with transaction.atomic():
+            # 首次删除：记录删除时间与原目录；已在回收站的保持原状
+            affected.filter(is_deleted=False).update(
+                is_deleted=True, deleted_at=now, origin_folder_id=F("folder_id"),
+            )
+            # 解绑目录引用，避免随文件夹级联删除
+            affected.update(folder=None)
+            folder.delete()
         return Response({"message": "文件夹已删除"})
+
+
+class FolderDownloadView(APIView):
+    """S24-212：整包下载文件夹（保留相对路径，限 200 文件 / 200MB）"""
+
+    MAX_FILES = 200
+    MAX_TOTAL_BYTES = 200 * 1024 * 1024
+    MAX_DEPTH = 20
+    SPOOL_MAX = 8 * 1024 * 1024
+
+    def get(self, request, pk):
+        folder = Folder.objects.filter(pk=pk, owner=request.user).first()
+        if not folder:
+            return Response({"message": "文件夹不存在"}, status=status.HTTP_404_NOT_FOUND)
+        # 收集整棵子树（防历史脏数据成环/超深）
+        subtree, visited, stack, guard = [], set(), [(folder, 0)], 0
+        while stack and guard < 5000:
+            node, depth = stack.pop()
+            if node.pk in visited or depth > self.MAX_DEPTH:
+                continue
+            visited.add(node.pk)
+            subtree.append(node)
+            stack.extend([(c, depth + 1) for c in node.children.all()])
+            guard += 1
+        files = list(
+            FileMeta.objects.filter(
+                owner=request.user, is_deleted=False, folder_id__in=list(visited),
+            ).select_related("folder").order_by("folder_id", "name")
+        )
+        if not files:
+            return Response({"message": "文件夹内没有可下载的文件"}, status=status.HTTP_400_BAD_REQUEST)
+        if len(files) > self.MAX_FILES:
+            return Response(
+                {"message": f"文件夹内文件过多（{len(files)} 个），请分批下载"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        total_size = sum(fm.size or 0 for fm in files)
+        if total_size > self.MAX_TOTAL_BYTES:
+            return Response(
+                {"message": f"文件夹总大小 {format_size(total_size)} 超过 "
+                            f"{format_size(self.MAX_TOTAL_BYTES)} 上限"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 目录名 → 相对路径分段（相对被下载文件夹，含自身名称）
+        by_id = {f.pk: f for f in subtree}
+
+        def _parts(node):
+            parts, guard_n = [], 0
+            while node is not None and guard_n < 60:
+                parts.append(sanitize_filename(node.name, fallback=f"folder{node.pk}"))
+                if node.pk == folder.pk:
+                    break
+                node = by_id.get(node.parent_id) or node.parent
+                guard_n += 1
+            parts.reverse()
+            return parts
+
+        folder_parts = {fid: _parts(node) for fid, node in by_id.items()}
+        root_parts = _parts(folder)
+        buf = tempfile.SpooledTemporaryFile(max_size=self.SPOOL_MAX, mode="w+b")
+        used, added = set(), 0
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fm in files:
+                abs_path = _safe_join(MEDIA, fm.storage_path)
+                if not os.path.exists(abs_path):
+                    continue
+                parts = folder_parts.get(fm.folder_id) or root_parts
+                arc = "/".join(parts + [sanitize_filename(fm.name, fallback=f"file{fm.id}")])
+                k = 1
+                while arc in used:
+                    base, ext = os.path.splitext(arc)
+                    arc = f"{base}({k}){ext}"
+                    k += 1
+                used.add(arc)
+                zf.write(abs_path, arc)
+                added += 1
+        if not added:
+            buf.close()
+            return Response({"message": "文件内容缺失，无法打包"}, status=status.HTTP_404_NOT_FOUND)
+        buf.seek(0)
+        filename = f"{sanitize_filename(folder.name, fallback='folder')}.zip"
+        return FileResponse(buf, as_attachment=True, filename=filename,
+                            content_type="application/zip")
+
+
+class EmptyFolderListView(APIView):
+    """S24-218：列出既无文件也无子目录的空文件夹"""
+
+    def get(self, request):
+        folders = list(Folder.objects.filter(owner=request.user).only("id", "name", "parent_id"))
+        parents = {f.parent_id for f in folders if f.parent_id}
+        with_files = set(
+            FileMeta.objects.filter(owner=request.user, folder__isnull=False)
+            .values_list("folder_id", flat=True).distinct()
+        )
+        empty = [
+            {"id": f.id, "name": f.name, "parent": f.parent_id}
+            for f in folders if f.id not in with_files and f.id not in parents
+        ]
+        return Response({"list": empty, "total": len(empty)})
+
+
+class EmptyFolderCleanupView(APIView):
+    """S24-218：批量删除空文件夹（删除前再次校验仍为空）"""
+
+    def post(self, request):
+        raw = request.data.get("folder_ids")
+        if raw in (None, "", []):
+            folders = list(Folder.objects.filter(owner=request.user))
+        else:
+            ids = _as_id_list(raw, field="folder_ids")
+            if ids is None:
+                return Response({"message": "folder_ids 必须是整数数组"}, status=400)
+            folders = list(Folder.objects.filter(owner=request.user, id__in=ids))
+        deleted, skipped = [], []
+        with transaction.atomic():
+            for folder in folders:
+                empty = (
+                    not FileMeta.objects.filter(folder=folder).exists()
+                    and not folder.children.exists()
+                )
+                if not empty:
+                    skipped.append({"id": folder.id, "name": folder.name, "reason": "目录非空"})
+                    continue
+                deleted.append({"id": folder.id, "name": folder.name})
+                folder.delete()
+        return Response({
+            "message": f"已删除 {len(deleted)} 个空文件夹",
+            "deleted": len(deleted), "list": deleted, "skipped": skipped,
+        })
 
 
 # ============ 文件 ============
@@ -445,10 +689,11 @@ class FileListView(APIView):
         page = pg.paginate_queryset(qs, request)
         if page is not None:
             return pg.get_paginated_response(FileMetaSerializer(page, many=True).data)
-        # B20：序列化结果已包含全部行，len 即总数——省掉一次多余的 COUNT 查询
-        # （原来 FileMetaSerializer(qs).data 与 qs.count() 是两条独立 SQL）
-        data = FileMetaSerializer(qs, many=True).data
-        return Response({"list": data, "total": len(data)})
+        # 未分页时硬上限 1000 条，防止一次序列化整目录
+        total = qs.count()
+        rows = list(qs[:1000])
+        data = FileMetaSerializer(rows, many=True).data
+        return Response({"list": data, "total": total, "truncated": total > len(rows)})
 
 
 class FileSearchView(APIView):
@@ -575,29 +820,37 @@ class UploadChunkView(APIView):
         except (TypeError, ValueError):
             return Response({"message": "index 必须是整数"}, status=status.HTTP_400_BAD_REQUEST)
         chunk_file = request.FILES.get("chunk")
-        chunk = ChunkUpload.objects.filter(upload_id=upload_id, user=request.user).first()
-        if not chunk:
-            return Response({"message": "上传任务不存在"}, status=status.HTTP_404_NOT_FOUND)
-        if index < 0 or index >= chunk.total_chunks:
-            return Response({"message": "分块索引非法"}, status=status.HTTP_400_BAD_REQUEST)
-        if index in chunk.uploaded_chunks:
-            return Response({"uploaded": chunk.uploaded_chunks, "message": "该分片已上传"})
         if not chunk_file:
             return Response({"message": "缺少分片内容"}, status=status.HTTP_400_BAD_REQUEST)
-        # 分片不能大于声明的 chunk_size：否则可以借 5MB 声明写入任意大文件，
-        # 绕过 file_size 校验与配额
-        if chunk_file.size > chunk.chunk_size:
-            return Response(
-                {"message": f"分片体积 {chunk_file.size} 超过声明上限 {chunk.chunk_size}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        part_path = _safe_join(MEDIA, chunk.temp_dir, f"part_{index:06d}")
-        with open(part_path, "wb+") as f:
-            for buf in chunk_file.chunks():
-                f.write(buf)
-        chunk.uploaded_chunks.append(index)
-        chunk.save(update_fields=["uploaded_chunks", "updated_at"])
-        return Response({"uploaded": chunk.uploaded_chunks})
+        # #74：uploaded_chunks 是 JSON 列表，读-改-写必须串行化。原先并发上传
+        # 不同分片时后写覆盖先写，断点续传列表丢索引；这里锁住上传行，
+        # 在锁内重新读取列表后再追加（不新增表）。
+        with transaction.atomic():
+            chunk = (ChunkUpload.objects.select_for_update()
+                     .filter(upload_id=upload_id, user=request.user).first())
+            if not chunk:
+                return Response({"message": "上传任务不存在"}, status=status.HTTP_404_NOT_FOUND)
+            if index < 0 or index >= chunk.total_chunks:
+                return Response({"message": "分块索引非法"}, status=status.HTTP_400_BAD_REQUEST)
+            uploaded = list(chunk.uploaded_chunks or [])
+            if index in uploaded:
+                return Response({"uploaded": uploaded, "message": "该分片已上传"})
+            # 分片不能大于声明的 chunk_size：否则可以借 5MB 声明写入任意大文件，
+            # 绕过 file_size 校验与配额
+            if chunk_file.size > chunk.chunk_size:
+                return Response(
+                    {"message": f"分片体积 {chunk_file.size} 超过声明上限 {chunk.chunk_size}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            part_path = _safe_join(MEDIA, chunk.temp_dir, f"part_{index:06d}")
+            with open(part_path, "wb+") as f:
+                for buf in chunk_file.chunks():
+                    f.write(buf)
+            uploaded.append(index)
+            uploaded.sort()
+            chunk.uploaded_chunks = uploaded
+            chunk.save(update_fields=["uploaded_chunks", "updated_at"])
+        return Response({"uploaded": uploaded})
 
 
 class UploadCompleteView(APIView):
@@ -628,6 +881,12 @@ class UploadCompleteView(APIView):
         if blocked:
             return Response({"code": blocked[0], "message": blocked[1]}, status=status.HTTP_400_BAD_REQUEST)
 
+        # S24-216：同名处理策略 rename（默认，自动改名）/ skip（跳过）/ overwrite（覆盖）
+        on_conflict = str(request.data.get("on_conflict") or "rename").strip()
+        if on_conflict not in ("rename", "skip", "overwrite"):
+            return Response({"message": "on_conflict 只能是 rename / skip / overwrite"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         year_month = timezone.now().strftime("%Y%m")
         rel_dir = os.path.join("files", str(chunk.user_id), year_month)
         abs_dir = _safe_join(MEDIA, rel_dir)
@@ -635,7 +894,6 @@ class UploadCompleteView(APIView):
         folder = Folder.objects.filter(pk=chunk.folder_id, owner=request.user).first() if chunk.folder_id else None
         base, ext = os.path.splitext(chunk.filename)
         final_rel = os.path.join(rel_dir, chunk.filename)
-        final_abs = _safe_join(MEDIA, final_rel)
 
         def _name_taken(rel):
             """F557 重名判定：磁盘已存在 或 同目录下已有同名 FileMeta"""
@@ -646,23 +904,53 @@ class UploadCompleteView(APIView):
                 name=os.path.basename(rel),
             ).exists()
 
-        i = 1
-        while _name_taken(final_rel):
-            final_rel = os.path.join(rel_dir, f"{base}({i}){ext}")
-            final_abs = _safe_join(MEDIA, final_rel)
-            i += 1
+        def _finish_chunk():
+            """任务置完成并在提交后清理临时分片"""
+            with transaction.atomic():
+                chunk.status = "completed"
+                chunk.save(update_fields=["status", "updated_at"])
+            transaction.on_commit(
+                lambda: shutil.rmtree(_safe_join(MEDIA, chunk.temp_dir), ignore_errors=True)
+            )
 
-        with open(final_abs, "wb") as out:
+        merge_rel = final_rel
+        overwrite_target = None
+        if _name_taken(final_rel):
+            if on_conflict == "skip":
+                _finish_chunk()
+                return Response({
+                    "message": "已跳过同名文件", "skipped": [{"name": chunk.filename}],
+                    "count": 0,
+                })
+            if on_conflict == "overwrite":
+                overwrite_target = FileMeta.objects.filter(
+                    owner=request.user, folder=folder, is_deleted=False, name=chunk.filename,
+                ).first()
+            if overwrite_target is not None:
+                # 覆盖时写独立物理路径，避免与秒传/复制共享的旧文件互相污染
+                merge_rel = os.path.join(rel_dir, f"{uuid.uuid4().hex}{ext}").replace("\\", "/")
+            else:
+                i = 1
+                while _name_taken(merge_rel):
+                    merge_rel = os.path.join(rel_dir, f"{base}({i}){ext}")
+                    i += 1
+                merge_rel = merge_rel.replace("\\", "/")
+        else:
+            merge_rel = final_rel.replace("\\", "/")
+        merge_abs = _safe_join(MEDIA, merge_rel)
+
+        used_before = used_bytes(request.user)
+        with open(merge_abs, "wb") as out:
             for idx in range(chunk.total_chunks):
                 part = _safe_join(MEDIA, chunk.temp_dir, f"part_{idx:06d}")
                 with open(part, "rb") as p:
                     shutil.copyfileobj(p, out, 1024 * 1024)
 
         # 以真实落盘大小为准：声明值与实际值不符说明分片被截断/替换过，整单拒绝
-        actual_size = os.path.getsize(final_abs)
+        actual_size = os.path.getsize(merge_abs)
         if actual_size != chunk.file_size:
             try:
-                os.remove(final_abs)
+                os.remove(merge_abs)
             except OSError:
                 pass
             return Response(
@@ -670,16 +958,69 @@ class UploadCompleteView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        sha1 = sha1_file(final_abs) if chunk.total_chunks > 1 else (chunk.sha1 or sha1_file(final_abs))
-        storage_rel = final_rel.replace("\\", "/")
+        # #25：sha1 一律以真实落盘内容重新计算，客户端声明值只用于初始化阶段的
+        # 秒传提示，不能参与这里的秒传匹配——否则可以指向他人物理文件，
+        # 造成「名称/内容错配」并可能在清理时误删他人文件
+        sha1 = sha1_file(merge_abs)
+        ext = os.path.splitext(chunk.filename)[1].lower().lstrip(".")
+
+        if overwrite_target is not None:
+            # S24-216：覆盖同名文件——先留历史版本，再换物理文件并刷新 size/sha1
+            target = overwrite_target
+            old_rel = target.storage_path
+            versioning.snapshot(target, request.user)
+            thumb_rel = _make_thumbnail(merge_abs, ext) if file_kind(chunk.filename) == "image" else ""
+            with transaction.atomic():
+                target.storage_path = merge_rel
+                target.size = actual_size
+                target.sha1 = sha1
+                target.kind = file_kind(chunk.filename)
+                target.ext = ext
+                if thumb_rel:
+                    target.thumbnail_path = thumb_rel
+                target.save(update_fields=[
+                    "storage_path", "size", "sha1", "kind", "ext", "thumbnail_path", "updated_at",
+                ])
+                chunk.status = "completed"
+                chunk.save(update_fields=["status", "updated_at"])
+                _log_op(request.user, target, "upload", detail="覆盖同名文件",
+                        to_folder=_folder_label(folder))
+
+            def _purge_old(rel=old_rel):
+                try:
+                    if not rel or FileMeta.objects.filter(storage_path=rel).exists():
+                        return
+                    path = _safe_join(MEDIA, rel)
+                    if os.path.exists(path):
+                        os.remove(path)
+                except (OSError, ValueError):
+                    logger.warning("S24：覆盖后旧物理文件清理失败 path=%s", rel)
+
+            transaction.on_commit(_purge_old)
+            transaction.on_commit(
+                lambda: shutil.rmtree(_safe_join(MEDIA, chunk.temp_dir), ignore_errors=True)
+            )
+            transaction.on_commit(lambda: _index_file(target))
+            _push_file_event(request.user.id, "updated", file_id=target.id, name=target.name)
+            _notify_quota_cross(request.user, used_before, used_bytes(request.user))
+            return Response({
+                "message": "上传完成（已覆盖同名文件）",
+                "file": FileMetaSerializer(target).data,
+                "overwritten": True,
+            })
+
+        storage_rel = merge_rel
+        # #75：秒传命中时保留用户上传的原始文件名（同名时是加过序号的最终名），
+        # 只复用已有物理文件的 storage_path/sha1，不再拿物理文件名回写
+        display_name = os.path.basename(merge_rel)
         exist = FileMeta.objects.filter(
             owner=request.user, sha1=sha1, size=actual_size, is_deleted=False
         ).exclude(storage_path=storage_rel).first()
         if exist:
-            os.remove(final_abs)
+            os.remove(merge_abs)
             storage_rel = exist.storage_path
+            sha1 = exist.sha1
 
-        ext = os.path.splitext(chunk.filename)[1].lower().lstrip(".")
         thumb_rel = ""
         if file_kind(chunk.filename) == "image":
             thumb_rel = _make_thumbnail(_safe_join(MEDIA, storage_rel), ext)
@@ -689,7 +1030,7 @@ class UploadCompleteView(APIView):
         # 临时文件没了」导致分片无法重传
         with transaction.atomic():
             fm = FileMeta.objects.create(
-                name=os.path.basename(storage_rel),
+                name=display_name,
                 folder=folder,
                 owner=request.user,
                 storage_path=storage_rel,
@@ -709,6 +1050,8 @@ class UploadCompleteView(APIView):
         transaction.on_commit(lambda: _index_file(fm))
         # S2-B1：上传完成广播（多标签页/多端同步文件列表）
         _push_file_event(request.user.id, "uploaded", file_id=fm.id, name=fm.name)
+        # S24-234：越过 80%/90% 配额阈值时提醒一次
+        _notify_quota_cross(request.user, used_before, used_bytes(request.user))
         payload = {"message": "上传完成", "file": FileMetaSerializer(fm).data}
         # F557 重名自动改名：把最终名称回传给前端提示
         if fm.name != chunk.filename:
@@ -741,20 +1084,16 @@ class FileDetailView(APIView):
             return Response({"message": "文件不存在"}, status=status.HTTP_404_NOT_FOUND)
         fields = []
         from_folder_old = _folder_label(fm.folder)
+        new_name = fm.name
+        new_folder = fm.folder
         if "name" in request.data:
             new_name = sanitize_filename(str(request.data["name"] or "").strip(), fallback="", max_length=255)
             if not new_name:
                 return Response({"message": "文件名不能为空"}, status=status.HTTP_400_BAD_REQUEST)
-            old_name = fm.name
-            fm.name = new_name
-            fields.append("name")
-            if old_name != new_name:
-                _log_op(request.user, fm, "rename", detail=f"{old_name} → {new_name}",
-                        from_folder=from_folder_old, to_folder=from_folder_old)
         if "folder" in request.data:
             new_folder_id = request.data.get("folder")
             if new_folder_id in (None, "", "null"):
-                fm.folder = None
+                new_folder = None
             else:
                 try:
                     new_folder_id = as_int(new_folder_id, field="folder", minimum=1)
@@ -763,7 +1102,24 @@ class FileDetailView(APIView):
                 new_folder = Folder.objects.filter(pk=new_folder_id, owner=request.user).first()
                 if not new_folder:
                     return Response({"message": "目标文件夹不存在"}, status=status.HTTP_404_NOT_FOUND)
-                fm.folder = new_folder
+        # #76：重命名/移动都要求「同目录不重名」，否则后续按名字查找/覆盖会取错文件
+        folder_changed = (new_folder.pk if new_folder else None) != fm.folder_id
+        if (new_name != fm.name or folder_changed) and FileMeta.objects.filter(
+            owner=request.user, folder=new_folder, is_deleted=False, name=new_name,
+        ).exclude(pk=fm.pk).exists():
+            return Response(
+                {"message": "同目录下已存在同名文件", "code": "NAME_CONFLICT"},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if "name" in request.data:
+            old_name = fm.name
+            fm.name = new_name
+            fields.append("name")
+            if old_name != new_name:
+                _log_op(request.user, fm, "rename", detail=f"{old_name} → {new_name}",
+                        from_folder=from_folder_old, to_folder=from_folder_old)
+        if "folder" in request.data:
+            fm.folder = new_folder
             fields.append("folder")
             _log_op(request.user, fm, "move", from_folder=from_folder_old,
                     to_folder=_folder_label(fm.folder))
@@ -784,10 +1140,13 @@ class FileDetailView(APIView):
         fm = self.get_object(request, pk)
         if not fm:
             return Response({"message": "文件不存在"}, status=status.HTTP_404_NOT_FOUND)
-        fm.is_deleted = True
-        fm.deleted_at = timezone.now()
-        fm.origin_folder_id = fm.folder_id
-        fm.save(update_fields=["is_deleted", "deleted_at", "origin_folder_id"])
+        # #52：仅在首次删除时记录「删除前目录」；重复删除保持原值，
+        # 否则会把恢复目录覆盖成回收站时所在目录（与批量路径 #77 同口径）
+        if not fm.is_deleted:
+            fm.is_deleted = True
+            fm.deleted_at = timezone.now()
+            fm.origin_folder_id = fm.folder_id
+            fm.save(update_fields=["is_deleted", "deleted_at", "origin_folder_id"])
         # S2-B1：删除广播（移入回收站）
         _push_file_event(request.user.id, "deleted", file_id=fm.id)
         return Response({"message": "已移入回收站"})
@@ -806,7 +1165,7 @@ class FileStarView(APIView):
 
 
 class FileBatchView(APIView):
-    """批量操作：move / trash / restore / star / unstar / delete_forever / copy"""
+    """批量操作：move / copy / group / trash / restore / star / unstar / delete_forever"""
 
     def post(self, request):
         action = request.data.get("action")
@@ -817,28 +1176,148 @@ class FileBatchView(APIView):
             return Response({"message": "未选择文件"}, status=400)
         qs = FileMeta.objects.filter(owner=request.user, id__in=ids)
         if action == "trash":
-            targets = list(qs)
-            now = timezone.now()
-            for fm in targets:
-                fm.is_deleted = True
-                fm.deleted_at = now
-                fm.origin_folder_id = fm.folder_id
-            FileMeta.objects.bulk_update(
-                targets, ["is_deleted", "deleted_at", "origin_folder_id"], batch_size=500
-            )
+            # #77：只处理尚未删除的文件；已在回收站的保持 origin_folder/deleted_at，
+            # 否则再次删除会把「删除前目录」覆盖成回收站时所在的目录
+            targets = [fm for fm in qs if not fm.is_deleted]
+            if targets:
+                now = timezone.now()
+                for fm in targets:
+                    fm.is_deleted = True
+                    fm.deleted_at = now
+                    fm.origin_folder_id = fm.folder_id
+                FileMeta.objects.bulk_update(
+                    targets, ["is_deleted", "deleted_at", "origin_folder_id"], batch_size=500
+                )
             return Response({"message": f"已将 {len(targets)} 个文件移入回收站"})
+        if action == "restore":
+            # S24-211：批量恢复，复用回收站的「回原目录 + 同名自动改名」逻辑
+            targets = list(FileMeta.objects.filter(
+                owner=request.user, is_deleted=True, id__in=ids,
+            ).select_related("folder"))
+            if not targets:
+                return Response({"message": "没有可恢复的文件"}, status=400)
+            with transaction.atomic():
+                restored, renamed = _restore_files(request.user, targets)
+            payload = {"message": f"已恢复 {restored} 个文件", "restored": restored, "renamed": renamed}
+            if renamed:
+                payload["message"] = f"已恢复 {restored} 个文件，其中 {renamed} 个已改名"
+            return Response(payload)
         if action == "move":
             folder = _owner_folder(request.user, request.data.get("folder"))
             if request.data.get("folder") not in (None, "", "null", "0", 0) and not folder:
                 return Response({"message": "目标文件夹不存在"}, status=404)
-            n = 0
-            for fm in qs:
-                src = _folder_label(fm.folder)
-                fm.folder = folder
-                fm.save(update_fields=["folder", "updated_at"])
-                _log_op(request.user, fm, "move", from_folder=src, to_folder=_folder_label(folder))
-                n += 1
-            return Response({"message": f"已移动 {n} 个文件"})
+            on_conflict = str(request.data.get("on_conflict") or "").strip()
+            if on_conflict not in ("skip", "rename"):
+                on_conflict = ""
+            targets = list(qs.select_related("folder"))
+            try:
+                dry_run = parse_bool(request.data.get("dry_run"), field="dry_run")
+            except ValidationError:
+                return Response({"message": "dry_run 必须是布尔值"}, status=400)
+            folder_id = folder.pk if folder else None
+            # S24-215：同目录重名预检（排除本次选中的文件，已在该目录的文件不算冲突）
+            taken_names = set(
+                FileMeta.objects.filter(owner=request.user, folder=folder, is_deleted=False)
+                .exclude(id__in=ids).values_list("name", flat=True)
+            )
+            conflicts = [
+                {"id": fm.id, "name": fm.name, "reason": "目标文件夹已存在同名文件"}
+                for fm in targets if fm.folder_id != folder_id and fm.name in taken_names
+            ]
+            if dry_run:
+                return Response({
+                    "dry_run": True,
+                    "target": {"id": folder_id or 0, "name": _folder_label(folder)},
+                    "total": len(targets),
+                    "ok_count": len(targets) - len(conflicts),
+                    "conflict_count": len(conflicts),
+                    "conflicts": conflicts,
+                })
+            # #54：整段移动收进单事务，元数据用 bulk_update 收敛写次数
+            with transaction.atomic():
+                now = timezone.now()
+                moves, skipped, renamed = [], [], 0
+                moving = []
+                for fm in targets:
+                    conflict = fm.folder_id != folder_id and fm.name in taken_names
+                    if conflict and on_conflict == "skip":
+                        skipped.append({"id": fm.id, "name": fm.name})
+                        continue
+                    if conflict and on_conflict == "rename":
+                        base, ext = os.path.splitext(fm.name)
+                        i = 1
+                        candidate = f"{base}({i}){ext}"
+                        while candidate in taken_names:
+                            i += 1
+                            candidate = f"{base}({i}){ext}"
+                        fm.name = candidate
+                        taken_names.add(candidate)
+                        renamed += 1
+                    moves.append((fm, _folder_label(fm.folder)))
+                    fm.folder = folder
+                    fm.updated_at = now
+                    moving.append(fm)
+                if moving:
+                    FileMeta.objects.bulk_update(moving, ["folder", "name", "updated_at"], batch_size=500)
+                for fm, src in moves:
+                    _log_op(request.user, fm, "move", from_folder=src, to_folder=_folder_label(folder))
+            payload = {
+                "message": f"已移动 {len(moving)} 个文件",
+                "moved": len(moving), "skipped": skipped, "renamed": renamed,
+                "conflict_count": len(conflicts), "target": {"id": folder_id or 0, "name": _folder_label(folder)},
+            }
+            if skipped:
+                payload["message"] = f"已移动 {len(moving)} 个文件，跳过 {len(skipped)} 个同名文件"
+            elif renamed:
+                payload["message"] = f"已移动 {len(moving)} 个文件，其中 {renamed} 个已改名"
+            return Response(payload)
+        if action == "copy":
+            # S24-228：批量复制到目标目录（逐文件物理副本 + 操作流水）
+            folder = _owner_folder(request.user, request.data.get("folder"))
+            if request.data.get("folder") not in (None, "", "null", "0", 0) and not folder:
+                return Response({"message": "目标文件夹不存在"}, status=404)
+            targets = list(qs.filter(is_deleted=False).select_related("folder"))
+            if not targets:
+                return Response({"message": "没有可复制的文件"}, status=400)
+            rel_dir = os.path.join("files", str(request.user.id), timezone.now().strftime("%Y%m"))
+            os.makedirs(_safe_join(MEDIA, rel_dir), exist_ok=True)
+            created, failed = [], []
+            with transaction.atomic():
+                taken_names = set(
+                    FileMeta.objects.filter(owner=request.user, folder=folder, is_deleted=False)
+                    .values_list("name", flat=True)
+                )
+                for fm in targets:
+                    src_abs = _safe_join(MEDIA, fm.storage_path)
+                    if not os.path.exists(src_abs):
+                        failed.append({"id": fm.id, "name": fm.name, "reason": "物理文件缺失"})
+                        continue
+                    base, ext = os.path.splitext(fm.name)
+                    new_name, i = f"{base}(副本){ext}", 2
+                    while new_name in taken_names:
+                        new_name = f"{base}(副本{i}){ext}"
+                        i += 1
+                    taken_names.add(new_name)
+                    dst_rel = os.path.join(rel_dir, f"{uuid.uuid4().hex}{ext}").replace("\\", "/")
+                    shutil.copy2(src_abs, _safe_join(MEDIA, dst_rel))
+                    copy = FileMeta.objects.create(
+                        name=new_name, folder=folder, owner=request.user, storage_path=dst_rel,
+                        size=fm.size, sha1=fm.sha1, kind=fm.kind, ext=fm.ext,
+                        description=fm.description,
+                    )
+                    created.append(copy.id)
+                    _log_op(request.user, copy, "copy", detail=f"批量复制自 {fm.name}",
+                            from_folder=_folder_label(fm.folder), to_folder=_folder_label(folder))
+            return Response({
+                "message": f"已复制 {len(created)} 个文件",
+                "count": len(created), "ids": created, "failed": failed,
+            })
+        if action == "group":
+            # S24-235：批量写入收藏分组（空值表示取消分组）
+            group = str(request.data.get("group") or "").strip()[:50]
+            n = qs.update(favorite_group=group)
+            word = f"已归入分组「{group}」" if group else "已取消分组"
+            return Response({"message": f"{word}（{n} 个文件）", "group": group, "count": n})
         if action == "star":
             n = qs.update(is_star=True)
             return Response({"message": f"已收藏 {n} 个文件"})
@@ -846,24 +1325,42 @@ class FileBatchView(APIView):
             n = qs.update(is_star=False)
             return Response({"message": f"已取消收藏 {n} 个文件"})
         if action == "delete_forever":
-            n = 0
-            for fm in qs:
-                self._remove_physical(fm)
-                fm.delete()
-                n += 1
-            return Response({"message": f"已彻底删除 {n} 个文件"})
+            # #54/#55：元数据删除在同一事务内完成，物理文件由 _remove_physical
+            # 在提交后清理；中途失败整体回滚，元数据不会丢
+            targets = list(qs)
+            with transaction.atomic():
+                for fm in targets:
+                    self._remove_physical(fm)
+            return Response({"message": f"已彻底删除 {len(targets)} 个文件"})
         return Response({"message": "未知操作"}, status=400)
 
     @staticmethod
     def _remove_physical(fm):
-        abs_path = _safe_join(MEDIA, fm.storage_path)
-        if os.path.exists(abs_path):
-            # 仅当没有其它元数据引用同一物理文件时才删除
-            if FileMeta.objects.filter(storage_path=fm.storage_path).exclude(pk=fm.pk).count() == 0:
+        """#55：事务内先删元数据，事务提交后再删磁盘文件。
+
+        原实现先删磁盘再删元数据：元数据删除失败会留下指向缺失文件的记录。
+        磁盘文件可能被多条 FileMeta 引用（秒传/复制共享 storage_path 或缩略图），
+        因此提交后仍需确认没有其它记录引用才真正删除。
+        """
+        storage_path = fm.storage_path
+        thumbnail_path = fm.thumbnail_path
+        fm.delete()
+
+        def _purge():
+            for rel, field in ((storage_path, "storage_path"), (thumbnail_path, "thumbnail_path")):
+                if not rel:
+                    continue
                 try:
-                    os.remove(abs_path)
-                except OSError:
-                    pass
+                    # 还有记录引用同一物理文件时不删，避免兄弟记录指向缺失文件
+                    if FileMeta.objects.filter(**{field: rel}).exists():
+                        continue
+                    abs_path = _safe_join(MEDIA, rel)
+                    if os.path.exists(abs_path):
+                        os.remove(abs_path)
+                except (OSError, ValueError):
+                    logger.warning("S21：物理文件清理失败 path=%s", rel)
+
+        transaction.on_commit(_purge)
 
 
 class FileCopyView(APIView):
@@ -893,6 +1390,45 @@ class FileCopyView(APIView):
         _log_op(request.user, copy, "copy", detail=f"复制自 {fm.name}",
                 from_folder=_folder_label(fm.folder), to_folder=_folder_label(fm.folder))
         return Response(FileMetaSerializer(copy).data, status=201)
+
+
+class FileToNoteView(APIView):
+    """S24-224：把文本文件沉淀为笔记（≤200KB，source=import，标题取文件名）"""
+
+    MAX_BYTES = 200 * 1024
+
+    def post(self, request, pk):
+        fm = FileMeta.objects.filter(pk=pk, owner=request.user, is_deleted=False).first()
+        if not fm:
+            return Response({"message": "文件不存在"}, status=status.HTTP_404_NOT_FOUND)
+        if fm.preview_type != "text":
+            return Response({"message": "仅文本类文件可转为笔记", "code": "NOT_TEXT"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if fm.size > self.MAX_BYTES:
+            return Response({"message": "文件超过 200KB，不支持转为笔记"}, status=status.HTTP_400_BAD_REQUEST)
+        abs_path = _safe_join(MEDIA, fm.storage_path)
+        if not os.path.isfile(abs_path):
+            return Response({"message": "物理文件缺失"}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read(self.MAX_BYTES)
+        except OSError:
+            return Response({"message": "文件读取失败"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        from notes.models import Note
+
+        try:
+            from notes.views import count_words
+        except Exception:  # 计数失败不影响主流程
+            count_words = None
+        words = count_words(content) if count_words else len(content)
+        note = Note.objects.create(
+            title=fm.name[:200], content=content, owner=request.user,
+            words=words or 0, source="import",
+        )
+        return Response({
+            "message": "已转为笔记",
+            "note_id": note.id, "title": note.title, "words": note.words,
+        }, status=status.HTTP_201_CREATED)
 
 
 class FileCreateTextView(APIView):
@@ -937,9 +1473,15 @@ class FileSaveTextView(APIView):
             return Response({"message": "文件不存在"}, status=404)
         if fm.kind not in ("text", "other"):
             return Response({"message": "仅文本文件可在线编辑"}, status=400)
+        if fm.size > 256 * 1024:
+            return Response({"message": "文件超过 256KB，不支持在线编辑"}, status=400)
         content = request.data.get("content", "")
-        abs_path = _safe_join(MEDIA, fm.storage_path)
+        if not isinstance(content, str):
+            return Response({"message": "content 必须是字符串"}, status=400)
         data = content.encode("utf-8")
+        if len(data) > 2 * 1024 * 1024:
+            return Response({"message": "内容超过 2MB 上限"}, status=400)
+        abs_path = _safe_join(MEDIA, fm.storage_path)
         # F11：覆盖前保留历史版本（版本文件写失败不影响本次保存）
         versioning.snapshot(fm, request.user)
         with open(abs_path, "wb") as f:
@@ -953,17 +1495,38 @@ class FileSaveTextView(APIView):
 
 
 class FileBatchDownloadView(APIView):
-    """多个文件打包成 zip 下载"""
+    """多个文件打包成 zip 下载（总量与文件数双上限）"""
+
+    MAX_FILES = 200
+    MAX_TOTAL_BYTES = 200 * 1024 * 1024  # 200MB
+    # 内存内最多保留 8MB，超过自动落临时文件，避免 zip 峰值占满内存
+    SPOOL_MAX = 8 * 1024 * 1024
 
     def post(self, request):
         ids = _as_id_list(request.data.get("file_ids"))
         if ids is None:
             return Response({"message": "file_ids 必须是整数数组"}, status=400)
-        files = FileMeta.objects.filter(owner=request.user, id__in=ids, is_deleted=False)
+        files = list(FileMeta.objects.filter(owner=request.user, id__in=ids, is_deleted=False))
         if not files:
             return Response({"message": "没有可下载的文件"}, status=400)
-        buf = io.BytesIO()
+        # #95：打包前先按元数据校验，避免 1000 个 1GB 文件把内存打满
+        if len(files) > self.MAX_FILES:
+            return Response(
+                {"message": f"一次最多打包 {self.MAX_FILES} 个文件，当前 {len(files)} 个"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        total_size = sum(fm.size or 0 for fm in files)
+        if total_size > self.MAX_TOTAL_BYTES:
+            return Response(
+                {"message": f"打包文件总大小 {format_size(total_size)} 超过 "
+                            f"{format_size(self.MAX_TOTAL_BYTES)} 上限"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        buf = tempfile.SpooledTemporaryFile(max_size=self.SPOOL_MAX, mode="w+b")
         used = set()
+        # S24-214：清单逐行记录 name / size / sha1 / folder / 导出时间
+        exported_at = timezone.localtime().strftime("%Y-%m-%d %H:%M:%S")
+        manifest = []
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for fm in files:
                 abs_path = _safe_join(MEDIA, fm.storage_path)
@@ -977,10 +1540,13 @@ class FileBatchDownloadView(APIView):
                     k += 1
                 used.add(arc)
                 zf.write(abs_path, arc)
+                manifest.append([arc, fm.size or 0, fm.sha1 or "", _folder_label(fm.folder), exported_at])
+            lines = ["name\tsize\tsha1\tfolder\texported_at"]
+            lines += ["\t".join(str(v) for v in row) for row in manifest]
+            zf.writestr("_manifest.txt", "\n".join(lines) + "\n")
         buf.seek(0)
-        resp = HttpResponse(buf.getvalue(), content_type="application/zip")
-        resp["Content-Disposition"] = "attachment; filename=files.zip"
-        return resp
+        return FileResponse(buf, as_attachment=True, filename="files.zip",
+                            content_type="application/zip")
 
 
 class FileDownloadView(APIView):
@@ -997,22 +1563,9 @@ class FileDownloadView(APIView):
         fm = FileMeta.objects.filter(pk=pk, is_deleted=False).first()
         if not fm:
             return Response({"message": "文件不存在"}, status=status.HTTP_404_NOT_FOUND)
-        if fm.owner_id != request.user.id:
-            token = request.query_params.get("share") or request.query_params.get("token")
-            if not token:
-                return Response(
-                    # 1016 是登录锁定专用码（accounts LoginView），
-                    # 分享下载场景复用会污染前端锁定提示，这里用 1011 无操作权限。
-                    {"message": "非本人文件，需通过共享链接下载", "code": 1011},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
-            link = find_link(token, file_id=fm.pk)
-            try:
-                validate_link(link, request.query_params.get("password", ""), for_download=True, request=request)
-            except ShareAccessError as exc:
-                return exc.as_response()
-            if not bump_download(link):
-                return Response({"message": "下载次数已达上限"}, status=status.HTTP_403_FORBIDDEN)
+        denied = _authorize_file_bytes(request, fm, consume_download=True)
+        if denied is not None:
+            return denied
         abs_path = _safe_join(MEDIA, fm.storage_path)
         if not os.path.exists(abs_path):
             return Response({"message": "物理文件缺失"}, status=status.HTTP_404_NOT_FOUND)
@@ -1103,9 +1656,19 @@ class FileRawView(APIView):
     CHUNK = 1024 * 512  # 512KB 分片
 
     def get(self, request, pk):
-        fm = _get_file(request.user, pk)
+        # #23：原文件输出与 /download/ 统一授权——非 owner（含 dept/all 数据范围）
+        # 必须携带指向本文件的分享 token，不能再凭可见范围直接取原始字节
+        fm = FileMeta.objects.filter(pk=pk, is_deleted=False).first()
         if not fm:
             return Response({"message": "文件不存在"}, status=status.HTTP_404_NOT_FOUND)
+        # 仅对可预览类型开放内联，其他类型强制下载，避免把可执行文件当页面渲染
+        disposition = "inline" if fm.preview_type != "none" and (fm.ext or "").lower() not in (
+            "svg", "svgz", "html", "htm", "xhtml"
+        ) else "attachment"
+        # 强制下载才占用一次下载额度；内联 Range 只校验不计数，避免拖动进度条耗尽上限
+        denied = _authorize_file_bytes(request, fm, consume_download=(disposition == "attachment"))
+        if denied is not None:
+            return denied
         abs_path = _safe_join(MEDIA, fm.storage_path)
         if not os.path.exists(abs_path):
             return Response({"message": "物理文件缺失"}, status=status.HTTP_404_NOT_FOUND)
@@ -1114,9 +1677,7 @@ class FileRawView(APIView):
         content_type = self._content_type(fm, abs_path)
         range_header = request.headers.get("Range") or request.META.get("HTTP_RANGE", "")
 
-        # 仅对可预览类型开放内联，其他类型强制下载，避免把可执行文件当页面渲染
-        disposition = "inline" if fm.preview_type != "none" else "attachment"
-        filename = re.sub(r'[\\/:*?"<>|\r\n]', "_", fm.name)
+        filename = re.sub(r'[\\/:*?"<>|\r\n]', "_", fm.name).strip() or "file"
 
         match = re.match(r"bytes=(\d*)-(\d*)$", (range_header or "").strip())
         if match:
@@ -1156,7 +1717,9 @@ class FileRawView(APIView):
             resp["Content-Length"] = str(total)
 
         resp["Accept-Ranges"] = "bytes"
-        resp["Content-Disposition"] = f"{disposition}; filename*=UTF-8''{filename}"
+        # #24：交给 Django 按 RFC5987 编码（非 ASCII 名走 filename*=utf-8''...，
+        # 避免手拼导致的乱码/头部非法）；ASCII 名仍保留 filename=
+        resp["Content-Disposition"] = content_disposition_header(disposition == "attachment", filename)
         resp["Cache-Control"] = "private, max-age=300"
         return resp
 
@@ -1251,9 +1814,13 @@ class FilePdfView(APIView):
     """输出 PDF 供内嵌预览：Office 走转换产物，原生 PDF 走原文件"""
 
     def get(self, request, pk):
-        fm = _get_file(request.user, pk)
+        # #23：PDF 与原文件同源，非 owner 同样必须持有效分享 token
+        fm = FileMeta.objects.filter(pk=pk, is_deleted=False).first()
         if not fm:
             return Response({"message": "文件不存在"}, status=status.HTTP_404_NOT_FOUND)
+        denied = _authorize_file_bytes(request, fm, consume_download=False)
+        if denied is not None:
+            return denied
 
         rel = fm.pdf_path if fm.preview_type == "office" else fm.storage_path
         if not rel:
@@ -1263,7 +1830,8 @@ class FilePdfView(APIView):
         if not os.path.exists(abs_path):
             return Response({"message": "PDF 文件缺失，请重新转换", "code": "FILE_MISSING"}, status=404)
 
-        _touch_recent(request.user, fm)
+        if fm.owner_id == request.user.id:
+            _touch_recent(request.user, fm)
         resp = FileResponse(open(abs_path, "rb"), content_type="application/pdf")
         resp["Content-Disposition"] = "inline"
         resp["Accept-Ranges"] = "bytes"
@@ -1297,6 +1865,18 @@ class RecentFileView(APIView):
     def delete(self, request):
         RecentFile.objects.filter(owner=request.user).delete()
         return Response({"message": "已清空最近访问"})
+
+
+class RecentFileDetailView(APIView):
+    """S24-226：移除单条最近访问记录"""
+
+    def delete(self, request, file_id):
+        rec = RecentFile.objects.filter(owner=request.user, file_id=file_id).first()
+        if not rec:
+            return Response({"message": "记录不存在"}, status=status.HTTP_404_NOT_FOUND)
+        rec.delete()
+        return Response({"message": "已移除最近访问记录"})
+
 
 
 class StarredFileView(APIView):
@@ -1356,18 +1936,109 @@ class StorageAnalysisView(APIView):
         })
 
 
+class StorageFolderStatsView(APIView):
+    """S24-219：按文件夹递归聚合体积与文件数，倒序取前 20"""
+
+    def get(self, request):
+        folders = list(Folder.objects.filter(owner=request.user).only("id", "name", "parent_id"))
+        rows = (
+            FileMeta.objects.filter(owner=request.user, is_deleted=False, folder__isnull=False)
+            .values("folder_id").annotate(c=Count("id"), s=Sum("size"))
+        )
+        own = {r["folder_id"]: (r["c"] or 0, r["s"] or 0) for r in rows}
+        children = {}
+        for f in folders:
+            children.setdefault(f.parent_id, []).append(f)
+        memo = {}
+
+        def _total(fid, guard):
+            if fid in memo:
+                return memo[fid]
+            if fid in guard:
+                return (0, 0)
+            guard = guard | {fid}
+            c, s = own.get(fid, (0, 0))
+            for child in children.get(fid, []):
+                cc, ss = _total(child.id, guard)
+                c += cc
+                s += ss
+            memo[fid] = (c, s)
+            return memo[fid]
+
+        used = FileMeta.objects.filter(owner=request.user, is_deleted=False).aggregate(s=Sum("size"))["s"] or 0
+        items = []
+        for f in folders:
+            c, s = _total(f.id, frozenset())
+            if s <= 0 and c == 0:
+                continue
+            items.append({
+                "id": f.id, "name": f.name, "parent": f.parent_id,
+                "file_count": c, "size": s, "size_text": format_size(s),
+                "pct": round(s / used * 100, 1) if used else 0.0,
+            })
+        items.sort(key=lambda x: (-x["size"], -x["file_count"]))
+        items = items[:20]
+        root = FileMeta.objects.filter(owner=request.user, is_deleted=False, folder__isnull=True) \
+            .aggregate(c=Count("id"), s=Sum("size"))
+        return Response({
+            "list": items, "total": len(items),
+            "used_bytes": used, "used_text": format_size(used),
+            "root": {"file_count": root["c"] or 0, "size": root["s"] or 0,
+                     "size_text": format_size(root["s"] or 0)},
+        })
+
+
 # ============ 回收站 ============
 
 class TrashListView(APIView):
+    """回收站列表：支持 q / kind / deleted_after / deleted_before 过滤，并给出剩余保留天数"""
+
+    def _keep_days(self):
+        return int(getattr(settings, "TRASH_KEEP_DAYS", 30) or 30)
+
+    @staticmethod
+    def _with_remaining_days(files, data, keep_days):
+        """在序列化结果上补 remaining_days（距离自动清理的天数）"""
+        now = timezone.now()
+        for fm, row in zip(files, data):
+            if fm.deleted_at:
+                used = (now - fm.deleted_at).days
+                row["remaining_days"] = max(0, keep_days - used)
+            else:
+                row["remaining_days"] = keep_days
+        return data
+
     def get(self, request):
-        qs = _file_qs(request.user).filter(is_deleted=True).order_by("-deleted_at") \
-            .select_related("folder", "owner").prefetch_related("tags")
+        qs = _file_qs(request.user).filter(is_deleted=True)
+        q = (request.query_params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(Q(name__icontains=q) | Q(description__icontains=q))
+        kind = request.query_params.get("kind")
+        if kind:
+            qs = qs.filter(kind=kind)
+        # S24-232：删除时间范围（date 字符串 YYYY-MM-DD）
+        for key, lookup in (("deleted_after", "deleted_at__date__gte"),
+                            ("deleted_before", "deleted_at__date__lte")):
+            raw = (request.query_params.get(key) or "").strip()
+            if not raw:
+                continue
+            try:
+                value = date.fromisoformat(raw)
+            except ValueError:
+                return Response({"message": f"{key} 必须是 YYYY-MM-DD"}, status=400)
+            qs = qs.filter(**{lookup: value})
+        qs = qs.order_by("-deleted_at").select_related("folder", "owner").prefetch_related("tags")
+        keep_days = self._keep_days()
         pg = OptionalPageNumberPagination()
         page = pg.paginate_queryset(qs, request)
         if page is not None:
-            return pg.get_paginated_response(FileMetaSerializer(page, many=True).data)
-        data = FileMetaSerializer(qs, many=True).data
-        return Response({"list": data, "total": len(data)})
+            data = FileMetaSerializer(page, many=True).data
+            self._with_remaining_days(page, data, keep_days)
+            return pg.get_paginated_response(data)
+        rows = list(qs)
+        data = FileMetaSerializer(rows, many=True).data
+        self._with_remaining_days(rows, data, keep_days)
+        return Response({"list": data, "total": len(data), "keep_days": keep_days})
 
 
 class TrashActionView(APIView):
@@ -1379,32 +2050,28 @@ class TrashActionView(APIView):
         ids = _as_id_list(raw_ids) if raw_ids else []
         if ids is None:
             return Response({"message": "file_ids 必须是整数数组"}, status=400)
+        if not ids:
+            # 空数组不是「全选」：只有显式 all=true 才允许清空/全量还原
+            if action in ("delete", "empty") and str(request.data.get("all", "")).lower() in ("1", "true", "yes"):
+                pass
+            else:
+                return Response({"message": "未选择文件"}, status=400)
         qs = FileMeta.objects.filter(owner=request.user, is_deleted=True)
         if ids:
             qs = qs.filter(id__in=ids)
         if action == "restore":
-            count = 0
-            for fm in qs:
-                # 原目录已被删除则回到根目录
-                if fm.origin_folder_id and not Folder.objects.filter(pk=fm.origin_folder_id, owner=request.user).exists():
-                    fm.folder = None
-                else:
-                    fm.folder_id = fm.origin_folder_id
-                fm.is_deleted = False
-                fm.deleted_at = None
-                fm.save(update_fields=["folder", "is_deleted", "deleted_at"])
-                count += 1
-            return Response({"message": f"已恢复 {count} 个文件"})
+            with transaction.atomic():
+                count, renamed = _restore_files(request.user, qs)
+            payload = {"message": f"已恢复 {count} 个文件", "restored": count, "renamed": renamed}
+            if renamed:
+                payload["message"] = f"已恢复 {count} 个文件，其中 {renamed} 个已改名"
+            return Response(payload)
         if action in ("delete", "empty"):
             count = 0
             for fm in qs:
+                # #55：元数据与缩略图/原文件的清理都由 _remove_physical 收口
+                # （事务内删元数据，提交后再删磁盘），这里不再重复 delete
                 FileBatchView._remove_physical(fm)
-                if fm.thumbnail_path and os.path.exists(_safe_join(MEDIA, fm.thumbnail_path)):
-                    try:
-                        os.remove(_safe_join(MEDIA, fm.thumbnail_path))
-                    except OSError:
-                        pass
-                fm.delete()
                 count += 1
             word = "彻底删除" if action == "delete" else "清空"
             return Response({"message": f"已{word} {count} 个文件"})
@@ -1413,6 +2080,9 @@ class TrashActionView(APIView):
 
 class TrashAutoCleanView(APIView):
     """清理超过保留期的回收站文件（按 TRASH_KEEP_DAYS，可传 days 覆盖）"""
+
+    # #22：单请求最多处理 200 条，超出部分分多次清理，避免一次请求遍历全库
+    MAX_PER_RUN = 200
 
     def post(self, request):
         from django.conf import settings as s
@@ -1424,12 +2094,18 @@ class TrashAutoCleanView(APIView):
             return Response({"message": "days 必须 >= 1"}, status=status.HTTP_400_BAD_REQUEST)
         threshold = timezone.now() - timedelta(days=days)
         qs = FileMeta.objects.filter(owner=request.user, is_deleted=True, deleted_at__lt=threshold)
-        count = 0
-        for fm in qs:
-            FileBatchView._remove_physical(fm)
-            fm.delete()
-            count += 1
-        return Response({"message": f"已清理 {count} 个过期回收文件", "cleaned": count, "days": days})
+        targets = list(qs.order_by("deleted_at")[: self.MAX_PER_RUN])
+        with transaction.atomic():
+            for fm in targets:
+                FileBatchView._remove_physical(fm)
+        # 事务提交后再统计剩余量（本次已删的不会计入）
+        remaining = qs.count()
+        return Response({
+            "message": f"已清理 {len(targets)} 个过期回收文件",
+            "cleaned": len(targets),
+            "remaining": remaining,
+            "days": days,
+        })
 
     def get(self, request):
         """返回当前清理配置"""
@@ -1440,6 +2116,15 @@ class TrashAutoCleanView(APIView):
 # ============ 共享链接 ============
 
 class ShareLinkCreateView(APIView):
+    # #21 配额与默认有效期：防止单用户/单文件无限建链，也避免「不填就永久有效」
+    MAX_LINKS_PER_USER = 200
+    MAX_LINKS_PER_TARGET = 20
+    DEFAULT_EXPIRE_HOURS = 24 * 7
+    # #93 有效期与次数上限：到期时间由 timedelta 计算，超大值会 OverflowError→500
+    MIN_EXPIRE_HOURS = 1
+    MAX_EXPIRE_HOURS = 8760  # 1 年
+    MAX_DOWNLOADS_LIMIT = 1000000
+
     def post(self, request):
         file_id = request.data.get("file_id")
         folder_id = request.data.get("folder_id")
@@ -1450,10 +2135,29 @@ class ShareLinkCreateView(APIView):
         if permission not in ("view", "download", "edit"):
             return Response({"message": "权限值非法"}, status=400)
         try:
-            hours = int(expire_hours) if expire_hours not in (None, "") else None
+            # 未指定时默认 7 天；显式传 0 表示永久有效（保留原有语义）
+            hours = int(expire_hours) if expire_hours not in (None, "") else self.DEFAULT_EXPIRE_HOURS
             mlimit = int(max_downloads) if max_downloads not in (None, "", 0, "0") else None
         except (TypeError, ValueError):
             return Response({"message": "expire_hours / max_downloads 必须是整数"}, status=400)
+        # #93：有效期限定 0（永久）或 1–8760 小时，次数上限必须在 1–1000000
+        if hours and (hours < self.MIN_EXPIRE_HOURS or hours > self.MAX_EXPIRE_HOURS):
+            return Response(
+                {"message": f"expire_hours 必须在 {self.MIN_EXPIRE_HOURS}–{self.MAX_EXPIRE_HOURS} 小时之间（0 表示永久）",
+                 "code": "SHARE_EXPIRE_RANGE"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if mlimit is not None and not (1 <= mlimit <= self.MAX_DOWNLOADS_LIMIT):
+            return Response(
+                {"message": f"max_downloads 必须在 1–{self.MAX_DOWNLOADS_LIMIT} 之间",
+                 "code": "SHARE_MAX_DOWNLOADS_RANGE"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # S24-223：文件夹分享可开启访客上传（收集链接）
+        try:
+            allow_upload = parse_bool(request.data.get("allow_upload"), field="allow_upload")
+        except ValidationError:
+            return Response({"message": "allow_upload 必须是布尔值"}, status=400)
 
         target = None
         if file_id:
@@ -1475,6 +2179,25 @@ class ShareLinkCreateView(APIView):
         else:
             return Response({"message": "请指定文件或文件夹"}, status=400)
 
+        # #21：配额按「未撤销」链接统计，撤销后额度立即释放
+        alive = ShareLink.objects.filter(created_by=request.user, is_revoked=False)
+        if alive.count() >= self.MAX_LINKS_PER_USER:
+            return Response(
+                {"message": f"分享链接数量已达上限（{self.MAX_LINKS_PER_USER} 条），请先撤销不用的链接",
+                 "code": "SHARE_LINK_QUOTA"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        same_target = alive.filter(
+            file=target if isinstance(target, FileMeta) else None,
+            folder=target if isinstance(target, Folder) else None,
+        ).count()
+        if same_target >= self.MAX_LINKS_PER_TARGET:
+            return Response(
+                {"message": f"该文件/文件夹的分享链接已达上限（{self.MAX_LINKS_PER_TARGET} 条）",
+                 "code": "SHARE_LINK_TARGET_QUOTA"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         token = uuid.uuid4().hex[:16]
         expire_at = timezone.now() + timedelta(hours=hours) if hours else None
         link = ShareLink.objects.create(
@@ -1488,6 +2211,7 @@ class ShareLinkCreateView(APIView):
             # 哈希也不同，撞库无法横向比对）；留空表示无密码
             password=make_password(password[:64]) if password else "",
             max_downloads=mlimit,
+            allow_upload=allow_upload and isinstance(target, Folder),
         )
         if link.file:
             _record_visibility(link.file, request.user, note="创建共享链接", action="share_create")
@@ -1495,22 +2219,30 @@ class ShareLinkCreateView(APIView):
 
 
 class ShareLinkListView(APIView):
-    """我创建的共享链接，支持类型 / 状态筛选"""
+    """我创建的共享链接，支持类型 / 状态筛选（#53：条件下推 + 标准分页）"""
 
     def get(self, request):
         qs = ShareLink.objects.filter(created_by=request.user).order_by("-created_at")
+        now = timezone.now()
+        # 与 ShareLink.is_expired 同口径：撤销 / 过期 / 下载次数达上限
+        active_q = (
+            Q(is_revoked=False)
+            & (Q(expire_at__isnull=True) | Q(expire_at__gt=now))
+            & (Q(max_downloads__isnull=True) | Q(download_count__lt=F("max_downloads")))
+        )
         st = request.query_params.get("status")
         if st == "expired":
-            qs = [l for l in qs if l.is_expired]
+            qs = qs.exclude(active_q)
         elif st == "active":
-            qs = [l for l in qs if not l.is_expired]
+            qs = qs.filter(active_q)
         ttype = request.query_params.get("type")
         if ttype == "file":
-            qs = [l for l in qs if l.file_id]
+            qs = qs.filter(file__isnull=False)
         elif ttype == "folder":
-            qs = [l for l in qs if l.folder_id]
-        data = ShareLinkSerializer(qs, many=True).data
-        return Response({"list": data, "total": len(data)})
+            qs = qs.filter(folder__isnull=False)
+        pg = StandardPagination()
+        page = pg.paginate_queryset(qs, request)
+        return pg.get_paginated_response(ShareLinkSerializer(page, many=True).data)
 
 
 class ShareLinkDetailView(APIView):
@@ -1548,6 +2280,9 @@ class ShareLinkDetailView(APIView):
                 link.expire_at = None
         if "is_revoked" in request.data:
             link.is_revoked = parse_bool(request.data["is_revoked"], field="is_revoked")
+        if "allow_upload" in request.data:
+            # 仅文件夹分享支持上传
+            link.allow_upload = parse_bool(request.data["allow_upload"], field="allow_upload") and bool(link.folder_id)
         link.save()
         if link.file:
             _record_visibility(link.file, request.user, note="更新共享链接", action="share_update")
@@ -1572,7 +2307,7 @@ class ShareAccessView(APIView):
     def get(self, request, token):
         link = find_link(token)
         try:
-            validate_link(link, request.query_params.get("password", ""), request=request)
+            validate_link(link, request_password(request), request=request)
         except ShareAccessError as exc:
             return exc.as_response()
         bump_view(link)
@@ -1599,6 +2334,10 @@ class ShareAccessView(APIView):
             files = link.folder.files.filter(is_deleted=False).only("id", "name", "size", "kind")
             return Response({
                 "type": "folder", "name": link.folder.name, "permission": link.permission,
+                # S24-223：开启允许上传时公开页展示投递入口
+                "allow_upload": bool(link.allow_upload),
+                "upload_url": f"/api/share/{token}/upload/" if link.allow_upload else "",
+                "upload_max_mb": ShareUploadView.MAX_BYTES // (1024 * 1024),
                 # 只回展示所需字段；文件序列化器会带出 /media/ 直链与内部路径
                 "files": [
                     {"id": f.id, "name": f.name, "size": f.size, "kind": f.kind}
@@ -1616,7 +2355,7 @@ class ShareDownloadView(APIView):
     def get(self, request, token, pk):
         link = find_link(token, file_id=pk)
         try:
-            validate_link(link, request.query_params.get("password", ""), for_download=True, request=request)
+            validate_link(link, request_password(request), for_download=True, request=request)
         except ShareAccessError as exc:
             return exc.as_response()
         fm = link.file
@@ -1644,7 +2383,7 @@ class ShareRawView(APIView):
     def get(self, request, token, pk):
         link = find_link(token)
         try:
-            validate_link(link, request.query_params.get("password", ""), request=request)
+            validate_link(link, request_password(request), request=request)
         except ShareAccessError as exc:
             return exc.as_response()
         fm = FileMeta.objects.filter(pk=pk, is_deleted=False).first()
@@ -1657,12 +2396,106 @@ class ShareRawView(APIView):
         abs_path = _safe_join(MEDIA, fm.storage_path)
         if not os.path.exists(abs_path):
             return Response({"message": "物理文件缺失"}, status=404)
-        disposition = "inline" if fm.preview_type != "none" else "attachment"
+        disposition = "inline" if fm.preview_type != "none" and (fm.ext or "").lower() not in (
+            "svg", "svgz", "html", "htm", "xhtml"
+        ) else "attachment"
+        # view 权限只能内联预览；下载原始字节必须 download/edit 且消耗额度
+        if disposition == "attachment":
+            if link.permission not in ("download", "edit"):
+                return Response({"message": "该分享链接仅允许预览"}, status=403)
+            if not bump_download(link):
+                return Response({"message": "下载次数已达上限"}, status=403)
         resp = FileResponse(open(abs_path, "rb"),
                             content_type=FileRawView._content_type(fm, abs_path))
         resp["Content-Disposition"] = f"{disposition}; filename*=UTF-8''{sanitize_filename(fm.name)}"
         resp["Cache-Control"] = "private, max-age=300"
         return resp
+
+
+# ============ 公开收集上传（S24-223） ============
+
+class ShareUploadView(APIView):
+    """S24-223：公开收集上传——把单个文件投递到开启 allow_upload 的文件夹分享"""
+
+    permission_classes = [AllowAny]
+    parser_classes = [MultiPartParser, FormParser]
+    MAX_BYTES = 50 * 1024 * 1024
+    # 可执行/脚本/可注入类型一律拒收，避免把收集链接变成投毒入口
+    DENY_EXTS = {
+        "exe", "bat", "cmd", "com", "cpl", "dll", "msi", "scr", "vbs", "vbe", "js", "jse",
+        "wsf", "wsh", "ps1", "psm1", "jar", "php", "phtml", "jsp", "asp", "aspx", "cgi",
+        "sh", "bash", "py", "rb", "pl", "svg", "html", "htm", "xhtml", "hta", "lnk", "reg",
+    }
+
+    def post(self, request, token):
+        link = find_link(token)
+        try:
+            validate_link(link, request_password(request), request=request)
+        except ShareAccessError as exc:
+            return exc.as_response()
+        if not link.allow_upload:
+            return Response({"message": "该链接未开启上传", "code": "UPLOAD_DISABLED"}, status=403)
+        if not link.folder_id:
+            return Response({"message": "仅文件夹分享支持上传", "code": "NOT_FOLDER"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        upload = request.FILES.get("file")
+        if not upload:
+            return Response({"message": "缺少文件"}, status=status.HTTP_400_BAD_REQUEST)
+        if upload.size <= 0 or upload.size > self.MAX_BYTES:
+            return Response(
+                {"message": f"文件大小需在 1 字节到 {self.MAX_BYTES // (1024 * 1024)}MB 之间"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        name = sanitize_filename(os.path.basename(str(upload.name or "upload.bin")),
+                                 fallback="upload.bin", max_length=255)
+        ext = os.path.splitext(name)[1].lower().lstrip(".")
+        if ext in self.DENY_EXTS:
+            return Response({"message": f".{ext} 类型不允许上传", "code": "EXT_DENIED"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        owner = link.created_by
+        folder = link.folder
+        blocked = check_quota(owner, upload.size)
+        if blocked:
+            return Response({"code": blocked[0], "message": blocked[1]},
+                            status=status.HTTP_400_BAD_REQUEST)
+        # 同名自动加序号，绝不覆盖已有文件
+        base, dot_ext = os.path.splitext(name)
+        taken = set(
+            FileMeta.objects.filter(owner=owner, folder=folder, is_deleted=False)
+            .values_list("name", flat=True)
+        )
+        candidate, i = name, 1
+        while candidate in taken:
+            candidate = f"{base}({i}){dot_ext}"
+            i += 1
+        rel_dir = os.path.join("files", str(owner.id), timezone.now().strftime("%Y%m"))
+        os.makedirs(_safe_join(MEDIA, rel_dir), exist_ok=True)
+        rel = os.path.join(rel_dir, f"{uuid.uuid4().hex}{dot_ext}").replace("\\", "/")
+        abs_path = _safe_join(MEDIA, rel)
+        with open(abs_path, "wb+") as out:
+            for buf in upload.chunks():
+                out.write(buf)
+        real_size = os.path.getsize(abs_path)
+        if real_size <= 0 or real_size > self.MAX_BYTES:
+            try:
+                os.remove(abs_path)
+            except OSError:
+                pass
+            return Response({"message": "文件大小校验失败"}, status=status.HTTP_400_BAD_REQUEST)
+        sha1 = sha1_file(abs_path)
+        thumb_rel = _make_thumbnail(abs_path, ext) if file_kind(candidate) == "image" else ""
+        fm = FileMeta.objects.create(
+            name=candidate, folder=folder, owner=owner, storage_path=rel,
+            size=real_size, sha1=sha1, kind=file_kind(candidate), ext=ext,
+            thumbnail_path=thumb_rel,
+        )
+        _log_op(owner, fm, "upload", detail="分享链接收集上传", to_folder=_folder_label(folder))
+        transaction.on_commit(lambda: _index_file(fm))
+        _push_file_event(owner.id, "uploaded", file_id=fm.id, name=fm.name)
+        return Response({
+            "message": "上传成功",
+            "file": {"id": fm.id, "name": fm.name, "size": fm.size, "size_text": format_size(fm.size)},
+        }, status=status.HTTP_201_CREATED)
 
 
 # ============ 文件标签（多标签体系） ============
@@ -1728,6 +2561,44 @@ class FileTagDetailView(APIView):
         return Response({"message": "标签已删除"})
 
 
+class FileTagMergeView(APIView):
+    """S24-217：合并标签——from 的文件关系整体并入 to 后删除 from"""
+
+    def post(self, request):
+        try:
+            from_id = as_int(request.data.get("from_id"), field="from_id", minimum=1)
+            to_id = as_int(request.data.get("to_id"), field="to_id", minimum=1)
+        except ValidationError:
+            return Response({"message": "from_id / to_id 必须是整数"}, status=400)
+        if from_id == to_id:
+            return Response({"message": "不能合并到自身"}, status=400)
+        src = FileTag.objects.filter(pk=from_id, owner=request.user).first()
+        dst = FileTag.objects.filter(pk=to_id, owner=request.user).first()
+        if not src or not dst:
+            return Response({"message": "标签不存在"}, status=404)
+        through = FileMeta.tags.through
+        moved, merged = 0, 0
+        with transaction.atomic():
+            already = set(
+                through.objects.filter(filetag_id=to_id).values_list("filemeta_id", flat=True)
+            )
+            for link in through.objects.filter(filetag_id=from_id):
+                if link.filemeta_id in already:
+                    # 目标标签已有该文件：直接删除这条冗余关系
+                    link.delete()
+                    merged += 1
+                    continue
+                link.filetag_id = to_id
+                link.save(update_fields=["filetag_id"])
+                moved += 1
+            src.delete()
+        return Response({
+            "message": f"已合并标签，迁移 {moved} 个文件" + (f"，去重 {merged} 条" if merged else ""),
+            "moved": moved, "merged": merged, "from_id": from_id, "to_id": to_id,
+            "to": FileTagSerializer(dst).data,
+        })
+
+
 class FileBatchTagView(APIView):
     """给一批文件打标签 / 移除标签（add / remove / set）"""
 
@@ -1777,16 +2648,20 @@ class FileBatchRenameView(APIView):
         if not qs:
             return Response({"message": "没有可重命名的文件"}, status=400)
         try:
-            start = int(request.data.get("start", 1))
-            pad = int(request.data.get("pad", 2))
-        except (TypeError, ValueError):
-            return Response({"message": "start / pad 必须是整数"}, status=400)
+            # #94：pad 过大会让 zfill 分配超大字符串（pad=1e9 ≈ 每文件 1GB）
+            start = as_int(request.data.get("start", 1), default=1, field="start",
+                           minimum=0, maximum=1_000_000_000)
+            pad = as_int(request.data.get("pad", 2), default=2, field="pad", minimum=1, maximum=8)
+        except ValidationError:
+            return Response({"message": "start 需在 0..10^9，pad 需在 1..8"}, status=400)
         prefix = request.data.get("prefix", "") or ""
         find = request.data.get("find", "") or ""
         repl = request.data.get("replace", "") or ""
-        results = []
+        results, renamed = [], 0
         with transaction.atomic():
             for idx, fm in enumerate(qs):
+                # #78：每条结果在循环内登记，不能等循环结束只留最后一条
+                row = {"id": fm.id, "name": fm.name, "ok": True}
                 base, ext = os.path.splitext(fm.name)
                 if mode == "replace":
                     new_base = base.replace(find, repl) if find else base
@@ -1794,11 +2669,30 @@ class FileBatchRenameView(APIView):
                 else:
                     new_name = f"{prefix}{str(start + idx).zfill(pad)}_{fm.name}"
                 new_name = sanitize_filename(new_name, fallback="", max_length=255)
-                if new_name and new_name != fm.name:
-                    fm.name = new_name
-                    fm.save(update_fields=["name", "updated_at"])
-            results.append({"id": fm.id, "name": fm.name})
-        return Response({"message": f"已重命名 {len(results)} 个文件", "renamed": results})
+                if not new_name:
+                    row.update(ok=False, error="文件名不能为空")
+                    results.append(row)
+                    continue
+                if new_name == fm.name:
+                    results.append(row)
+                    continue
+                # 同目录重名检查：已保存的前序文件也会被查到，批量内冲突同样能拦住
+                if FileMeta.objects.filter(
+                    owner=request.user, folder_id=fm.folder_id, is_deleted=False, name=new_name,
+                ).exclude(pk=fm.pk).exists():
+                    row.update(ok=False, name=new_name, error="同目录下已存在同名文件")
+                    results.append(row)
+                    continue
+                fm.name = new_name
+                fm.save(update_fields=["name", "updated_at"])
+                row["name"] = new_name
+                renamed += 1
+                results.append(row)
+        failed = sum(1 for r in results if not r["ok"])
+        return Response({
+            "message": f"已重命名 {renamed} 个文件",
+            "renamed": results, "count": renamed, "failed": failed,
+        })
 
 
 class FolderTemplatesView(APIView):
@@ -1814,6 +2708,9 @@ class FolderFromTemplateView(APIView):
     入参：{"key": "project-docs"} 或 {"structure": {"子目录": ["孙目录", ...]}, "parent": 0}
     """
 
+    MAX_NODES = 200
+    MAX_DEPTH = 5
+
     def post(self, request):
         parent = _owner_folder(request.user, request.data.get("parent"))
         structure = request.data.get("structure")
@@ -1823,28 +2720,62 @@ class FolderFromTemplateView(APIView):
             if not tpl:
                 return Response({"message": "模板不存在"}, status=404)
             structure = tpl["structure"]
+        # #116：先整体校验（类型/深度/节点数），非法直接 400，不产生半成品目录树
+        try:
+            tree = self._parse(structure, 1, [0])
+        except ValueError as exc:
+            return Response({"message": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
         created = []
 
-        def walk(node_structure, parent_node):
-            if isinstance(node_structure, dict):
-                for name, children in node_structure.items():
-                    folder = Folder.objects.create(
-                        name=str(name), parent=parent_node, owner=request.user
-                    )
-                    created.append(folder.name)
-                    walk(children, folder)
-            elif isinstance(node_structure, list):
-                for item in node_structure:
-                    if isinstance(item, dict):
-                        walk(item, parent_node)
-                    else:
-                        folder = Folder.objects.create(
-                            name=str(item), parent=parent_node, owner=request.user
-                        )
-                        created.append(folder.name)
+        def create_level(nodes, parent_folder):
+            """按层 bulk_create：深度 ≤ 5，所以最多 5 条 INSERT 而不是 N 条"""
+            if not nodes:
+                return
+            folders = [Folder(name=n["name"], parent=parent_folder, owner=request.user) for n in nodes]
+            Folder.objects.bulk_create(folders, batch_size=self.MAX_NODES)
+            created.extend(f.name for f in folders)
+            for node, folder in zip(nodes, folders):
+                create_level(node["children"], folder)
 
-        walk(structure, parent)
+        with transaction.atomic():
+            create_level(tree, parent)
         return Response({"message": f"已创建 {len(created)} 个文件夹", "created": created, "count": len(created)})
+
+    def _parse(self, node, depth, counter):
+        """把模板结构收敛成 [{name, children}]；类型/深度/节点数非法抛 ValueError"""
+        if depth > self.MAX_DEPTH:
+            raise ValueError(f"目录层级不能超过 {self.MAX_DEPTH} 层")
+        result = []
+        if isinstance(node, dict):
+            for name, children in node.items():
+                result.append(self._node(name, children, depth, counter))
+        elif isinstance(node, list):
+            for item in node:
+                if isinstance(item, dict):
+                    result.extend(self._parse(item, depth, counter))
+                elif isinstance(item, str):
+                    result.append(self._node(item, [], depth, counter))
+                else:
+                    raise ValueError("structure 列表元素必须是字符串或对象")
+        else:
+            raise ValueError("structure 必须是对象或数组")
+        return result
+
+    def _node(self, name, children, depth, counter):
+        if not isinstance(name, str):
+            raise ValueError("文件夹名称必须是字符串")
+        clean = sanitize_filename(name.strip(), fallback="", max_length=200)
+        if not clean:
+            raise ValueError("文件夹名称不能为空")
+        counter[0] += 1
+        if counter[0] > self.MAX_NODES:
+            raise ValueError(f"模板目录节点不能超过 {self.MAX_NODES} 个")
+        if children is None:
+            child_nodes = []
+        else:
+            child_nodes = self._parse(children, depth + 1, counter)
+        return {"name": clean, "children": child_nodes}
 
 
 class FileCleanConfigView(APIView):
@@ -1883,7 +2814,11 @@ def _bad(message, code=400):
 
 
 class DuplicatesView(APIView):
-    """F547 重复文件检测：按 sha1 分组，返回每组文件明细与可释放空间"""
+    """F547 重复文件检测：按 sha1 分组，返回每组文件明细与可释放空间
+
+    #110：先按 sha1 分组拿到重复列表，再用一次 `sha1__in` 查询取回全部明细，
+    不再「每组一次回查」（500 组 = 501 次查询）。
+    """
 
     def get(self, request):
         try:
@@ -1891,23 +2826,116 @@ class DuplicatesView(APIView):
         except ValueError as e:
             return _bad(str(e))
         active = _file_qs(request.user).filter(is_deleted=False).exclude(sha1="").exclude(size=0)
-        dup = (active.values("sha1").annotate(c=Count("id")).filter(c__gt=1)
-               .order_by("-c")[:limit])
+        dup = list(active.values("sha1").annotate(c=Count("id")).filter(c__gt=1)
+                   .order_by("-c")[:limit])
+        if not dup:
+            return Response({
+                "groups": [], "group_count": 0, "file_count": 0,
+                "wasted_bytes": 0, "wasted_text": format_size(0),
+            })
+        sha1s = [g["sha1"] for g in dup]
+        rows = list(
+            active.filter(sha1__in=sha1s).select_related("folder")
+            .prefetch_related("tags").order_by("-created_at")
+        )
+        by_sha1 = {}
+        for fm in rows:
+            by_sha1.setdefault(fm.sha1, []).append(fm)
         groups, wasted, file_count = [], 0, 0
         for g in dup:
-            files = list(active.filter(sha1=g["sha1"]).order_by("-created_at"))
-            size = files[0].size if files else 0
-            w = size * (g["c"] - 1)
+            files = by_sha1.get(g["sha1"]) or []
+            if len(files) < 2:  # 分组后被并发删除，不再算重复
+                continue
+            size = files[0].size or 0
+            w = size * (len(files) - 1)
             wasted += w
-            file_count += g["c"]
+            file_count += len(files)
             groups.append({
-                "sha1": g["sha1"], "count": g["c"], "size": size,
+                "sha1": g["sha1"], "count": len(files), "size": size,
                 "size_text": format_size(size), "wasted": w, "wasted_text": format_size(w),
                 "files": FileMetaSerializer(files, many=True).data,
             })
         return Response({
             "groups": groups, "group_count": len(groups), "file_count": file_count,
             "wasted_bytes": wasted, "wasted_text": format_size(wasted),
+        })
+
+
+class DuplicateResolveView(APIView):
+    """S24-231：重复文件闭环——保留一份，其余同 SHA1 文件移入回收站"""
+
+    def post(self, request):
+        sha1 = str(request.data.get("sha1") or "").strip().lower()
+        if len(sha1) != 40:
+            return Response({"message": "sha1 不合法"}, status=400)
+        try:
+            keep_id = as_int(request.data.get("keep_id"), field="keep_id", minimum=1)
+        except ValidationError:
+            return Response({"message": "keep_id 必须是整数"}, status=400)
+        qs = FileMeta.objects.filter(owner=request.user, sha1=sha1, is_deleted=False)
+        keep = qs.filter(pk=keep_id).first()
+        if not keep:
+            return Response({"message": "要保留的文件不在该重复组内"}, status=404)
+        targets = [fm for fm in qs.exclude(pk=keep_id).select_related("folder")]
+        now = timezone.now()
+        with transaction.atomic():
+            for fm in targets:
+                fm.is_deleted = True
+                fm.deleted_at = now
+                fm.origin_folder_id = fm.folder_id
+            if targets:
+                FileMeta.objects.bulk_update(
+                    targets, ["is_deleted", "deleted_at", "origin_folder_id"], batch_size=500
+                )
+                for fm in targets:
+                    _log_op(request.user, fm, "trash", detail="重复文件清理",
+                            from_folder=_folder_label(fm.folder))
+        return Response({
+            "message": f"已保留 1 份，其余 {len(targets)} 个移入回收站",
+            "keep_id": keep_id, "trashed": len(targets),
+            "trashed_ids": [fm.id for fm in targets],
+        })
+
+
+class FileIntegrityView(APIView):
+    """S24-222：重算物理文件 SHA1 / 大小并与记录比对（ok / mismatch / missing）"""
+
+    MAX_FILES = 200
+
+    def post(self, request):
+        raw = request.data.get("file_ids")
+        if raw in (None, "", []):
+            ids = list(
+                FileMeta.objects.filter(owner=request.user, is_deleted=False)
+                .order_by("-updated_at").values_list("id", flat=True)[: self.MAX_FILES]
+            )
+        else:
+            ids = _as_id_list(raw)
+            if ids is None:
+                return Response({"message": "file_ids 必须是整数数组"}, status=400)
+            ids = ids[: self.MAX_FILES]
+        files = list(FileMeta.objects.filter(owner=request.user, id__in=ids, is_deleted=False))
+        ok, mismatch, missing = [], [], []
+        for fm in files:
+            abs_path = _safe_join(MEDIA, fm.storage_path) if fm.storage_path else ""
+            if not abs_path or not os.path.isfile(abs_path):
+                missing.append({"id": fm.id, "name": fm.name, "storage_path": fm.storage_path})
+                continue
+            real_size = os.path.getsize(abs_path)
+            real_sha1 = sha1_file(abs_path)
+            if real_size == fm.size and (not fm.sha1 or real_sha1 == fm.sha1):
+                ok.append(fm.id)
+            else:
+                mismatch.append({
+                    "id": fm.id, "name": fm.name,
+                    "record_size": fm.size, "real_size": real_size,
+                    "record_sha1": fm.sha1, "real_sha1": real_sha1,
+                })
+        return Response({
+            "checked": len(files),
+            "ok": ok, "ok_count": len(ok),
+            "mismatch": mismatch, "mismatch_count": len(mismatch),
+            "missing": missing, "missing_count": len(missing),
         })
 
 
@@ -1919,17 +2947,23 @@ class StorageTrendView(APIView):
             days = _int_param(request, "days", 30, lo=7, hi=90)
         except ValueError as e:
             return _bad(str(e))
-        rows = _file_qs(request.user).values_list("created_at", "size", "deleted_at")
+        qs = _file_qs(request.user)
+        # #117：按日聚合下推到数据库（TruncDate + Sum），不再把用户全部文件行
+        # 拉进 Python 逐条累加；返回行数最多等于「有增量的天数」
         events = {}
-        for created, size, deleted in rows:
-            if not created:
+        created_rows = (qs.annotate(day=TruncDate("created_at"))
+                        .values("day").annotate(total=Sum("size")).order_by("day"))
+        for row in created_rows:
+            if row["day"] is None:
                 continue
-            size = size or 0
-            cd = timezone.localtime(created).date()
-            events[cd] = events.get(cd, 0) + size
-            if deleted:
-                dd = timezone.localtime(deleted).date()
-                events[dd] = events.get(dd, 0) - size
+            events[row["day"]] = events.get(row["day"], 0) + (row["total"] or 0)
+        deleted_rows = (qs.filter(deleted_at__isnull=False)
+                        .annotate(day=TruncDate("deleted_at"))
+                        .values("day").annotate(total=Sum("size")).order_by("day"))
+        for row in deleted_rows:
+            if row["day"] is None:
+                continue
+            events[row["day"]] = events.get(row["day"], 0) - (row["total"] or 0)
         today = timezone.localdate()
         start = today - timedelta(days=days - 1)
         first = min(events) if events else start
@@ -1980,6 +3014,8 @@ class LargeFilesView(APIView):
 class FileExportCsvView(APIView):
     """F550 文件清单导出 CSV（支持 keyword/kind/tag/star 过滤，UTF-8 BOM）"""
 
+    MAX_ROWS = 50000
+
     def get(self, request):
         qs = _file_qs(request.user).filter(is_deleted=False)
         keyword = request.query_params.get("keyword") or request.query_params.get("q")
@@ -1993,24 +3029,31 @@ class FileExportCsvView(APIView):
             qs = qs.filter(tags__name=tag).distinct()
         if request.query_params.get("star") == "1":
             qs = qs.filter(is_star=True)
-        qs = qs.order_by("-created_at")
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(["ID", "文件名", "文件夹", "类型", "扩展名", "大小(字节)", "大小",
-                         "SHA1", "标签", "备注", "收藏", "创建时间", "更新时间"])
-        for fm in qs.iterator():
-            try:
-                tag_names = ",".join(fm.tags.values_list("name", flat=True))
-            except Exception:
-                tag_names = ""
-            writer.writerow([
-                fm.id, fm.name, _folder_label(fm.folder), fm.kind, fm.ext, fm.size,
-                format_size(fm.size), fm.sha1, tag_names, fm.description,
-                "是" if fm.is_star else "",
-                timezone.localtime(fm.created_at).strftime("%Y-%m-%d %H:%M") if fm.created_at else "",
-                timezone.localtime(fm.updated_at).strftime("%Y-%m-%d %H:%M") if fm.updated_at else "",
-            ])
-        resp = HttpResponse("\ufeff" + buf.getvalue(), content_type="text/csv; charset=utf-8")
+        # #118/#148：select_related + prefetch 消除逐行 N+1；硬上限 5 万行，
+        # 并用流式响应边查边写，不再整表拼进内存 StringIO
+        qs = qs.select_related("folder").prefetch_related("tags") \
+            .order_by("-created_at")[:self.MAX_ROWS]
+
+        def rows():
+            class _Echo:
+                def write(self, value):
+                    return value
+
+            writer = csv.writer(_Echo())
+            yield "\ufeff"
+            yield writer.writerow(["ID", "文件名", "文件夹", "类型", "扩展名", "大小(字节)", "大小",
+                                   "SHA1", "标签", "备注", "收藏", "创建时间", "更新时间"])
+            for fm in qs.iterator(chunk_size=1000):
+                tag_names = ",".join(t.name for t in fm.tags.all())
+                yield writer.writerow([
+                    fm.id, fm.name, _folder_label(fm.folder), fm.kind, fm.ext, fm.size,
+                    format_size(fm.size), fm.sha1, tag_names, fm.description,
+                    "是" if fm.is_star else "",
+                    timezone.localtime(fm.created_at).strftime("%Y-%m-%d %H:%M") if fm.created_at else "",
+                    timezone.localtime(fm.updated_at).strftime("%Y-%m-%d %H:%M") if fm.updated_at else "",
+                ])
+
+        resp = StreamingHttpResponse(rows(), content_type="text/csv; charset=utf-8")
         resp["Content-Disposition"] = "attachment; filename=files.csv"
         return resp
 
@@ -2081,21 +3124,45 @@ class ImageDimsView(APIView):
 
 
 class StarredOrderView(APIView):
-    """F555 收藏夹自定义排序：按传入顺序写入 favorite_order"""
+    """F555 收藏夹自定义排序：按传入顺序写入 favorite_order
+
+    #112：条数上限 1000；先一次取出目标行，再 bulk_update，避免逐个 UPDATE。
+    """
+
+    MAX_ITEMS = 1000
 
     def post(self, request):
         ids = request.data.get("file_ids")
         if not isinstance(ids, list) or not ids:
             return _bad("file_ids 必须是非空数组")
-        n = 0
-        for idx, fid in enumerate(ids, start=1):
+        if len(ids) > self.MAX_ITEMS:
+            return _bad(f"单次最多排序 {self.MAX_ITEMS} 个收藏")
+        order, seen = [], set()
+        for fid in ids:
             try:
                 fid = int(fid)
             except (TypeError, ValueError):
                 continue
-            n += FileMeta.objects.filter(pk=fid, owner=request.user, is_star=True) \
-                .update(favorite_order=idx)
-        return Response({"message": f"已更新 {n} 个收藏的排序", "updated": n})
+            if fid in seen:
+                continue
+            seen.add(fid)
+            order.append(fid)
+        if not order:
+            return _bad("file_ids 中没有合法的文件 ID")
+        rows = {
+            fm.id: fm
+            for fm in FileMeta.objects.filter(owner=request.user, is_star=True, id__in=order)
+        }
+        changed = []
+        for idx, fid in enumerate(order, start=1):
+            fm = rows.get(fid)
+            if fm is None:
+                continue
+            fm.favorite_order = idx
+            changed.append(fm)
+        if changed:
+            FileMeta.objects.bulk_update(changed, ["favorite_order"], batch_size=500)
+        return Response({"message": f"已更新 {len(changed)} 个收藏的排序", "updated": len(changed)})
 
 
 class FolderHitsView(APIView):
@@ -2155,62 +3222,171 @@ class FileOperationListView(APIView):
         return Response({"list": data, "total": len(data)})
 
 
-class ShareExpiringView(APIView):
-    """F560 分享链接到期前提醒（默认 3 天窗口），同时推送站内通知（去重）"""
+class FileOperationHeatmapView(APIView):
+    """S24-220：操作记录按日期 × 动作聚合，供日历热力格渲染"""
 
     def get(self, request):
         try:
-            days = _int_param(request, "days", 3, lo=1, hi=60)
+            days = _int_param(request, "days", 180, lo=7, hi=365)
         except ValueError as e:
             return _bad(str(e))
+        today = timezone.localdate()
+        start = today - timedelta(days=days - 1)
+        rows = (
+            FileOperationLog.objects.filter(owner=request.user, created_at__date__gte=start)
+            .annotate(day=TruncDate("created_at"))
+            .values("day", "action").annotate(count=Count("id")).order_by("day")
+        )
+        labels = dict(FileOperationLog.ACTION_CHOICES)
+        cells, by_day, by_action = [], {}, {}
+        for row in rows:
+            day = row["day"]
+            if day is None:
+                continue
+            key = day.isoformat()
+            cells.append({
+                "date": key, "action": row["action"],
+                "action_label": labels.get(row["action"], row["action"]),
+                "count": row["count"],
+            })
+            by_day[key] = by_day.get(key, 0) + row["count"]
+            by_action[row["action"]] = by_action.get(row["action"], 0) + row["count"]
+        days_list = []
+        for i in range(days):
+            key = (start + timedelta(days=i)).isoformat()
+            days_list.append({"date": key, "count": by_day.get(key, 0)})
+        return Response({
+            "days": days, "start": start.isoformat(), "end": today.isoformat(),
+            "cells": cells,
+            "days_list": days_list,
+            "by_action": [
+                {"action": a, "label": labels.get(a, a), "count": c}
+                for a, c in sorted(by_action.items(), key=lambda x: -x[1])
+            ],
+            "max": max(by_day.values(), default=0),
+            "total": sum(by_day.values()),
+        })
+
+
+class ShareExpiringView(APIView):
+    """F560 分享链接到期前提醒（默认 3 天窗口）
+
+    #107：GET 只读——不再逐链接做 `content__contains` 全表扫描并写通知；
+    「已提醒」状态用一次查询（本人近期文件类通知）在 Python 侧解析 token 得到。
+    推送副作用移到 POST 同一地址（一次性推送待提醒项）。
+    """
+
+    TOKEN_RE = re.compile(r"/share/([0-9a-zA-Z_-]{4,64})")
+    NOTIFY_MAX = 100
+
+    def _parse_days(self, request):
+        return _int_param(request, "days", 3, lo=1, hi=60)
+
+    def _links(self, request, days):
         now = timezone.now()
         horizon = now + timedelta(days=days)
-        links = ShareLink.objects.filter(
+        links = list(ShareLink.objects.filter(
             created_by=request.user, is_revoked=False,
             expire_at__isnull=False, expire_at__gte=now, expire_at__lte=horizon,
-        ).select_related("file", "folder").order_by("expire_at")
-        items, notified = [], 0
+        ).select_related("file", "folder").order_by("expire_at"))
+        return now, links
+
+    def _reminded_tokens(self, user, tokens, now, days):
+        """一次查询取近窗口内本人「文件」通知，再在内存里解析出已提醒的分享 token"""
+        wanted = {t for t in tokens if t}
+        if not wanted:
+            return set()
+        rows = Notification.objects.filter(
+            recipient=user, category="files",
+            created_at__gte=now - timedelta(days=max(days, 1) + 2),
+        ).order_by("-created_at").values_list("content", flat=True)[:2000]
+        found = set()
+        for content in rows:
+            for tok in self.TOKEN_RE.findall(content or ""):
+                if tok in wanted:
+                    found.add(tok)
+        return found
+
+    def _item(self, link, now):
+        hours = (link.expire_at - now).total_seconds() / 3600
+        name = link.file.name if link.file else (link.folder.name if link.folder else "")
+        return {
+            "token": link.token, "url": f"/share/{link.token}",
+            "target": name, "target_type": "file" if link.file else "folder",
+            "permission": link.permission, "expire_at": link.expire_at,
+            "hours_left": round(hours, 1), "days_left": max(1, int((hours + 23) // 24)),
+        }
+
+    def get(self, request):
+        try:
+            days = self._parse_days(request)
+        except ValueError as e:
+            return _bad(str(e))
+        now, links = self._links(request, days)
+        items = [self._item(link, now) for link in links]
+        reminded = self._reminded_tokens(
+            request.user, [i["token"] for i in items], now, days
+        )
+        pending = [i["token"] for i in items if i["token"] not in reminded]
+        return Response({
+            "days": days, "list": items, "total": len(items),
+            "notified": len(items) - len(pending), "pending": len(pending),
+            "pending_tokens": pending[:self.NOTIFY_MAX],
+            "notify_method": "POST", "readonly": True,
+        })
+
+    def post(self, request):
+        """按需推送到期提醒（GET 无副作用，前端在用户确认或定时任务里调用）"""
+        try:
+            days = self._parse_days(request)
+        except ValueError as e:
+            return _bad(str(e))
+        now, links = self._links(request, days)
+        reminded = self._reminded_tokens(request.user, [l.token for l in links], now, days)
+        created = 0
         for link in links:
-            hours = (link.expire_at - now).total_seconds() / 3600
-            name = link.file.name if link.file else (link.folder.name if link.folder else "")
-            items.append({
-                "token": link.token, "url": f"/share/{link.token}",
-                "target": name, "target_type": "file" if link.file else "folder",
-                "permission": link.permission, "expire_at": link.expire_at,
-                "hours_left": round(hours, 1), "days_left": max(1, int((hours + 23) // 24)),
-            })
-            # 同一到期窗口内只提醒一次
-            already = Notification.objects.filter(
-                recipient=request.user, content__contains=link.token,
-                created_at__gte=link.expire_at - timedelta(days=days + 2),
-            ).exists()
-            if not already:
-                notify(
-                    request.user,
-                    f"分享链接「{name}」即将过期",
-                    content=f"链接 /share/{link.token} 将于 {link.expire_at:%Y-%m-%d %H:%M} 过期（{int(hours)} 小时后）。",
-                    category="files", level="warning", link="/files/shares",
-                )
-                notified += 1
-        return Response({"days": days, "list": items, "total": len(items), "notified": notified})
+            if link.token in reminded:
+                continue
+            if created >= self.NOTIFY_MAX:
+                break
+            item = self._item(link, now)
+            notify(
+                request.user,
+                f"分享链接「{item['target']}」即将过期",
+                content=(f"链接 /share/{link.token} 将于 {link.expire_at:%Y-%m-%d %H:%M} "
+                         f"过期（{int(item['hours_left'])} 小时后）。"),
+                category="files", level="warning", link="/files/shares",
+            )
+            created += 1
+        return Response({
+            "days": days, "notified": created, "skipped": len(links) - created,
+            "total": len(links), "readonly": False,
+        })
 
 
 class FileVisibilityView(APIView):
     """F561 文件可见性快照：GET 当前状态 + 历史快照；POST 手动补记一条"""
 
     def _get(self, request, pk):
-        return _get_file(request.user, pk, include_deleted=True)
+        # #24：软删文件不再可查分享状态（include_deleted=False）
+        return _get_file(request.user, pk)
 
     def get(self, request, pk):
         fm = self._get(request, pk)
         if not fm:
             return _bad("文件不存在", 404)
+        is_owner = fm.owner_id == request.user.id
         state = _visibility_state(fm)
+        if not is_owner:
+            # #24：分享 token/URL 是访问凭证，只回给所有者；非 owner（dept/all 范围）
+            # 只能看到可见性聚合，不能拿到可用的分享链接
+            state["shares"] = []
         labels = dict(FileVisibilitySnapshot.VISIBILITY_CHOICES)
         history = [{
             "id": s.id, "visibility": s.visibility,
             "visibility_label": labels.get(s.visibility, s.visibility),
-            "data_scope": s.data_scope, "share_token": s.share_token,
+            "data_scope": s.data_scope,
+            "share_token": s.share_token if is_owner else "",
             "permission": s.permission, "expire_at": s.expire_at,
             "note": s.note, "created_at": s.created_at,
             "recorded_by": (getattr(s.created_by, "display_name", "")
@@ -2218,7 +3394,7 @@ class FileVisibilityView(APIView):
         } for s in FileVisibilitySnapshot.objects.filter(file=fm)[:50]]
         state["history"] = history
         state["history_count"] = len(history)
-        state["can_write"] = fm.owner_id == request.user.id
+        state["can_write"] = is_owner
         return Response(state)
 
     def post(self, request, pk):
@@ -2234,20 +3410,31 @@ class FileVisibilityView(APIView):
 
 
 class FileTagStatsView(APIView):
-    """F563 标签统计与点击过滤（过滤由 /files/?tag= 承接）"""
+    """F563 标签统计与点击过滤（过滤由 /files/?tag= 承接）
+
+    #109：单个聚合查询算出每个标签的文件数与占用体积，不再「每标签 2 次查询」。
+    """
 
     def get(self, request):
         base = _file_qs(request.user).filter(is_deleted=False)
         total_bytes = base.aggregate(s=Sum("size"))["s"] or 0
         total_count = base.count()
+        not_deleted = Q(files__is_deleted=False)
+        rows = (
+            FileTag.objects.filter(owner=request.user)
+            .annotate(
+                c=Count("files", filter=not_deleted),
+                b=Sum("files__size", filter=not_deleted),
+            )
+            .values("id", "name", "color", "c", "b")
+            .order_by("-c", "name")
+        )
         items = []
-        for t in FileTag.objects.filter(owner=request.user).annotate(
-                c=Count("files", filter=Q(files__is_deleted=False))).order_by("-c", "name"):
-            files = base.filter(tags=t)
-            b = files.aggregate(s=Sum("size"))["s"] or 0
-            cnt = t.c or 0
+        for t in rows:
+            cnt = t["c"] or 0
+            b = t["b"] or 0
             items.append({
-                "id": t.id, "name": t.name, "color": t.color, "count": cnt,
+                "id": t["id"], "name": t["name"], "color": t["color"], "count": cnt,
                 "bytes": b, "bytes_text": format_size(b),
                 "pct": round(b / total_bytes * 100, 1) if total_bytes else 0.0,
                 "count_pct": round(cnt / total_count * 100, 1) if total_count else 0.0,
@@ -2260,28 +3447,48 @@ class FileTagStatsView(APIView):
 
 
 class FavoritesExportView(APIView):
-    """F564 收藏/标签导出 JSON（浏览器直接下载）"""
+    """F564 收藏/标签导出 JSON（浏览器直接下载）
+
+    #99/#108：分页导出（单页 ≤500 条，响应体带 page/page_size/has_more/next_page 游标），
+    select_related("folder") + prefetch_related("tags")，避免逐条查父目录与逐条查标签。
+    """
+
+    PAGE_SIZE = 500
 
     def get(self, request):
+        try:
+            page = _int_param(request, "page", 1, lo=1)
+            page_size = _int_param(request, "page_size", self.PAGE_SIZE, lo=1, hi=self.PAGE_SIZE)
+        except ValueError as e:
+            return _bad(str(e))
         qs = _file_qs(request.user).filter(is_deleted=False, is_star=True) \
-            .order_by("favorite_order", "-created_at")
+            .select_related("folder").prefetch_related("tags") \
+            .order_by("favorite_order", "-created_at", "id")
+        total = qs.count()
+        start = (page - 1) * page_size
+        rows = list(qs[start:start + page_size]) if start < total else []
         files = [{
             "id": f.id, "name": f.name, "folder": _folder_label(f.folder),
             "group": f.favorite_group, "star": True,
-            "tags": list(f.tags.values_list("name", flat=True)),
+            "tags": [t.name for t in f.tags.all()],
             "size": f.size, "sha1": f.sha1,
             "created_at": f.created_at.isoformat() if f.created_at else "",
-        } for f in qs]
+        } for f in rows]
         tags = [{"name": t.name, "color": t.color} for t in FileTag.objects.filter(owner=request.user)]
+        has_more = start + len(files) < total
         payload = {
             "type": "files-favorites", "version": 1,
             "exported_at": timezone.now().isoformat(),
             "file_count": len(files), "tag_count": len(tags),
             "files": files, "tags": tags,
+            # #99 分页游标：下一页没有数据时 next_page 为 null
+            "page": page, "page_size": page_size, "total_files": total,
+            "has_more": has_more, "next_page": page + 1 if has_more else None,
         }
         resp = HttpResponse(json.dumps(payload, ensure_ascii=False, indent=2),
                             content_type="application/json; charset=utf-8")
-        resp["Content-Disposition"] = "attachment; filename=file_favorites.json"
+        suffix = "" if page == 1 else f"_p{page}"
+        resp["Content-Disposition"] = f"attachment; filename=file_favorites{suffix}.json"
         return resp
 
 

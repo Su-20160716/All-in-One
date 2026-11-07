@@ -427,8 +427,8 @@ def shuffle_list(request):
 @endpoint()
 def permutation_combination(request):
     """55. 排列组合计算。"""
-    n = int(req_num(request, "n", minimum=0, integer=True))
-    k = int(req_num(request, "k", minimum=0, integer=True))
+    n = int(req_num(request, "n", minimum=0, maximum=10000, integer=True))
+    k = int(req_num(request, "k", minimum=0, maximum=1000, integer=True))
     if k > n:
         raise ValueError("k 不能大于 n")
     perm = math.perm(n, k)

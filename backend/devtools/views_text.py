@@ -3,6 +3,7 @@
 
 计数口径：每个 URL 记 1 个接口，全部为真实可用实现。
 """
+import copy
 import json
 import quopri
 import re
@@ -96,11 +97,11 @@ def text_pad(request):
 @endpoint()
 def text_replace(request):
     """字面量或正则替换，返回替换次数。"""
-    text = req_str(request)
+    text = guard_subject(req_str(request))
     find = req(request, "find")
     repl = opt_str(request, "replace", "")
     if opt_bool(request, "regex"):
-        pattern, n = re.compile(str(find)), 0
+        pattern = compile_safe(str(find))
         result, n = pattern.subn(repl, text)
     else:
         n = text.count(str(find))
@@ -122,6 +123,10 @@ _EXTRACTORS = {
 }
 
 
+_EXTRACT_LIMIT = 1000  # 每类抽取结果上限，避免超长文本返回数十万条
+_NDJSON_LIMIT = 5000  # NDJSON 单次转换的数组/行数上限
+
+
 @endpoint()
 def text_extract(request):
     """从文本抽取 email/URL/IP/手机号/座机/金额/数字/日期/时间/色值。"""
@@ -131,11 +136,21 @@ def text_extract(request):
     unknown = [k for k in keys if k not in _EXTRACTORS]
     if unknown:
         raise ValueError(f"不支持的类型: {','.join(unknown)}")
-    found = {k: sorted(set(_EXTRACTORS[k].findall(text))) for k in keys}
-    if opt_bool(request, "dedupe") is False:
-        found = {k: _EXTRACTORS[k].findall(text) for k in keys}
+    found, hit_limit = {}, []
+    for k in keys:
+        raw = _EXTRACTORS[k].findall(text)
+        if len(raw) > _EXTRACT_LIMIT:
+            raw = raw[:_EXTRACT_LIMIT]
+            hit_limit.append(k)
+        found[k] = raw
+    if opt_bool(request, "dedupe"):
+        found = {k: sorted(set(v)) for k, v in found.items()}
     total = sum(len(v) for v in found.values())
-    return ok({"found": found, "total": total})
+    return ok({"found": found, "total": total, "truncated": bool(hit_limit),
+               "limit_per_kind": _EXTRACT_LIMIT, "truncated_kinds": hit_limit})
+
+
+_ZERO_WIDTH_MAP = {ord(c): None for c in "\u200b\u200c\u200d\ufeff\u2060"}
 
 
 @endpoint()
@@ -144,9 +159,10 @@ def text_normalize(request):
     text = req_str(request)
     steps = {}
     cur = text
-    zero_width = re.compile(r"[\u200b\u200c\u200d\ufeff\u2060]")
-    steps["removed_zero_width"] = len(zero_width.findall(cur))
-    cur = zero_width.sub("", cur)
+    # str.translate 一次性删除零宽字符，避免对全文跑正则
+    stripped = cur.translate(_ZERO_WIDTH_MAP)
+    steps["removed_zero_width"] = len(cur) - len(stripped)
+    cur = stripped
     if opt_bool(request, "nfkc", True):
         cur = unicodedata.normalize("NFKC", cur)
         steps["nfkc"] = True
@@ -190,13 +206,16 @@ def str_truncate(request):
     return ok({"result": (m.group(1) if m and len(m.group(1)) > limit // 2 else cut) + suffix, "truncated": True, "limit": limit})
 
 
+_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF]")  # 预编译复用，避免每字符 re.match
+
+
 @endpoint()
 def str_char_stats(request):
     """字符构成统计：中文/字母/数字/标点/空白/Emoji 等。"""
-    text = req_str(request)
+    text = req_str(request)  # 长度上限走 req_str 默认（settings.SEARCH_MAX_TEXT_CHARS）
     cats = Counter()
     for ch in text:
-        if re.match(r"[\U0001F000-\U0001FAFF\u2600-\u27BF]", ch):
+        if _EMOJI_RE.match(ch):
             cats["emoji"] += 1
         elif "\u4e00" <= ch <= "\u9fff":
             cats["hanzi"] += 1
@@ -365,17 +384,28 @@ def md_toc(request):
 @endpoint()
 def md_strip(request):
     """剥离 Markdown 标记为纯文本。"""
-    text = req_str(request)
-    text = re.sub(r"```[\s\S]*?```", " ", text)
-    text = _MD_IMG.sub(r"\1", text)
-    text = _MD_LINK.sub(r"\1", text)
-    text = _HEADING_RE.sub(r"\2", text)
-    text = re.sub(r"^\s*>\s?", "", text, flags=re.M)
-    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.M)
-    text = re.sub(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$", "", text, flags=re.M)
-    text = _MD_BOLD.sub(r"\1", text)
-    text = _MD_ITALIC.sub(r"\1", text)
-    text = _MD_CODE.sub(r"\1", text)
+    text = req_str(request, max_len=200000)
+    # 按标记是否存在跳过无关的全文替换：10 次 sub 降到通常 2-4 次
+    if "```" in text:
+        text = re.sub(r"```[\s\S]*?```", " ", text)
+    if "![" in text:
+        text = _MD_IMG.sub(r"\1", text)
+    if "](" in text:
+        text = _MD_LINK.sub(r"\1", text)
+    if "#" in text:
+        text = _HEADING_RE.sub(r"\2", text)
+    if ">" in text:
+        text = re.sub(r"^\s*>\s?", "", text, flags=re.M)
+    if "*" in text or "-" in text or "+" in text:
+        text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.M)
+    if "---" in text or "***" in text or "___" in text:
+        text = re.sub(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$", "", text, flags=re.M)
+    if "**" in text:
+        text = _MD_BOLD.sub(r"\1", text)
+    if "*" in text:
+        text = _MD_ITALIC.sub(r"\1", text)
+    if "`" in text:
+        text = _MD_CODE.sub(r"\1", text)
     return ok({"text": re.sub(r"\n{3,}", "\n\n", text).strip()})
 
 
@@ -528,7 +558,7 @@ def json_unflatten(request):
 @endpoint()
 def json_merge(request):
     """深度合并多个对象；strategy=overwrite/keep-first/arrays-union。"""
-    items = req_list(request, "objects")
+    items = req_list(request, "objects", max_len=50)
     strategy = opt_str(request, "strategy", "overwrite")
     objs = []
     for it in items:
@@ -552,7 +582,7 @@ def json_merge(request):
 
     out = {}
     for o in objs:
-        out = merge(out, json.loads(json.dumps(o, ensure_ascii=False)))
+        out = merge(out, copy.deepcopy(o))
     return ok({"merged": out, "strategy": strategy})
 
 
@@ -566,9 +596,13 @@ def json_ndjson(request):
             data = json.loads(data)
         if not isinstance(data, list):
             raise ValueError("data 必须是数组")
+        if len(data) > _NDJSON_LIMIT:
+            raise ValueError(f"data 数组不能超过 {_NDJSON_LIMIT} 项")
         return ok({"ndjson": "\n".join(json.dumps(x, ensure_ascii=False) for x in data)})
     text = req_str(request)
     items = [json.loads(ln) for ln in as_lines(text.strip()) if ln.strip()]
+    if len(items) > _NDJSON_LIMIT:
+        raise ValueError(f"NDJSON 行数不能超过 {_NDJSON_LIMIT} 行")
     return ok({"array": items, "count": len(items)})
 
 
@@ -638,15 +672,24 @@ _LOG_RE = re.compile(
 )
 
 
+_LOG_MAX_LINES = 5000
+
+
 @endpoint()
 def log_parse(request):
-    """Nginx/Apache common+combined 日志解析。"""
+    """Nginx/Apache common+combined 日志解析（最多 5000 行，超出截断并标记）。"""
     text = req_str(request)
     rows, bad = [], 0
+    seen = 0
+    truncated = False
     for ln in as_lines(text):
         ln = ln.strip()
         if not ln:
             continue
+        seen += 1
+        if seen > _LOG_MAX_LINES:
+            truncated = True
+            break
         m = _LOG_RE.match(ln)
         if m:
             d = m.groupdict()
@@ -659,7 +702,8 @@ def log_parse(request):
             rows.append(d)
         else:
             bad += 1
-    return ok({"rows": rows, "parsed": len(rows), "unparsed": bad, "total": len(rows) + bad})
+    return ok({"rows": rows, "parsed": len(rows), "unparsed": bad, "total": len(rows) + bad,
+               "truncated": truncated, "max_lines": _LOG_MAX_LINES})
 
 
 def _iter_log(text, pattern=_LOG_RE):
@@ -939,4 +983,93 @@ def regex_template(request):
 # =====================================================================
 # 差值：text 总数自检（模块内计数）
 # =====================================================================
-TEXT_FAMILY_COUNT = 6 + 6 + 6 + 6 + 5 + 5 + 6  # = 40
+TEXT_FAMILY_COUNT = 6 + 6 + 6 + 6 + 5 + 5 + 6  # = 40（不含 S26 追加 regex/cases）
+
+
+# =====================================================================
+# S26(393) 正则回归用例：一次跑多条样本，逐条返回 match/groups/error
+# =====================================================================
+
+_REGEX_FLAG_MAP = {"i": re.I, "m": re.M, "s": re.S, "x": re.X, "a": re.A, "u": re.U}
+
+
+def _parse_regex_flags(raw):
+    """把 "im"/"ims" 之类字符串翻译成 re 标志位（未知字符 400）。"""
+    if raw is None:
+        return 0
+    if isinstance(raw, (list, tuple)):
+        raw = "".join(str(x) for x in raw)
+    raw = str(raw).strip()
+    if raw.isdigit():
+        return int(raw)
+    flags = 0
+    for ch in raw:
+        if ch in _REGEX_FLAG_MAP:
+            flags |= _REGEX_FLAG_MAP[ch]
+        elif ch:
+            raise ValueError(f"不支持的 flags 字符: {ch}（可用 i/m/s/x/a/u）")
+    return flags
+
+
+@endpoint()
+def regex_cases(request):
+    """正则回归用例：pattern/flags/cases[] → 逐条 match/groups/error。
+
+    复用 core.regex_safety：模式先过 ReDoS 启发式闸门，单条样本文本
+    超长时只把该条标记为 error，不拖垮整批。
+    """
+    pattern = req(request, "pattern")
+    flags = _parse_regex_flags(p(request, "flags"))
+    if opt_bool(request, "ignore_case"):
+        flags |= re.I
+    compiled = compile_safe(str(pattern), flags)
+    raw_cases = req_list(request, "cases", max_len=200)
+    if not raw_cases:
+        raise ValueError("cases 不能为空")
+
+    items, matched_cases, total_matches = [], 0, 0
+    for idx, raw in enumerate(raw_cases):
+        if isinstance(raw, dict):
+            text = raw.get("text")
+            label = str(raw.get("name") or raw.get("label") or "")
+        else:
+            text, label = raw, ""
+        text = "" if text is None else str(text)
+        item = {"index": idx, "label": label, "case": text[:200],
+                "match": False, "count": 0, "matches": [], "error": None}
+        try:
+            subject = guard_subject(text)
+            for m in compiled.finditer(subject):
+                hit = {"match": m.group(0), "start": m.start(), "end": m.end()}
+                if m.groups():
+                    hit["groups"] = list(m.groups())
+                if m.groupdict():
+                    hit["named"] = dict(m.groupdict())
+                item["matches"].append(hit)
+                if len(item["matches"]) >= 1000:
+                    break
+            item["count"] = len(item["matches"])
+            item["match"] = bool(item["matches"])
+            if item["matches"]:
+                first = item["matches"][0]
+                item["first"] = first.get("match", "")
+                item["groups"] = first.get("groups", [])
+        except RegexSafetyError as exc:
+            item["error"] = str(exc)
+        except Exception as exc:  # noqa: BLE001 —— 单条异常不外溢
+            item["error"] = f"{type(exc).__name__}: {exc}"
+        if not item["error"] and item["match"]:
+            matched_cases += 1
+        total_matches += item["count"]
+        items.append(item)
+
+    return ok({
+        "pattern": str(pattern),
+        "flags": str(p(request, "flags") or ""),
+        "items": items,
+        "total": len(items),
+        "matched_cases": matched_cases,
+        "failed_cases": sum(1 for i in items if i["error"]),
+        "total_matches": total_matches,
+        "passed": matched_cases,
+    })

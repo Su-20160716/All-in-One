@@ -1,4 +1,5 @@
 """IM 序列化"""
+from django.utils import timezone
 from rest_framework import serializers
 
 from im.models import ChatMessage, ChatSession, MessageFavorite, QuickReply, SessionMemberSetting, TodoItem
@@ -27,7 +28,7 @@ def _materialize(instance):
 class QuickReplySerializer(serializers.ModelSerializer):
     class Meta:
         model = QuickReply
-        fields = ["id", "title", "content", "sort_order", "created_at"]
+        fields = ["id", "title", "content", "sort_order", "group", "created_at"]
         read_only_fields = ["owner"]
 
 
@@ -57,7 +58,8 @@ class MessageFavoriteSerializer(serializers.ModelSerializer):
             return None
         return {
             "id": m.id, "session_id": m.session_id, "msg_type": m.msg_type,
-            "content": m.content, "sender_name": m.sender.display_name if m.sender else "系统",
+            "content": "消息已撤回" if m.is_recalled else m.content,
+            "sender_name": m.sender.display_name if m.sender else "系统",
             "created_at": m.created_at,
         }
 
@@ -69,6 +71,12 @@ class ReplyToSerializer(serializers.ModelSerializer):
         model = ChatMessage
         fields = ["id", "sender", "sender_name", "msg_type", "content", "is_recalled"]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if instance.is_recalled:
+            data["content"] = "消息已撤回"
+        return data
+
 
 class ChatMessageSerializer(serializers.ModelSerializer):
     sender_name = serializers.CharField(source="sender.display_name", read_only=True, default="系统")
@@ -76,6 +84,7 @@ class ChatMessageSerializer(serializers.ModelSerializer):
     reply_to_info = serializers.SerializerMethodField()
     read_by_count = serializers.SerializerMethodField()
     read_by_me = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatMessage
@@ -83,7 +92,7 @@ class ChatMessageSerializer(serializers.ModelSerializer):
             "id", "session", "sender", "sender_name", "sender_avatar", "msg_type",
             "content", "attachments", "forward_from", "reply_to", "reply_to_info",
             "is_pinned", "is_recalled", "is_deleted", "edited", "edited_at",
-            "read_by_count", "read_by_me", "created_at",
+            "can_edit", "read_by_count", "read_by_me", "created_at",
         ]
         read_only_fields = ["sender"]
 
@@ -111,8 +120,13 @@ class ChatMessageSerializer(serializers.ModelSerializer):
         r = obj.reply_to
         if not r:
             return None
-        return {"id": r.id, "sender_name": r.sender.display_name if r.sender else "系统",
-                "content": r.content[:120], "is_recalled": r.is_recalled}
+        return {
+            "id": r.id,
+            "sender_name": r.sender.display_name if r.sender else "系统",
+            # #42：引用消息已撤回时也不能泄露原文
+            "content": "消息已撤回" if r.is_recalled else (r.content or "")[:120],
+            "is_recalled": r.is_recalled,
+        }
 
     def _read_count(self, obj):
         members = self._session_members.get(obj.session_id)
@@ -147,24 +161,47 @@ class ChatMessageSerializer(serializers.ModelSerializer):
         lr = settings.get(request.user.id)
         return bool(lr and lr >= obj.created_at)
 
+    def get_can_edit(self, obj):
+        # #306：编辑入口的可用性（本人 + 10 分钟内 + 未撤回未删除），口径与 MessageEditView 一致
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        if not user or not user.is_authenticated or obj.sender_id != user.id:
+            return False
+        if obj.is_recalled or obj.is_deleted:
+            return False
+        return timezone.now() - obj.created_at <= timezone.timedelta(minutes=10)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # #42：撤回消息保留 is_recalled 标记，但绝不输出原始内容/附件
+        if instance.is_recalled:
+            data["content"] = "消息已撤回"
+            data["attachments"] = []
+        return data
+
 
 class SessionSerializer(serializers.ModelSerializer):
     members_info = serializers.SerializerMethodField()
     last_message = serializers.SerializerMethodField()
     unread = serializers.SerializerMethodField()
     is_muted = serializers.SerializerMethodField()
+    mute_until = serializers.SerializerMethodField()
     is_pinned = serializers.SerializerMethodField()
+    pin_order = serializers.SerializerMethodField()
     is_archived = serializers.SerializerMethodField()
     draft = serializers.SerializerMethodField()
+    draft_summary = serializers.SerializerMethodField()
     tags = serializers.SerializerMethodField()
     member_count = serializers.SerializerMethodField()
+    announcement_unread = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatSession
         fields = [
             "id", "name", "type", "members", "members_info", "owner", "announcement",
-            "avatar", "member_count", "last_message", "unread", "is_muted", "is_pinned",
-            "is_archived", "draft", "tags", "created_at",
+            "avatar", "member_count", "last_message", "unread", "is_muted", "mute_until",
+            "is_pinned", "pin_order", "is_archived", "draft", "draft_summary", "tags",
+            "announcement_unread", "created_at",
         ]
 
     def __init__(self, *args, **kwargs):
@@ -227,18 +264,34 @@ class SessionSerializer(serializers.ModelSerializer):
         if not request:
             return 0
         setting = self._setting(obj)
-        qs = obj.messages.exclude(sender=request.user)
+        qs = (
+            obj.messages.exclude(sender=request.user)
+            .exclude(is_deleted=True)
+            .exclude(is_recalled=True)
+            .exclude(deleted_for=request.user)
+        )
         if setting and setting.last_read_at:
             return qs.filter(created_at__gt=setting.last_read_at).count()
         return qs.count()
 
     def get_is_muted(self, obj):
+        # #326：mute_until 到期后按未静音处理（免打扰自动恢复）
         s = self._setting(obj)
-        return s.is_muted if s else False
+        if not s or not s.is_muted:
+            return False
+        return not s.mute_until or s.mute_until > timezone.now()
+
+    def get_mute_until(self, obj):
+        s = self._setting(obj)
+        return s.mute_until if s else None
 
     def get_is_pinned(self, obj):
         s = self._setting(obj)
         return s.is_pinned if s else False
+
+    def get_pin_order(self, obj):
+        s = self._setting(obj)
+        return s.pin_order if s else 0
 
     def get_is_archived(self, obj):
         s = self._setting(obj)
@@ -247,6 +300,20 @@ class SessionSerializer(serializers.ModelSerializer):
     def get_draft(self, obj):
         s = self._setting(obj)
         return s.draft if s else ""
+
+    def get_draft_summary(self, obj):
+        # #316：列表项草稿摘要（截断 50 字、换行折叠为空格），取自已批量查询的设置行
+        s = self._setting(obj)
+        if not s or not s.draft:
+            return ""
+        return " ".join(s.draft.split())[:50]
+
+    def get_announcement_unread(self, obj):
+        # #317：公告未读 = 公告有更新时间且本人已读时间早于它
+        if not obj.announcement_updated_at:
+            return False
+        s = self._setting(obj)
+        return not s or not s.announcement_read_at or s.announcement_read_at < obj.announcement_updated_at
 
     def get_tags(self, obj):
         s = self._setting(obj)

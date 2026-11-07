@@ -1,6 +1,8 @@
 """学习中心模型：学习进度、代码片段收藏、生词本、错题本、专注记录、学习计划。
 均为用户私有数据，与既有业务模块解耦。
 """
+import secrets
+
 from django.conf import settings
 from django.db import models
 
@@ -174,12 +176,22 @@ class QuestionSet(models.Model):
     name = models.CharField(max_length=128, verbose_name="题单名称")
     question_ids = models.JSONField(default=list, blank=True, verbose_name="题目 ID 列表")
     note = models.CharField(max_length=255, blank=True, verbose_name="备注")
+    # 第三轮 381：免登录只读分享令牌（空=未分享；唯一索引允许多个 NULL）
+    share_token = models.CharField(max_length=32, unique=True, null=True, blank=True,
+                                   verbose_name="分享令牌")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
 
     class Meta:
         verbose_name = "自定义题单"
         verbose_name_plural = "自定义题单"
         ordering = ["-created_at"]
+
+    def ensure_share_token(self):
+        """幂等生成分享令牌（16 字节 urlsafe = 22 字符）。"""
+        if not self.share_token:
+            self.share_token = secrets.token_urlsafe(16)
+            self.save(update_fields=["share_token"])
+        return self.share_token
 
     def __str__(self):
         return self.name
@@ -316,3 +328,106 @@ class IdiomChainRecord(models.Model):
 
     def __str__(self):
         return f"{self.length} 连"
+
+
+# ============================================================
+# 第三轮 373–390：学习模块模型扩展（只增不改，不动既有表）
+# ============================================================
+
+
+class LearningPref(models.Model):
+    """377 学习偏好（每人一条）：每日提醒开关 + 学习榜是否公开昵称"""
+
+    owner = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                 related_name="learning_pref", verbose_name="用户")
+    daily_remind = models.BooleanField(default=True, verbose_name="每日目标提醒")
+    leaderboard_public = models.BooleanField(default=False, verbose_name="参与公开学习榜")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="更新时间")
+
+    class Meta:
+        verbose_name = "学习偏好"
+        verbose_name_plural = "学习偏好"
+
+    def __str__(self):
+        return f"{self.owner_id}: remind={self.daily_remind} board={self.leaderboard_public}"
+
+
+class ExamCountdown(models.Model):
+    """378 考试倒计时（一个人可有多场考试）"""
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              related_name="exam_countdowns", verbose_name="用户")
+    title = models.CharField(max_length=128, verbose_name="考试名称")
+    subject = models.CharField(max_length=40, blank=True, verbose_name="科目")
+    exam_date = models.DateField(verbose_name="考试日期")
+    target_count = models.PositiveIntegerField(default=0, verbose_name="目标题量/任务量")
+    note = models.CharField(max_length=255, blank=True, verbose_name="备注")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "考试倒计时"
+        verbose_name_plural = "考试倒计时"
+        ordering = ["exam_date", "-created_at"]
+
+    def __str__(self):
+        return f"{self.title} @ {self.exam_date}"
+
+
+class StudyGroup(models.Model):
+    """379 学习小组（建组 + 入组 + 打卡）"""
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              related_name="study_groups", verbose_name="创建人")
+    name = models.CharField(max_length=64, verbose_name="小组名称")
+    subject = models.CharField(max_length=40, blank=True, verbose_name="主攻科目")
+    goal_minutes = models.PositiveIntegerField(default=60, verbose_name="每日目标(分钟)")
+    note = models.CharField(max_length=255, blank=True, verbose_name="简介")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        verbose_name = "学习小组"
+        verbose_name_plural = "学习小组"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.name
+
+
+class StudyGroupMember(models.Model):
+    """379 小组成员（含最近打卡日，用于「今日已打卡」判定）"""
+
+    group = models.ForeignKey(StudyGroup, on_delete=models.CASCADE,
+                              related_name="members", verbose_name="小组")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                             related_name="study_group_memberships", verbose_name="成员")
+    last_checkin = models.DateField(null=True, blank=True, verbose_name="最近打卡日")
+    checkin_count = models.PositiveIntegerField(default=0, verbose_name="累计打卡次数")
+    joined_at = models.DateTimeField(auto_now_add=True, verbose_name="加入时间")
+
+    class Meta:
+        verbose_name = "小组成员"
+        verbose_name_plural = "小组成员"
+        unique_together = [("group", "user")]
+        ordering = ["joined_at"]
+
+    def __str__(self):
+        return f"{self.group_id}:{self.user_id}"
+
+
+class FormulaCalcLog(models.Model):
+    """385 公式计算历史（每人保留最近 100 条）"""
+
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              related_name="formula_calc_logs", verbose_name="用户")
+    formula_key = models.CharField(max_length=64, verbose_name="公式 key")
+    values = models.JSONField(default=dict, blank=True, verbose_name="代入变量")
+    result = models.CharField(max_length=64, blank=True, verbose_name="计算结果")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="计算时间")
+
+    class Meta:
+        verbose_name = "公式计算记录"
+        verbose_name_plural = "公式计算记录"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.formula_key}={self.result}"

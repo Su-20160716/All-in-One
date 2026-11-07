@@ -9,6 +9,8 @@ from .common import endpoint, ok, opt_bool, opt_num, opt_str, req_list, req_num,
 
 def _get_list(request, key="array"):
     vals = req_list(request, key)
+    if len(vals) > 500:
+        raise ValueError(f"参数 {key} 长度过大（演示模式上限 500）")
     try:
         return [float(v) for v in vals]
     except (TypeError, ValueError):
@@ -21,15 +23,19 @@ def bubble_steps(request):
     arr = _get_list(request)
     a = arr[:]
     steps = [{"i": -1, "j": -1, "array": list(a), "note": "初始"}]
+    truncated = False
     n = len(a)
     for i in range(n - 1):
         for j in range(n - 1 - i):
             if a[j] > a[j + 1]:
                 a[j], a[j + 1] = a[j + 1], a[j]
-                steps.append({"i": i, "j": j, "array": list(a),
-                              "note": f"交换 a[{j}] 与 a[{j+1}]"})
+                if len(steps) < 2000:
+                    steps.append({"i": i, "j": j, "array": list(a),
+                                  "note": f"交换 a[{j}] 与 a[{j+1}]"})
+                else:
+                    truncated = True
     steps.append({"i": -1, "j": -1, "array": list(a), "note": "完成"})
-    return ok({"sorted": a, "steps": steps})
+    return ok({"sorted": a, "steps": steps, "truncated": truncated})
 
 
 @endpoint()
@@ -38,8 +44,10 @@ def quick_steps(request):
     arr = _get_list(request)
     a = list(arr)
     events = []
+    truncated = False
 
     def qs(lo, hi):
+        nonlocal truncated
         if lo >= hi:
             return
         pivot = a[hi]
@@ -48,14 +56,20 @@ def quick_steps(request):
             if a[j] <= pivot:
                 i += 1
                 a[i], a[j] = a[j], a[i]
-                events.append({"array": list(a), "note": f"区间[{lo},{hi}] 交换位置 {i}<->{j}"})
+                if len(events) < 2000:
+                    events.append({"array": list(a), "note": f"区间[{lo},{hi}] 交换位置 {i}<->{j}"})
+                else:
+                    truncated = True
         a[i + 1], a[hi] = a[hi], a[i + 1]
-        events.append({"array": list(a), "note": f"pivot={pivot} 归位到 {i+1}"})
+        if len(events) < 2000:
+            events.append({"array": list(a), "note": f"pivot={pivot} 归位到 {i+1}"})
+        else:
+            truncated = True
         qs(lo, i)
         qs(i + 2, hi)
 
     qs(0, len(a) - 1)
-    return ok({"sorted": a, "steps": events})
+    return ok({"sorted": a, "steps": events, "truncated": truncated})
 
 
 @endpoint()
@@ -290,8 +304,8 @@ def hanoi(request):
 @endpoint()
 def josephus(request):
     """A13. 约瑟夫环：n 人报数到 k 出列，求幸存者。"""
-    n = int(req_num(request, "n", minimum=1, maximum=10000))
-    k = int(req_num(request, "k", minimum=1))
+    n = int(req_num(request, "n", minimum=1, maximum=2000))
+    k = int(req_num(request, "k", minimum=1, maximum=10 ** 9))
     people = list(range(1, n + 1))
     out = []
     idx = 0

@@ -1,18 +1,52 @@
 # -*- coding: utf-8 -*-
-"""officesuite · 审批流面接口：approval(11) seal(7) expense(8) travel(7) contract(8) = 41 个。
+"""officesuite · 审批流面接口：approval(13) seal(6) expense(8) travel(7) contract(8) = 42 个。
 
 审批类统一状态机：pending → approved / rejected / cancelled，流转写入 data.events。
 审批权 = 数据范围可见者（core.scoping），超管天然可见。
 """
+from datetime import timedelta
+from decimal import Decimal, InvalidOperation
+
+from django.db import transaction
 from django.db.models import Avg, Count, Q, Sum
 from django.utils import timezone
 
-from core.scoping import scope_queryset
+from core.scoping import is_visible, scope_queryset
 
 from devtools.common import (endpoint, ok, opt_bool, opt_num, opt_str, p,
                              req, req_num, req_str)
-from officesuite.common import flow_event, get_obj, obj_dict
+from officesuite.common import (can_write_obj, flow_event, get_obj, obj_dict,
+                                parse_dt)
 from officesuite.models import ApprovalRequest, Contract, ExpenseReport, SealApply, TravelApply
+
+
+def _money(value, field="金额"):
+    """把入参安全转成 Decimal，并要求为正数（#64）。"""
+    try:
+        d = Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f"{field} 必须是数字")
+    if not d.is_finite() or d <= 0:
+        raise ValueError(f"{field} 必须大于 0")
+    return d
+
+
+def _locked_obj(model, pk, user):
+    """#64/#65：事务内取行锁对象，并做对象级写权限校验。
+
+    必须在 `transaction.atomic()` 内调用，锁才会覆盖后续读改写；
+    状态机校验（pending 才能流转）仍由各视图在锁内完成。
+    写权限沿用 can_write_obj（含 #41 的 approver_id 身份判定），
+    与 approval_approve 保持一致：指名审批人即便不在数据范围也可流转。
+    """
+    try:
+        o = model.objects.select_for_update().get(pk=pk)
+    except model.DoesNotExist:
+        raise ValueError("对象不存在")
+    if not can_write_obj(user, o):
+        raise ValueError("无权修改该对象")
+    return o
+
 
 # =====================================================================
 # approval 审批流（11）
@@ -37,13 +71,21 @@ def approval_templates(request):
 @endpoint()
 def approval_submit(request):
     """提交审批单。"""
+    from accounts.models import User
+
+    approver_name = opt_str(request, "approver").strip()
+    approver_id = opt_num(request, "approver_id")
+    if not approver_id and approver_name:
+        u = User.objects.filter(Q(username=approver_name) | Q(nickname=approver_name)).first()
+        approver_id = u.id if u else None
     r = ApprovalRequest.objects.create(
         owner=request.user,
         title=req_str(request, "title")[:200],
         status="pending",
         data={"type": opt_str(request, "type", "custom"),
               "detail": p(request, "detail") or {},
-              "approver": opt_str(request, "approver"),
+              "approver": approver_name,
+              "approver_id": int(approver_id) if approver_id else None,
               "urgency": opt_str(request, "urgency", "normal"),
               "events": []},
         remark=opt_str(request, "remark"),
@@ -72,14 +114,17 @@ def approval_my_pending(request):
 
 @endpoint()
 def approval_detail(request, pk):
-    """审批单详情（含流转记录）。已批准单全员可见（审批透明），其余仅 owner/超管。"""
+    """审批单详情（含流转记录）。
+
+    #41：先做数据范围可见性判定，再放行审批人/所有者/管理员；
+    已批准单不再对任意登录用户开放明细。
+    """
     try:
         r = ApprovalRequest.objects.get(pk=pk)
     except ApprovalRequest.DoesNotExist:
         raise ValueError("审批单不存在")
-    if r.status != "approved":
-        if r.owner_id != request.user.id and not request.user.is_superuser:
-            raise ValueError("无权查看该审批单")
+    if not (is_visible(r, request.user) or can_write_obj(request.user, r)):
+        raise ValueError("无权查看该审批单")
     d = obj_dict(r)
     d["events"] = (r.data or {}).get("events", [])
     return ok(d)
@@ -87,40 +132,52 @@ def approval_detail(request, pk):
 
 @endpoint()
 def approval_approve(request, pk):
-    """通过审批。"""
-    r = get_obj(ApprovalRequest, pk, request.user, write=True)
-    if r.status != "pending":
-        raise ValueError(f"当前状态 {r.status} 不可审批")
-    r.status = "approved"
-    flow_event(r, "approve", request.user, opt_str(request, "note"))
-    r.save()
+    """通过审批（#51：行锁 + 事务，状态与事件原子写入，防并发覆盖）。"""
+    with transaction.atomic():
+        try:
+            r = ApprovalRequest.objects.select_for_update().get(pk=pk)
+        except ApprovalRequest.DoesNotExist:
+            raise ValueError("审批单不存在")
+        if not can_write_obj(request.user, r):
+            raise ValueError("无权修改该对象")
+        if r.owner_id == request.user.id and not request.user.is_superuser:
+            raise ValueError("不能审批自己提交的单据")
+        if r.status != "pending":
+            raise ValueError(f"当前状态 {r.status} 不可审批")
+        r.status = "approved"
+        flow_event(r, "approve", request.user, opt_str(request, "note"))
+        r.save()
     return ok({"id": r.id, "status": r.status})
 
 
 @endpoint()
 def approval_reject(request, pk):
-    """驳回审批（必须给理由）。"""
-    r = get_obj(ApprovalRequest, pk, request.user, write=True)
-    if r.status != "pending":
-        raise ValueError(f"当前状态 {r.status} 不可审批")
-    reason = req_str(request, "reason")
-    r.status = "rejected"
-    flow_event(r, "reject", request.user, reason)
-    r.save()
+    """驳回审批（必须给理由；#64 行锁 + 事务，防与 approve 并发双写）。"""
+    with transaction.atomic():
+        r = _locked_obj(ApprovalRequest, pk, request.user)
+        if r.owner_id == request.user.id and not request.user.is_superuser:
+            raise ValueError("不能驳回自己提交的单据")
+        if r.status != "pending":
+            raise ValueError(f"当前状态 {r.status} 不可审批")
+        reason = req_str(request, "reason")
+        r.status = "rejected"
+        flow_event(r, "reject", request.user, reason)
+        r.save()
     return ok({"id": r.id, "status": r.status, "reason": reason})
 
 
 @endpoint()
 def approval_cancel(request, pk):
-    """撤回自己的审批单。"""
-    r = get_obj(ApprovalRequest, pk, request.user, write=True)
-    if r.owner_id != request.user.id:
-        raise ValueError("只能撤回自己提交的审批")
-    if r.status != "pending":
-        raise ValueError("仅待审状态可撤回")
-    r.status = "cancelled"
-    flow_event(r, "cancel", request.user, opt_str(request, "note"))
-    r.save()
+    """撤回自己的审批单（#64 行锁 + 事务）。"""
+    with transaction.atomic():
+        r = _locked_obj(ApprovalRequest, pk, request.user)
+        if r.owner_id != request.user.id:
+            raise ValueError("只能撤回自己提交的审批")
+        if r.status != "pending":
+            raise ValueError("仅待审状态可撤回")
+        r.status = "cancelled"
+        flow_event(r, "cancel", request.user, opt_str(request, "note"))
+        r.save()
     return ok({"id": r.id, "status": r.status})
 
 
@@ -143,15 +200,83 @@ def approval_events(request, pk):
 
 @endpoint()
 def approval_urge(request, pk):
-    """催办：给审批单打上催办标记并计数。"""
-    r = get_obj(ApprovalRequest, pk, request.user, write=True)
-    if r.status != "pending":
-        raise ValueError("只有待审单可以催办")
-    urges = int((r.data or {}).get("urge_count", 0)) + 1
-    r.data = {**(r.data or {}), "urge_count": urges, "last_urge_at": timezone.now().isoformat()}
-    flow_event(r, "urge", request.user, opt_str(request, "note", "请尽快处理"))
-    r.save()
+    """催办：给审批单打上催办标记并计数（#64 行锁 + 事务，防计数与事件丢失）。"""
+    with transaction.atomic():
+        r = _locked_obj(ApprovalRequest, pk, request.user)
+        if r.status != "pending":
+            raise ValueError("只有待审单可以催办")
+        urges = int((r.data or {}).get("urge_count", 0)) + 1
+        r.data = {**(r.data or {}), "urge_count": urges,
+                  "last_urge_at": timezone.now().isoformat()}
+        flow_event(r, "urge", request.user, opt_str(request, "note", "请尽快处理"))
+        r.save()
     return ok({"id": r.id, "urge_count": urges})
+
+
+@endpoint()
+def approval_overdue_check(request):
+    """S26-362 审批超时扫描：超时 pending 单通知当前审批人并写 flow_event("overdue")。
+
+    hours 窗口内已写过 overdue 事件的单据跳过通知（重复扫描不轰炸）。
+    """
+    hours = int(opt_num(request, "hours", 24, integer=True, minimum=1,
+                        maximum=24 * 30))
+    cutoff = timezone.now() - timedelta(hours=hours)
+    now = timezone.now()
+    from accounts.models import User
+    from core.notify import dispatch
+
+    qs = scope_queryset(
+        ApprovalRequest.objects.filter(status="pending", created_at__lt=cutoff),
+        request.user,
+    ).order_by("created_at")
+    total = qs.count()
+    overdue = notified = skipped = 0
+    items = []
+    for r in qs[:500]:
+        data = r.data or {}
+        target = None
+        approver_id = data.get("approver_id")
+        if approver_id:
+            try:
+                target = User.objects.filter(pk=int(approver_id)).first()
+            except (TypeError, ValueError):
+                target = None
+        if target is None and data.get("approver"):
+            target = User.objects.filter(
+                Q(username=data["approver"]) | Q(nickname=data["approver"])).first()
+        overdue += 1
+        last = None
+        for ev in reversed(data.get("events") or []):
+            if ev.get("action") == "overdue":
+                try:
+                    last = parse_dt(ev.get("at"))
+                except (TypeError, ValueError):
+                    last = None
+                break
+        if last and (now - last) < timedelta(hours=hours):
+            skipped += 1
+            items.append({"id": r.id, "title": r.title,
+                          "approver": target.username if target else data.get("approver", ""),
+                          "hours_waiting": round((now - r.created_at).total_seconds() / 3600, 1),
+                          "notified": False, "skipped": True})
+            continue
+        flow_event(r, "overdue", request.user, f"超时 {hours} 小时未处理")
+        r.save(update_fields=["data", "updated_at"])
+        sent = False
+        if target is not None:
+            sent = dispatch(
+                target, f"审批超时提醒：{r.title}",
+                f"该审批单已等待超过 {hours} 小时，请尽快处理。",
+                category="system", level="warning", link="/officesuite/approvals",
+            ) is not None
+            notified += 1 if sent else 0
+        items.append({"id": r.id, "title": r.title,
+                      "approver": target.username if target else data.get("approver", ""),
+                      "hours_waiting": round((now - r.created_at).total_seconds() / 3600, 1),
+                      "notified": sent, "skipped": False})
+    return ok({"hours": hours, "scanned": total, "overdue": overdue,
+               "notified": notified, "skipped": skipped, "items": items})
 
 
 @endpoint()
@@ -199,14 +324,15 @@ def seal_mine(request):
 
 @endpoint()
 def seal_approve(request, pk):
-    """审批用印（通过/驳回）。"""
-    s = get_obj(SealApply, pk, request.user, write=True)
+    """审批用印（通过/驳回；#65 行锁 + 事务 + pending 校验，防重复流转）。"""
     action = opt_str(request, "action", "approve")
-    if s.status != "pending":
-        raise ValueError("该申请已处理")
-    s.status = "approved" if action == "approve" else "rejected"
-    flow_event(s, s.status, request.user, opt_str(request, "note"))
-    s.save()
+    with transaction.atomic():
+        s = _locked_obj(SealApply, pk, request.user)
+        if s.status != "pending":
+            raise ValueError("该申请已处理")
+        s.status = "approved" if action == "approve" else "rejected"
+        flow_event(s, s.status, request.user, opt_str(request, "note"))
+        s.save()
     return ok({"id": s.id, "status": s.status})
 
 
@@ -246,16 +372,20 @@ def seal_stats(request):
 
 @endpoint()
 def expense_submit(request):
-    """提交报销单（含明细 items）。"""
+    """提交报销单（含明细 items；#64 金额用 Decimal 累加，逐笔校验 > 0）。"""
     items = p(request, "items") or []
     if not isinstance(items, list):
         raise ValueError("items 必须是数组")
-    total = sum(float(i.get("amount", 0)) for i in items if isinstance(i, dict))
+    total = Decimal("0")
+    for i in items:
+        if not isinstance(i, dict):
+            continue
+        total += _money(i.get("amount"), "明细金额")
     e = ExpenseReport.objects.create(
         owner=request.user,
         title=req_str(request, "title")[:200],
         status="pending",
-        total=round(total, 2),
+        total=total,
         invoice_count=len(items),
         data={"items": items, "category": opt_str(request, "category", "日常"),
               "events": []},
@@ -324,13 +454,15 @@ def expense_pay(request, pk):
 
 @endpoint()
 def expense_stats(request):
-    """报销统计：状态分布 + 类别金额。"""
+    """报销统计：状态分布 + 类别金额（#87：数据库按类别聚合，不再截断 500 条）。"""
     qs = scope_queryset(ExpenseReport.objects.all(), request.user)
     by_status = dict(qs.values_list("status").annotate(c=Count("id")))
     by_cat = {}
-    for e in qs[:500]:
-        cat = (e.data or {}).get("category", "日常")
-        by_cat[cat] = round(by_cat.get(cat, 0) + float(e.total), 2)
+    rows = (qs.values("data__category")
+            .annotate(amount=Sum("total")).order_by())
+    for row in rows:
+        cat = row["data__category"] or "日常"
+        by_cat[str(cat)] = round(float(row["amount"] or 0), 2)
     return ok({"total_count": qs.count(), "by_status": by_status, "amount_by_category": by_cat,
                "total_amount": str(qs.aggregate(t=Sum("total"))["t"] or 0),
                "pending_amount": str(qs.filter(status="pending").aggregate(t=Sum("total"))["t"] or 0)})
@@ -446,14 +578,16 @@ def travel_stats(request):
 
 @endpoint()
 def contract_create(request):
-    """登记合同。"""
+    """登记合同（#64：金额 Decimal 存储，传了金额就必须 > 0）。"""
     from django.utils.dateparse import parse_date
 
+    amount_raw = p(request, "amount")
+    amount = Decimal("0") if amount_raw in (None, "") else _money(amount_raw, "amount")
     c = Contract.objects.create(
         owner=request.user,
         title=req_str(request, "title")[:200],
         party=opt_str(request, "party"),
-        amount=round(float(opt_num(request, "amount", 0) or 0), 2),
+        amount=amount,
         sign_date=parse_date(opt_str(request, "sign_date")) if opt_str(request, "sign_date") else None,
         expire_date=parse_date(opt_str(request, "expire_date")) if opt_str(request, "expire_date") else None,
         status="active",
@@ -531,20 +665,29 @@ def contract_stats(request):
 
 @endpoint()
 def contract_payments(request, pk):
-    """回款计划维护（整体替换或追加）。"""
+    """回款计划维护（整体替换或追加；#64 金额 Decimal 累加并校验 > 0）。"""
     c = get_obj(Contract, pk, request.user, write=True)
     mode = opt_str(request, "mode", "append")
     incoming = p(request, "payments")
     if not isinstance(incoming, list):
         raise ValueError("payments 必须是数组")
+    for x in incoming:
+        if isinstance(x, dict):
+            _money(x.get("amount"), "回款金额")
     payments = (c.data or {}).get("payments", [])
     payments = incoming if mode == "replace" else payments + incoming
     c.data = {**(c.data or {}), "payments": payments[-200:]}
     flow_event(c, "payments", request.user, f"{mode} {len(incoming)} 条")
     c.save()
-    total_planned = sum(float(x.get("amount", 0)) for x in payments if isinstance(x, dict))
+    total_planned = Decimal("0")
+    for x in payments:
+        if isinstance(x, dict) and x.get("amount") not in (None, ""):
+            try:
+                total_planned += Decimal(str(x.get("amount")))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
     return ok({"id": c.id, "payments": c.data["payments"], "count": len(payments),
-               "total_planned": round(total_planned, 2)})
+               "total_planned": round(float(total_planned), 2)})
 
 
 @endpoint()
@@ -558,4 +701,4 @@ def contract_delete(request, pk):
     return ok({"deleted": True, "id": cid, "title": title})
 
 
-FLOW_FAMILY_COUNT = 11 + 7 + 8 + 7 + 8  # = 41
+FLOW_FAMILY_COUNT = 13 + 6 + 8 + 7 + 8  # = 42（S26：approval +1 审批超时扫描）

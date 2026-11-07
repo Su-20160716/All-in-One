@@ -259,8 +259,10 @@ def fake_batch(request):
             return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
         raise ValueError(f"未知类型: {t}（支持 name/phone/id/email/company/address/int/float/date）")
 
-    fields_spec = req_list(request, "fields")
+    fields_spec = req_list(request, "fields", max_len=20)
     n = int(opt_num(request, "count", 5, minimum=1, maximum=200) or 5)
+    if len(fields_spec) * n > 5000:
+        raise ValueError(f"fields 数量 × count 不能超过 5000（当前 {len(fields_spec)} × {n}）")
     fields = []
     for f in fields_spec:
         if isinstance(f, str):
@@ -625,6 +627,8 @@ def asciiart_box(request):
     lines = as_lines(req_str(request, "text"))
     if not lines or len(lines) > 40:
         raise ValueError("text 需为 1-40 行文本")
+    if any(len(s) > 200 for s in lines):
+        raise ValueError("text 单行不能超过 200 字符")
     style = opt_str(request, "style", "unicode")
     box = {"unicode": ("┌", "┐", "└", "┘", "─", "│"),
            "ascii": ("+", "+", "+", "+", "-", "|"),
@@ -772,3 +776,51 @@ def fake_bank_card(request):
 
 
 FAMILY_COUNT = 6 + 7 + 8 + 8 + 6 + 2  # = 37（net/fake/fun/cheatsheet/asciiart/补充）
+
+
+# =====================================================================
+# S26(396) 多网段合并去重：ipaddress.collapse_addresses（v4/v6 分开处理）
+# =====================================================================
+
+
+@endpoint()
+def net_cidr_merge(request):
+    """多网段合并：cidrs[] → merged（含被覆盖网段计数与地址总量）。"""
+    raw = req_list(request, "cidrs", max_len=500)
+    if not raw:
+        raise ValueError("cidrs 不能为空")
+    groups = {4: [], 6: []}
+    invalid = []
+    for item in raw:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        try:
+            net = ipaddress.ip_network(text, strict=False)
+        except ValueError as exc:
+            invalid.append({"cidr": text[:80], "error": str(exc)[:120]})
+            continue
+        groups[net.version].append(net)
+    if invalid:
+        raise ValueError("存在非法网段：" + "；".join(f"{i['cidr']}（{i['error']}）" for i in invalid[:3]))
+    if not groups[4] and not groups[6]:
+        raise ValueError("未解析出任何有效网段")
+
+    merged = []
+    for version in (4, 6):
+        if groups[version]:
+            merged.extend(ipaddress.collapse_addresses(groups[version]))
+    merged.sort(key=lambda n: (n.version, int(n.network_address), n.prefixlen))
+    total_in = len(groups[4]) + len(groups[6])
+    return ok({
+        "merged": [str(n) for n in merged],
+        "details": [{"network": str(n.network_address), "prefix": n.prefixlen,
+                     "cidr": str(n), "version": n.version,
+                     "total_addresses": n.num_addresses} for n in merged],
+        "input": total_in,
+        "merged_count": len(merged),
+        "removed": total_in - len(merged),
+        "v4": len(groups[4]),
+        "v6": len(groups[6]),
+        "total_addresses": sum(n.num_addresses for n in merged),
+    })

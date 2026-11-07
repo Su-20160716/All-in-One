@@ -9,13 +9,16 @@ import calendar
 import io
 import random
 import re
+import tempfile
+import uuid
 import zipfile
 from datetime import date, timedelta
 
-from django.db import transaction
-from django.db.models import Count, Q, Sum
-from django.http import HttpResponse
+from django.db import IntegrityError, transaction
+from django.db.models import Count, F, Max, Q, Sum
+from django.http import FileResponse, HttpResponse
 from django.utils import timezone
+from django.utils.http import content_disposition_header
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
@@ -24,10 +27,16 @@ from rest_framework.views import APIView
 
 from core.pagination import OptionalPageNumberPagination
 from core.scoping import is_visible, owner_qs, scope_queryset
-from core.validators import as_datetime, parse_bool
+from core.validators import as_datetime, as_int, parse_bool
 from notes import links as link_lib
-from notes.models import Note, NoteFolder, NoteLink, NoteSnippet, NoteTag, NoteVersion, WordActivity, WritingGoal
-from notes.serializers import NoteSerializer, NoteTagSerializer, NoteVersionSerializer
+from notes.models import (
+    Note, NoteAttachment, NoteComment, NoteFolder, NoteLink, NoteSnippet, NoteTag, NoteTemplate,
+    NoteVersion, WordActivity, WritingGoal,
+)
+from notes.serializers import (
+    NoteAttachmentSerializer, NoteCommentSerializer, NoteSerializer, NoteTagSerializer,
+    NoteTemplateSerializer, NoteVersionSerializer,
+)
 
 # F572 六色标记（名称固定，前端按同名渲染）
 NOTE_COLORS = {
@@ -39,7 +48,22 @@ NOTE_COLORS = {
 SOURCE_LABELS = {
     "manual": "手动创建", "template": "模板创建", "import": "批量导入",
     "copy": "复制副本", "link": "双链创建", "split": "拆分生成", "merge": "合并生成",
+    # F246 快速记录
+    "quick": "速记",
 }
+
+# #51 单篇笔记最多保留的版本快照数（超出按 version 升序删最旧的）
+NOTE_VERSION_KEEP = 50
+
+
+def _prune_note_versions(note, keep=NOTE_VERSION_KEEP):
+    """#51：版本快照只留最近 N 条，避免每次保存都 +1 导致无限增长。"""
+    qs = NoteVersion.objects.filter(note=note).order_by("version")
+    total = qs.count()
+    if total <= keep:
+        return 0
+    stale_ids = list(qs.values_list("id", flat=True)[: total - keep])
+    return NoteVersion.objects.filter(id__in=stale_ids).delete()[0]
 
 
 def _note_qs(user):
@@ -83,14 +107,18 @@ def count_words(text: str) -> int:
 
 
 def bump_words_activity(user, delta: int):
-    """F565 累计当日写作增量（只记正向新增，异常不阻断保存）"""
+    """F565 累计当日写作增量（只记正向新增，异常不阻断保存）
+
+    #53：原来「读 row.delta → 加 → 写回」在并发保存下互相覆盖、累计偏小。
+    改为数据库端 `delta = delta + %s` 原子更新（WordActivity 只存当日 delta，
+    跨日总量由 SUM(delta) 得出，因此无需再同步 total 字段）。
+    """
     if not user or not getattr(user, "is_authenticated", False) or delta <= 0:
         return
     try:
         today = timezone.localdate()
-        row, _ = WordActivity.objects.get_or_create(owner=user, date=today)
-        row.delta += int(delta)
-        row.save(update_fields=["delta"])
+        WordActivity.objects.get_or_create(owner=user, date=today)
+        WordActivity.objects.filter(owner=user, date=today).update(delta=F("delta") + int(delta))
     except Exception:
         logger.exception("B23：静默兜底已登记（notes/views.py:86 原为 pass）——review 是否应收窄异常类型")
 
@@ -104,6 +132,19 @@ def _folder_of(user, folder_id):
     except (TypeError, ValueError):
         return None
     return NoteFolder.objects.filter(pk=folder_id, owner=user).first()
+
+
+def _file_of(user, file_id):
+    """F237/F239 取本人的文件（附件/封面共用）；0/空 → None；非本人或已删 → None"""
+    if file_id in (None, "", "null", "0", 0):
+        return None
+    try:
+        file_id = int(file_id)
+    except (TypeError, ValueError):
+        return None
+    from files.models import FileMeta
+
+    return FileMeta.objects.filter(pk=file_id, owner=user, is_deleted=False).first()
 
 
 def _would_create_cycle(node, new_parent):
@@ -162,7 +203,7 @@ class NoteListView(APIView):
     def get(self, request):
         # B6：列表页统一预取——tags（tag_names/tag_ids 共用）、folder FK、
         # child_count 一次聚合算出，避免每篇 4 次附加查询
-        qs = _note_qs(request.user).select_related("folder", "parent").prefetch_related("tags")
+        qs = _note_qs(request.user).select_related("folder", "parent", "cover_file").prefetch_related("tags")
         if request.query_params.get("trash") == "1":
             qs = qs.filter(is_deleted=True).order_by("-deleted_at")
             qs = qs.annotate(child_count=Count("children", filter=Q(children__is_deleted=False)))
@@ -171,7 +212,10 @@ class NoteListView(APIView):
             page = pg.paginate_queryset(qs, request)
             if page is not None:
                 return pg.get_paginated_response(NoteSerializer(page, many=True).data)
-            return Response({"list": NoteSerializer(qs, many=True).data, "total": qs.count()})
+            total = qs.count()
+            rows = list(pg.cap(qs))
+            return Response({"list": NoteSerializer(rows, many=True).data, "total": total,
+                             "truncated": total > len(rows)})
         qs = qs.filter(is_deleted=False)
         archived = request.query_params.get("archived")
         if archived == "1":
@@ -198,7 +242,17 @@ class NoteListView(APIView):
                 except (TypeError, ValueError):
                     return Response({"message": "folder 必须是整数或 none"}, status=400)
         tag = request.query_params.get("tag")
-        if tag:
+        # F249 多标签筛选：tags=a,b&mode=all|any（all 用链式 filter 求交集）
+        tags_raw = request.query_params.get("tags")
+        if tags_raw:
+            names = [t.strip()[:50] for t in tags_raw.split(",") if t.strip()]
+            mode = request.query_params.get("mode", "any")
+            if names and mode == "all":
+                for name in names:
+                    qs = qs.filter(tags__name=name)
+            elif names:
+                qs = qs.filter(tags__name__in=names)
+        elif tag:
             qs = qs.filter(tags__name=tag)
         search = request.query_params.get("search")
         if search:
@@ -218,20 +272,26 @@ class NoteListView(APIView):
         pg = OptionalPageNumberPagination()
         page = pg.paginate_queryset(qs, request)
         if page is not None:
-            resp = pg.get_paginated_response(NoteSerializer(page, many=True).data)
-            # 分页模式同样带 has_backlink，与全量分支字段保持一致
-            backlinked = link_lib.all_backlink_ids(request.user.id)
-            for item in resp.data["results"]:
+            data = NoteSerializer(page, many=True).data
+            backlinked = link_lib.backlink_ids_for(request.user.id, [n.id for n in page])
+            for item in data:
                 item["has_backlink"] = item["id"] in backlinked
-            return resp
-        data = NoteSerializer(qs, many=True).data
-        backlinked = link_lib.all_backlink_ids(request.user.id)
+            return pg.get_paginated_response(data)
+        total = qs.count()
+        rows = list(pg.cap(qs))
+        data = NoteSerializer(rows, many=True).data
+        backlinked = link_lib.backlink_ids_for(request.user.id, [n.id for n in rows])
         for item in data:
             item["has_backlink"] = item["id"] in backlinked
-        return Response({"list": data, "total": qs.count()})
+        return Response({"list": data, "total": total, "truncated": total > len(rows)})
 
     def post(self, request):
         title = (request.data.get("title") or "未命名笔记").strip()
+        # F259 同名检测：同 owner 同标题（未删除）先记下来，随响应返回供前端提示
+        dupes = list(
+            Note.objects.filter(owner=request.user, title__iexact=title[:200], is_deleted=False)
+            .values("id", "title")[:5]
+        )
         parent_id = request.data.get("parent")
         if parent_id:
             try:
@@ -269,7 +329,23 @@ class NoteListView(APIView):
             note.save(update_fields=list(sched.keys()))
         self._tags = request.data.get("tags") or []
         _apply_tags(request.user, note, self._tags)
-        return Response(NoteSerializer(note).data, status=status.HTTP_201_CREATED)
+        # F238 图标 / F239 封面（创建时也接受，便于模板与速记直接带样式）
+        extra = {}
+        raw_icon = request.data.get("icon")
+        if raw_icon not in (None, ""):
+            note.icon = str(raw_icon).strip()[:8]
+            extra["icon"] = note.icon
+        cover = _file_of(request.user, request.data.get("cover_file_id"))
+        if cover is not None:
+            note.cover_file = cover
+            extra["cover_file"] = note.cover_file
+        if extra:
+            note.save(update_fields=list(extra.keys()))
+        data = NoteSerializer(note).data
+        if dupes:
+            # 仅新增字段，旧客户端忽略即可
+            data["duplicate_titles"] = dupes
+        return Response(data, status=status.HTTP_201_CREATED)
 
 
 class NoteDetailView(APIView):
@@ -289,6 +365,11 @@ class NoteDetailView(APIView):
         data["outgoing_links"] = link_lib.outgoing_links(note)
         data["is_owner"] = note.owner_id == request.user.id
         data["reading_minutes"] = max(1, round((note.words or 0) / 300)) if note.words else 0
+        # F242 待办进度（复用待办抽取）+ F236 未解决评论数
+        todos = _scan_todos(note)
+        data["todo_total"] = len(todos)
+        data["todo_done"] = sum(1 for t in todos if t["done"])
+        data["comment_count"] = note.comments.filter(resolved=False).count()
         return Response(data)
 
     def patch(self, request, pk):
@@ -296,6 +377,7 @@ class NoteDetailView(APIView):
         if not note:
             return Response({"message": "笔记不存在或无权修改"}, status=404)
         changed = False
+        snapshot_added = False
         # B5：版本快照 / 笔记本体 / 字数活动 / 标签关联多表写入同一事务，
         # 中途失败整体回滚，杜绝「版本号 +1 但内容没存上」的错位快照
         with transaction.atomic():
@@ -307,6 +389,7 @@ class NoteDetailView(APIView):
                     NoteVersion.objects.create(
                         note=note, version=note.version, title=note.title, content=note.content, created_by=request.user
                     )
+                    snapshot_added = True
                     note.version += 1
                     old_words = note.words or count_words(note.content)
                     note.content = request.data["content"]
@@ -319,16 +402,16 @@ class NoteDetailView(APIView):
                 try:
                     note.parent = Note.objects.filter(pk=int(pid), owner=request.user).first() if pid else None
                 except (TypeError, ValueError):
-                    return Response({"message": "parent 必须是整数"}, status=400)
+                    raise ValidationError("parent 必须是整数")
                 # 环检测：不能把笔记移动到自己的子笔记下
                 if note.parent and _would_create_cycle(note, note.parent):
-                    return Response({"message": "不能移动到自身的子笔记下"}, status=400)
+                    raise ValidationError("不能移动到自身的子笔记下")
                 changed = True
             # F572 六色标记
             if "color" in request.data:
                 color = str(request.data.get("color") or "")
                 if color and color not in NOTE_COLORS:
-                    return Response({"message": f"颜色只能是：{','.join(NOTE_COLORS)}"}, status=400)
+                    raise ValidationError(f"颜色只能是：{','.join(NOTE_COLORS)}")
                 note.color = color
                 changed = True
             # F582 移动到分组文件夹
@@ -336,13 +419,40 @@ class NoteDetailView(APIView):
                 fid = request.data.get("folder")
                 folder = _folder_of(request.user, fid)
                 if fid not in (None, "", "null", "0", 0) and folder is None:
-                    return Response({"message": "文件夹不存在"}, status=400)
+                    raise ValidationError("文件夹不存在")
                 note.folder = folder
                 changed = True
+            # F238 自定义图标
+            if "icon" in request.data:
+                note.icon = str(request.data.get("icon") or "").strip()[:8]
+                changed = True
+            # F239 封面图（校验文件归属）
+            if "cover_file_id" in request.data:
+                cid = request.data.get("cover_file_id")
+                cover = _file_of(request.user, cid)
+                if cid not in (None, "", "null", "0", 0) and cover is None:
+                    raise ValidationError("封面文件不存在或无权使用")
+                note.cover_file = cover
+                changed = True
+            # F240 回看提醒（改时间后重置已提醒标记，到点会再次提醒）
+            if "remind_at" in request.data:
+                raw = request.data.get("remind_at")
+                if raw in (None, ""):
+                    note.remind_at = None
+                    note.reminded_at = None
+                else:
+                    note.remind_at = as_datetime(raw, field="remind_at")
+                    note.reminded_at = None
+                changed = True
+            # #25：取消公开时轮换 share_token——之后再公开是一枚新链接，
+            # 旧链接（可能已被转发/缓存）立即失效，不再「一次公开=永久公开」
+            was_public = note.is_public
             for flag in ("is_pinned", "is_favorite", "is_public"):
                 if flag in request.data:
                     setattr(note, flag, parse_bool(request.data[flag], field=flag))
                     changed = True
+            if was_public and not note.is_public:
+                note.share_token = uuid.uuid4().hex[:16]
             for field in ("publish_at", "expire_at"):
                 if field in request.data:
                     raw = request.data.get(field)
@@ -353,6 +463,9 @@ class NoteDetailView(APIView):
                 changed = True
             if changed:
                 note.save()
+            # #51：有新快照才裁剪，单篇最多保留最近 50 条（同一事务内）
+            if snapshot_added:
+                _prune_note_versions(note)
         return Response(NoteSerializer(note).data)
 
     def delete(self, request, pk):
@@ -411,6 +524,52 @@ class NoteBatchView(APIView):
         if action == "unarchive":
             n = qs.update(is_archived=False)
             return Response({"message": f"已取消归档 {n} 篇"})
+        # F247 批量移动到分组文件夹
+        if action == "folder":
+            fid = request.data.get("folder")
+            folder = _folder_of(request.user, fid)
+            if fid not in (None, "", "null", "0", 0) and folder is None:
+                return _nb("文件夹不存在")
+            n = qs.update(folder=folder)
+            label = folder.name if folder else "未分组"
+            return Response({"message": f"已移动到「{label}」（{n} 篇）", "moved": n, "folder": folder.id if folder else None})
+        # F248 批量打标签 / 移除标签（按名称 get_or_create）
+        if action in ("tag", "untag"):
+            raw = request.data.get("tags") or request.data.get("tag") or []
+            if isinstance(raw, str):
+                raw = raw.split(",")
+            names = []
+            for x in raw:
+                nm = str(x).strip()[:50]
+                if nm and nm not in names:
+                    names.append(nm)
+            if not names:
+                return _nb("请提供标签名")
+            note_ids = list(qs.values_list("id", flat=True))
+            if not note_ids:
+                return Response({"message": "没有可操作的笔记", "count": 0})
+            if action == "tag":
+                tags = [NoteTag.objects.get_or_create(name=nm, owner=request.user)[0] for nm in names]
+                for nid in note_ids:
+                    Note.tags.through.objects.bulk_create(
+                        [Note.tags.through(note_id=nid, notetag_id=t.id) for t in tags],
+                        ignore_conflicts=True,
+                    )
+                return Response({"message": f"已为 {len(note_ids)} 篇添加标签", "count": len(note_ids),
+                                 "tags": names})
+            tags = NoteTag.objects.filter(owner=request.user, name__in=names)
+            Note.tags.through.objects.filter(
+                note_id__in=note_ids, notetag_id__in=[t.id for t in tags]
+            ).delete()
+            return Response({"message": f"已为 {len(note_ids)} 篇移除标签", "count": len(note_ids),
+                             "tags": names})
+        # F251 批量颜色标记
+        if action == "color":
+            color = str(request.data.get("color") or "")
+            if color and color not in NOTE_COLORS:
+                return _nb(f"颜色只能是：{','.join(NOTE_COLORS)}")
+            n = qs.update(color=color)
+            return Response({"message": f"已标记 {n} 篇", "count": n, "color": color})
         return Response({"message": "未知操作"}, status=400)
 
 
@@ -444,20 +603,30 @@ class NoteCopyView(APIView):
 
 class NoteTreeView(APIView):
     def get(self, request):
+        def node(n, children):
+            # F238 图标 / F239 封面缩略图 / F572 颜色随树一起返回，前端列表直接渲染
+            cover = n.cover_file
+            return {"id": n.id, "title": n.title, "is_public": n.is_public,
+                    "is_favorite": n.is_favorite, "is_pinned": n.is_pinned,
+                    "icon": n.icon, "color": n.color, "pin_order": n.pin_order,
+                    "cover_thumb": (cover.thumbnail_url or cover.url) if cover else "",
+                    "children": children}
+
         def build(parent_id, visited):
-            qs = _note_qs(request.user).filter(parent_id=parent_id, is_deleted=False).order_by("-is_pinned", "updated_at")
+            # F260：与列表一致，置顶之间按 pin_order 排序
+            qs = _note_qs(request.user).filter(parent_id=parent_id, is_deleted=False).select_related(
+                "cover_file"
+            ).order_by("-is_pinned", "pin_order", "updated_at")
             nodes = []
             for n in qs:
                 # 防递归：历史脏数据可能成环，已展开过的 id 不再下钻
                 if n.id in visited:
-                    nodes.append({"id": n.id, "title": n.title, "is_public": n.is_public,
-                                  "is_favorite": n.is_favorite, "is_pinned": n.is_pinned, "children": []})
+                    nodes.append(node(n, []))
                     continue
                 visited.add(n.id)
-                nodes.append({"id": n.id, "title": n.title, "is_public": n.is_public,
-                              "is_favorite": n.is_favorite, "is_pinned": n.is_pinned,
-                              "children": build(n.id, visited)})
+                nodes.append(node(n, build(n.id, visited)))
             return nodes
+
         return Response({"tree": build(None, set())})
 
 
@@ -492,11 +661,20 @@ class NoteTagDetailView(APIView):
         tag = self.get_object(request, pk)
         if not tag:
             return Response({"message": "标签不存在"}, status=404)
-        if "name" in request.data and request.data["name"].strip():
-            tag.name = request.data["name"].strip()[:50]
+        if "name" in request.data and (request.data["name"] or "").strip():
+            new_name = request.data["name"].strip()[:50]
+            # #52：unique_together(owner, name) 冲突必须在写入前拦下，否则 IntegrityError → 500
+            if new_name != tag.name and NoteTag.objects.filter(
+                owner=request.user, name=new_name
+            ).exclude(pk=tag.pk).exists():
+                return Response({"message": "同名标签已存在", "ok": False, "error": "同名标签已存在"}, status=400)
+            tag.name = new_name
         if "color" in request.data:
             tag.color = request.data["color"]
-        tag.save()
+        try:
+            tag.save()
+        except IntegrityError:
+            return Response({"message": "同名标签已存在", "ok": False, "error": "同名标签已存在"}, status=400)
         return Response(NoteTagSerializer(tag).data)
 
     def delete(self, request, pk):
@@ -552,8 +730,9 @@ class NoteVersionDiffView(APIView):
         note = _get_note(request.user, pk, include_deleted=True)
         if not note:
             return Response({"message": "笔记不存在"}, status=404)
-        v1 = request.query_params.get("from")
-        v2 = request.query_params.get("to")
+        # #50：from/to 先用 as_int 校验，垃圾参数走 400 而不是 ORM 500
+        v1 = as_int(request.query_params.get("from"), field="from")
+        v2 = as_int(request.query_params.get("to"), field="to")
         a = NoteVersion.objects.filter(note=note, version=v1).first()
         b = NoteVersion.objects.filter(note=note, version=v2).first()
         if not a or not b:
@@ -567,19 +746,31 @@ class NoteVersionDiffView(APIView):
 
 class NoteRollbackView(APIView):
     def post(self, request, pk, version):
-        note = _get_note(request.user, pk, include_deleted=True, write=True)
-        if not note:
-            return Response({"message": "笔记不存在"}, status=404)
-        snap = NoteVersion.objects.filter(note=note, version=version).first()
-        if not snap:
-            return Response({"message": "版本不存在"}, status=404)
-        NoteVersion.objects.create(
-            note=note, version=note.version, title=note.title, content=note.content, created_by=request.user
-        )
-        note.title, note.content = snap.title, snap.content
-        note.words = count_words(note.content)
-        note.version += 1
-        note.save()
+        # #54：整段回滚收进单事务并对笔记加行锁，避免并发回滚时 next_version 撞唯一键、
+        # 以及「正文已改但版本号没跟上」的不一致。
+        with transaction.atomic():
+            note = _note_write_qs(request.user).select_for_update().filter(pk=pk).first()
+            if not note:
+                return Response({"message": "笔记不存在"}, status=404)
+            snap = NoteVersion.objects.filter(note=note, version=version).first()
+            if not snap:
+                return Response({"message": "版本不存在"}, status=404)
+            last = NoteVersion.objects.filter(note=note).aggregate(m=Max("version"))["m"] or 0
+            next_version = max(int(note.version or 1), last + 1)
+            snapshot = dict(note=note, title=note.title, content=note.content, created_by=request.user)
+            try:
+                # 内层 atomic 建立 savepoint，唯一冲突后外层事务仍可用
+                with transaction.atomic():
+                    NoteVersion.objects.create(version=next_version, **snapshot)
+            except IntegrityError:
+                last = NoteVersion.objects.filter(note=note).aggregate(m=Max("version"))["m"] or 0
+                next_version = max(next_version, last) + 1
+                with transaction.atomic():
+                    NoteVersion.objects.create(version=next_version, **snapshot)
+            note.title, note.content = snap.title, snap.content
+            note.words = count_words(note.content)
+            note.version = next_version + 1
+            note.save()
         return Response({"message": f"已回滚到 v{version}", "note": NoteSerializer(note).data})
 
 
@@ -587,7 +778,17 @@ class NoteShareView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, token):
-        note = Note.objects.filter(share_token=token, is_public=True, is_deleted=False).first()
+        # #25：公开读取要落在 publish_at ~ expire_at 时间窗内；
+        # 未到发布时间 / 已过到期时间都按「未公开」处理（404，不泄露存在性）
+        now = timezone.now()
+        note = (
+            Note.objects.filter(share_token=token, is_public=True, is_deleted=False)
+            .filter(
+                Q(publish_at__isnull=True) | Q(publish_at__lte=now),
+                Q(expire_at__isnull=True) | Q(expire_at__gt=now),
+            )
+            .first()
+        )
         if not note:
             return Response({"message": "笔记不存在或未公开"}, status=404)
         return Response({"title": note.title, "content": note.content, "updated_at": note.updated_at,
@@ -596,7 +797,7 @@ class NoteShareView(APIView):
 
 class NoteRecentView(APIView):
     def get(self, request):
-        qs = _note_qs(request.user).filter(is_deleted=False).order_by("-updated_at")[:10]
+        qs = _note_qs(request.user).filter(is_deleted=False).select_related("cover_file").order_by("-updated_at")[:10]
         return Response({"list": NoteSerializer(qs, many=True).data})
 
 
@@ -630,8 +831,9 @@ class NoteExportView(APIView):
             return Response({"message": "笔记不存在"}, status=404)
         body = f"# {note.title}\n\n> 导出于 {timezone.now():%Y-%m-%d %H:%M}\n\n{note.content}\n"
         resp = HttpResponse(body.encode("utf-8"), content_type="text/markdown; charset=utf-8")
-        filename = re.sub(r'[\\/:*?"<>|]', "_", note.title)
-        resp["Content-Disposition"] = f"attachment; filename={filename}.md"
+        # #28：中文/换行标题统一交给 Django 生成 filename*（RFC5987），不再手拼
+        filename = re.sub(r'[\\/:*?"<>|\r\n]', "_", note.title).strip() or "note"
+        resp["Content-Disposition"] = content_disposition_header(True, f"{filename}.md")
         return resp
 
 
@@ -639,11 +841,12 @@ class NoteExportAllView(APIView):
     """导出全部笔记为 zip"""
 
     def get(self, request):
-        notes = _note_qs(request.user).filter(is_deleted=False)
-        buf = io.BytesIO()
+        notes = _note_qs(request.user).filter(is_deleted=False).only("id", "title", "content")
+        # 写临时文件后流式返回，避免把整库笔记一次性堆在内存里
+        tmp = tempfile.TemporaryFile()
         used = set()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for n in notes:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for n in notes.iterator(chunk_size=200):
                 base = re.sub(r'[\\/:*?"<>|]', "_", n.title) or "note"
                 arc, i = f"{base}.md", 1
                 while arc in used:
@@ -651,9 +854,8 @@ class NoteExportAllView(APIView):
                     i += 1
                 used.add(arc)
                 zf.writestr(arc, f"# {n.title}\n\n{n.content}\n")
-        resp = HttpResponse(buf.getvalue(), content_type="application/zip")
-        resp["Content-Disposition"] = "attachment; filename=notes.zip"
-        return resp
+        tmp.seek(0)
+        return FileResponse(tmp, as_attachment=True, filename="notes.zip", content_type="application/zip")
 
 
 # ---------------- 双链（[[wiki link]]） ----------------
@@ -752,16 +954,37 @@ class NoteLinkRebuildView(APIView):
     """重建当前用户的全部双链关系（正文被外部改动或索引异常时使用）
 
     POST /api/notes/links/rebuild/
+
+    #113：单次最多重建 500 篇（可用 limit / offset 分批翻页），
+    全量重建交给 `manage.py reindex_search` 管理命令，避免长请求占满 worker。
     """
 
+    MAX_NOTES = 500
+
     def post(self, request):
-        qs = _note_qs(request.user).filter(is_deleted=False)
-        total = 0
-        for note in qs.iterator():
-            total += link_lib.rebuild_links_for_note(note) or 0
+        try:
+            limit = _qp_int(request.data, "limit", self.MAX_NOTES, lo=1, hi=self.MAX_NOTES)
+            offset = _qp_int(request.data, "offset", 0, lo=0)
+        except ValueError as e:
+            return _nb(str(e))
+        qs = _note_qs(request.user).filter(is_deleted=False).order_by("id")
+        total_notes = qs.count()
+        batch = list(qs[offset:offset + limit])
+        links = 0
+        for note in batch:
+            links += link_lib.rebuild_links_for_note(note) or 0
+        processed = len(batch)
+        done = min(offset + processed, total_notes)
+        remaining = max(0, total_notes - done)
         dangling = link_lib.dangling_notes(request.user.id)
-        return Response({"message": "双链已重建", "notes": qs.count(), "links": total,
-                         "dangling": len(dangling)})
+        return Response({
+            "message": "双链已重建" if not remaining else "双链已分批重建，请继续下一批",
+            "notes": total_notes, "links": links, "dangling": len(dangling),
+            "processed": processed, "offset": offset, "limit": limit,
+            "next_offset": done if remaining else None,
+            "remaining": remaining, "truncated": remaining > 0,
+            "hint": "全量重建请执行 manage.py reindex_search",
+        })
 
 # ---------------- 批量导入 / 标签云 / 选篇导出 / 闪卡 / AI大纲 ----------------
 
@@ -1108,48 +1331,67 @@ class DiaryView(APIView):
 # ---------------- F567 未链接提及 ----------------
 
 class UnlinkedMentionsView(APIView):
-    """F567 未链接提及清单：正文出现别的笔记标题，但没写成 [[标题]]"""
+    """F567 未链接提及清单：正文出现别的笔记标题，但没写成 [[标题]]
+
+    #92：不再把上千个标题拼成超长交替正则（编译与回溯开销随标题数爆炸），
+    改为「标题数限 200 + 逐标题 substring 判断」，行为与原来一致。
+    """
 
     LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+    NOTE_SCAN_LIMIT = 2000
+    TITLE_SCAN_LIMIT = 200
 
     def get(self, request):
         try:
             limit = _qp_int(request.query_params, "limit", 50, lo=1, hi=300)
         except ValueError as e:
             return _nb(str(e))
-        notes = list(_note_qs(request.user).filter(is_deleted=False).order_by("-updated_at")[:2000])
+        notes = list(
+            _note_qs(request.user).filter(is_deleted=False)
+            .order_by("-updated_at")[:self.NOTE_SCAN_LIMIT]
+        )
         if len(notes) < 2:
-            return Response({"list": [], "total": 0, "note_count": len(notes)})
+            return Response({"list": [], "total": 0, "note_count": len(notes),
+                             "title_count": 0, "title_limit": self.TITLE_SCAN_LIMIT})
         canon = {}
         for n in notes:
             t = (n.title or "").strip()
             if len(t) >= 2:
                 canon.setdefault(t.lower(), n)
+            if len(canon) >= self.TITLE_SCAN_LIMIT:
+                break
         if len(canon) < 2:
-            return Response({"list": [], "total": 0, "note_count": len(notes)})
-        joined = "|".join(sorted((re.escape(t) for t in canon), key=len, reverse=True))
-        big = re.compile(joined, re.IGNORECASE)
+            return Response({"list": [], "total": 0, "note_count": len(notes),
+                             "title_count": len(canon), "title_limit": self.TITLE_SCAN_LIMIT})
+        # 长标题优先，避免「Django」先命中导致「Django ORM」漏统计
+        title_items = sorted(canon.items(), key=lambda kv: -len(kv[0]))
         mentions = {}  # canonical lower title -> {"target": note, "sources": {note_id: {...}}, "total": int}
         for n in notes:
             content = self.LINK_RE.sub(lambda m: " " * len(m.group(0)), n.content or "")
             if len(content) < 2:
                 continue
-            for m in big.finditer(content):
-                key = m.group(0).lower()
-                target = canon.get(key)
-                if target is None or target.id == n.id:
+            low = content.lower()
+            for key, target in title_items:
+                if target.id == n.id:
+                    continue
+                pos, hits = low.find(key), 0
+                first = pos
+                while pos >= 0:
+                    hits += 1
+                    pos = low.find(key, pos + len(key))
+                if not hits:
                     continue
                 bucket = mentions.setdefault(key, {"target": target, "sources": {}, "total": 0})
-                bucket["total"] += 1
+                bucket["total"] += hits
                 src = bucket["sources"].get(n.id)
                 if src is None:
-                    start = max(0, m.start() - 40)
-                    excerpt = content[start:m.end() + 40].replace("\n", " ").strip()
+                    start = max(0, first - 40)
+                    excerpt = content[start:first + len(key) + 40].replace("\n", " ").strip()
                     bucket["sources"][n.id] = {
-                        "note_id": n.id, "note_title": n.title, "count": 1, "excerpt": excerpt,
+                        "note_id": n.id, "note_title": n.title, "count": hits, "excerpt": excerpt,
                     }
                 else:
-                    src["count"] += 1
+                    src["count"] += hits
         result = []
         for bucket in mentions.values():
             sources = sorted(bucket["sources"].values(), key=lambda s: -s["count"])[:10]
@@ -1159,7 +1401,8 @@ class UnlinkedMentionsView(APIView):
                 "count": bucket["total"], "sources": sources,
             })
         result.sort(key=lambda x: x["count"], reverse=True)
-        return Response({"list": result[:limit], "total": len(result), "note_count": len(notes)})
+        return Response({"list": result[:limit], "total": len(result), "note_count": len(notes),
+                         "title_count": len(canon), "title_limit": self.TITLE_SCAN_LIMIT})
 
 
 # ---------------- F568 随机回顾 ----------------
@@ -1204,7 +1447,14 @@ HEALTH_ISSUES = {
 
 
 class NoteHealthView(APIView):
-    """F569 笔记健康度报告：单篇打分 + 问题聚合"""
+    """F569 笔记健康度报告：单篇打分 + 问题聚合
+
+    #100：扫描上限从 2000 降到 500，且按 200 篇一批分块统计后累加，
+    避免单次请求把全库正文一次性载入内存；limit 只控制输出条数。
+    """
+
+    SCAN_LIMIT = 500
+    BATCH_SIZE = 200
 
     def get(self, request):
         try:
@@ -1212,49 +1462,60 @@ class NoteHealthView(APIView):
             limit = _qp_int(request.query_params, "limit", 50, lo=1, hi=300)
         except ValueError as e:
             return _nb(str(e))
-        # 预取 tags：下方逐篇判空，否则 2000 篇 = 2000 次查询
-        notes = list(
-            _note_qs(request.user).filter(is_deleted=False)
-            .prefetch_related("tags").order_by("-updated_at")[:2000]
-        )
-        if not notes:
+        qs = _note_qs(request.user).filter(is_deleted=False).order_by("-updated_at", "-id")
+        total_notes = qs.count()
+        if not total_notes:
             return Response({"note_count": 0, "avg_score": 0, "grade": "-",
-                             "distribution": {}, "issues": [], "worst": []})
+                             "distribution": {}, "issues": [], "worst": [],
+                             "scanned": 0, "scan_limit": self.SCAN_LIMIT,
+                             "batch_size": self.BATCH_SIZE, "total_notes": 0,
+                             "truncated": False})
         backlinked = link_lib.all_backlink_ids(request.user.id) or set()
-        outgoing = dict(
-            NoteLink.objects.filter(source_id__in=[n.id for n in notes])
-            .values("source_id").annotate(c=Count("id")).values_list("source_id", "c")
-        )
         now = timezone.now()
         rows, counter = [], {}
-        for n in notes:
-            score = 100
-            issues = []
-            words = n.words or count_words(n.content)
-            if words < 50:
-                score -= 25
-                issues.append("short")
-            if words >= 50 and not re.search(r"(?m)^#{1,6}\s", n.content or ""):
-                score -= 10
-                issues.append("no_heading")
-            if not outgoing.get(n.id) and n.id not in backlinked:
-                score -= 20
-                issues.append("orphan")
-            if not n.tags.all():
-                score -= 10
-                issues.append("no_tag")
-            if (now - n.updated_at).days > stale_days:
-                score -= 15
-                issues.append("stale")
-            score = max(score, 0)
-            grade = "A" if score >= 85 else "B" if score >= 70 else "C" if score >= 55 else "D"
-            for i in issues:
-                counter[i] = counter.get(i, 0) + 1
-            rows.append({
-                "id": n.id, "title": n.title, "words": words, "score": score, "grade": grade,
-                "issues": issues, "updated_at": n.updated_at, "color": n.color,
-                "backlinks": 1 if n.id in backlinked else 0, "outgoing": outgoing.get(n.id, 0),
-            })
+        scanned = 0
+        for start in range(0, self.SCAN_LIMIT, self.BATCH_SIZE):
+            batch = list(
+                qs.prefetch_related("tags")[start:start + self.BATCH_SIZE]
+            )
+            if not batch:
+                break
+            # 每批只查本批笔记的出链计数，避免一次性 IN 500 个 id
+            outgoing = dict(
+                NoteLink.objects.filter(source_id__in=[n.id for n in batch])
+                .values("source_id").annotate(c=Count("id")).values_list("source_id", "c")
+            )
+            for n in batch:
+                score = 100
+                issues = []
+                words = n.words or count_words(n.content)
+                if words < 50:
+                    score -= 25
+                    issues.append("short")
+                if words >= 50 and not re.search(r"(?m)^#{1,6}\s", n.content or ""):
+                    score -= 10
+                    issues.append("no_heading")
+                if not outgoing.get(n.id) and n.id not in backlinked:
+                    score -= 20
+                    issues.append("orphan")
+                if not n.tags.all():
+                    score -= 10
+                    issues.append("no_tag")
+                if (now - n.updated_at).days > stale_days:
+                    score -= 15
+                    issues.append("stale")
+                score = max(score, 0)
+                grade = "A" if score >= 85 else "B" if score >= 70 else "C" if score >= 55 else "D"
+                for i in issues:
+                    counter[i] = counter.get(i, 0) + 1
+                rows.append({
+                    "id": n.id, "title": n.title, "words": words, "score": score, "grade": grade,
+                    "issues": issues, "updated_at": n.updated_at, "color": n.color,
+                    "backlinks": 1 if n.id in backlinked else 0, "outgoing": outgoing.get(n.id, 0),
+                })
+            scanned += len(batch)
+            if len(batch) < self.BATCH_SIZE:
+                break
         total = len(rows)
         avg = round(sum(r["score"] for r in rows) / total, 1)
         distribution = {g: sum(1 for r in rows if r["grade"] == g) for g in ("A", "B", "C", "D")}
@@ -1271,6 +1532,9 @@ class NoteHealthView(APIView):
             "distribution": distribution, "issues": issues, "stale_days": stale_days,
             "worst": rows[:limit],
             "perfect": sum(1 for r in rows if r["score"] == 100),
+            "scanned": scanned, "scan_limit": self.SCAN_LIMIT,
+            "batch_size": self.BATCH_SIZE, "total_notes": total_notes,
+            "truncated": total_notes > scanned,
         })
 
 
@@ -1388,6 +1652,12 @@ class NoteMergeView(APIView):
             target_id = int(request.data.get("target_id"))
         except (TypeError, ValueError):
             return _nb("source_id / target_id 必须是整数")
+        # #55：keep_source 等参数必须在任何写入之前校验完，避免「已合并却报错」
+        try:
+            keep = parse_bool(request.data.get("keep_source"), default=False, field="keep_source")
+        except ValidationError as exc:
+            detail = exc.detail
+            return _nb(str(detail[0]) if isinstance(detail, (list, tuple)) and detail else "keep_source 必须是布尔值")
         if source_id == target_id:
             return _nb("不能与自身合并")
         source = _get_note(request.user, source_id, include_deleted=True, write=True)
@@ -1398,32 +1668,39 @@ class NoteMergeView(APIView):
             return _nb("目标笔记不存在", 404)
         if source.is_deleted or target.is_deleted:
             return _nb("回收站中的笔记不能合并")
-        NoteVersion.objects.create(
-            note=target, version=target.version, title=target.title,
-            content=target.content, created_by=request.user,
-        )
-        sep = f"\n\n---\n\n# {source.title}\n\n" if (source.title or "").strip() else "\n\n"
-        target.content = ((target.content or "").rstrip() + sep + (source.content or "")).strip()
-        target.words = count_words(target.content)
-        target.version += 1
-        target.tags.add(*source.tags.all())
-        if not target.folder_id and source.folder_id:
-            target.folder_id = source.folder_id
-        if not target.color and source.color:
-            target.color = source.color
-        target.save()
-        try:
-            link_lib.rebuild_links_for_note(target)
-        except Exception:
-            logger.exception("B23：静默兜底已登记（notes/views.py:1383 原为 pass）——review 是否应收窄异常类型")
-        keep = parse_bool(request.data.get("keep_source"), field="keep_source")
+        # #55：目标写入 + 源删除整体事务，任一步失败都不会留下半合并状态
+        with transaction.atomic():
+            NoteVersion.objects.create(
+                note=target, version=target.version, title=target.title,
+                content=target.content, created_by=request.user,
+            )
+            sep = f"\n\n---\n\n# {source.title}\n\n" if (source.title or "").strip() else "\n\n"
+            target.content = ((target.content or "").rstrip() + sep + (source.content or "")).strip()
+            target.words = count_words(target.content)
+            target.version += 1
+            target.tags.add(*source.tags.all())
+            if not target.folder_id and source.folder_id:
+                target.folder_id = source.folder_id
+            if not target.color and source.color:
+                target.color = source.color
+            target.save()
+            if not keep:
+                source.outgoing_links.all().delete()
+                source.is_deleted = True
+                source.deleted_at = timezone.now()
+                source.save(update_fields=["is_deleted", "deleted_at"])
+
+        # 双链重建放在提交之后：即使解析异常也不会把合并事务拖进 rollback-only
+        def _rebuild():
+            try:
+                link_lib.rebuild_links_for_note(target)
+            except Exception:
+                logger.exception("B23：静默兜底已登记（notes/views.py:1383 原为 pass）——review 是否应收窄异常类型")
+
+        transaction.on_commit(_rebuild)
         if keep:
             message = f"已合并到「{target.title}」（源笔记保留）"
         else:
-            source.outgoing_links.all().delete()
-            source.is_deleted = True
-            source.deleted_at = timezone.now()
-            source.save(update_fields=["is_deleted", "deleted_at"])
             message = f"已合并到「{target.title}」"
         return Response({
             "message": message, "source_deleted": not keep,
@@ -1562,13 +1839,22 @@ class NoteTodosView(APIView):
             limit = _qp_int(request.query_params, "limit", 500, lo=1, hi=2000)
         except ValueError as e:
             return _nb(str(e))
+        # #145：先用 DB 条件把「正文里没有待办标记」的笔记挡掉，再 only() 只取必要列，
+        # 避免每次轮询都拉 2000 篇完整正文 + 前缀字段。
+        qs = qs.filter(
+            Q(content__contains="[ ]") | Q(content__contains="[x]") | Q(content__contains="[X]")
+        ).only("id", "title", "color", "content", "updated_at")
         items, open_c, done_c = [], 0, 0
-        for n in qs[:2000]:
+        # #56：open/done 计数必须覆盖**全量**筛选结果，不能只统计 limit 截断前的部分；
+        # 这里单趟 iterator 既完成全量计数，又攒够 limit 条就停止 append。
+        for n in qs.iterator(chunk_size=200):
             for item in _scan_todos(n):
                 if item["done"]:
                     done_c += 1
                 else:
                     open_c += 1
+                if len(items) >= limit:
+                    continue
                 if not include_done and item["done"]:
                     continue
                 items.append({
@@ -1576,10 +1862,6 @@ class NoteTodosView(APIView):
                     "line_no": item["line_no"], "text": item["text"], "done": item["done"],
                     "updated_at": n.updated_at,
                 })
-                if len(items) >= limit:
-                    break
-            if len(items) >= limit:
-                break
         return Response({"list": items, "total": len(items),
                          "open_count": open_c, "done_count": done_c})
 
@@ -1964,3 +2246,427 @@ class NoteWordbookView(APIView):
             "created": created, "item": _word_data(item),
             "total": WordbookItem.objects.filter(owner=request.user).count(),
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+# =====================================================================
+# ============ F236–F260 笔记协作 / 素材 / 模板 / 推荐（只增不改） =======
+# =====================================================================
+
+
+def _comment_tree_data(note):
+    """按创建时间返回评论（顶层按 replies 归组，前端仍拿到扁平 parent 关系）"""
+    qs = note.comments.select_related("author").order_by("created_at")
+    return NoteCommentSerializer(qs, many=True).data
+
+
+class NoteCommentView(APIView):
+    """F236 段落讨论：列表 / 新建（支持回复）"""
+
+    def get(self, request, pk):
+        note = _get_note(request.user, pk, include_deleted=True)
+        if not note:
+            return _nb("笔记不存在", 404)
+        data = _comment_tree_data(note)
+        return Response({"list": data, "total": len(data),
+                         "open_count": sum(1 for d in data if not d["resolved"])})
+
+    def post(self, request, pk):
+        note = _get_note(request.user, pk, include_deleted=True, write=True)
+        if not note:
+            return _nb("笔记不存在或无权评论", 404)
+        content = str(request.data.get("content") or "").strip()
+        if not content:
+            return _nb("评论内容不能为空")
+        parent = None
+        pid = request.data.get("parent")
+        if pid not in (None, "", "null"):
+            try:
+                parent = NoteComment.objects.filter(pk=int(pid), note=note).first()
+            except (TypeError, ValueError):
+                return _nb("parent 必须是整数")
+            if parent is None:
+                return _nb("父评论不存在", 404)
+        comment = NoteComment.objects.create(
+            note=note, author=request.user, parent=parent,
+            quote=str(request.data.get("quote") or "")[:500],
+            content=content[:5000],
+        )
+        return Response(NoteCommentSerializer(comment).data, status=status.HTTP_201_CREATED)
+
+
+class NoteCommentDetailView(APIView):
+    """F236 评论标记解决 / 修改内容 / 删除（作者或笔记所有者可操作）"""
+
+    def _get(self, request, pk, cid):
+        note = _get_note(request.user, pk, include_deleted=True)
+        if not note:
+            return None, None
+        comment = NoteComment.objects.filter(pk=cid, note=note).first()
+        if comment is None:
+            return note, None
+        if comment.author_id != request.user.id and note.owner_id != request.user.id:
+            return note, None
+        return note, comment
+
+    def patch(self, request, pk, cid):
+        note, comment = self._get(request, pk, cid)
+        if not note:
+            return _nb("笔记不存在", 404)
+        if not comment:
+            return _nb("评论不存在或无权修改", 404)
+        if "resolved" in request.data:
+            comment.resolved = parse_bool(request.data["resolved"], field="resolved")
+            # 顶层评论标记解决时，回复一并解决，避免残留悬挂讨论
+            if comment.resolved and comment.parent_id is None:
+                comment.replies.update(resolved=True)
+        if "content" in request.data and str(request.data["content"]).strip():
+            comment.content = str(request.data["content"]).strip()[:5000]
+        comment.save()
+        return Response(NoteCommentSerializer(comment).data)
+
+    def delete(self, request, pk, cid):
+        note, comment = self._get(request, pk, cid)
+        if not note:
+            return _nb("笔记不存在", 404)
+        if not comment:
+            return _nb("评论不存在或无权删除", 404)
+        comment.delete()
+        return Response({"message": "评论已删除"})
+
+
+class NoteAttachmentView(APIView):
+    """F237 笔记附件：列表 / 绑定文件中心已有文件"""
+
+    def get(self, request, pk):
+        note = _get_note(request.user, pk, include_deleted=True)
+        if not note:
+            return _nb("笔记不存在", 404)
+        qs = note.attachments.select_related("file").order_by("id")
+        data = NoteAttachmentSerializer(qs, many=True).data
+        return Response({"list": data, "total": len(data)})
+
+    def post(self, request, pk):
+        note = _get_note(request.user, pk, include_deleted=True, write=True)
+        if not note:
+            return _nb("笔记不存在或无权修改", 404)
+        file = _file_of(request.user, request.data.get("file_id"))
+        if file is None:
+            return _nb("文件不存在或无权使用", 404)
+        att, created = NoteAttachment.objects.get_or_create(
+            note=note, file=file,
+            defaults={"name": str(request.data.get("name") or file.name)[:255], "size": file.size},
+        )
+        return Response(
+            NoteAttachmentSerializer(att).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class NoteAttachmentDetailView(APIView):
+    """F237 移除附件（只解绑，不删文件中心文件）"""
+
+    def delete(self, request, pk, aid):
+        note = _get_note(request.user, pk, include_deleted=True, write=True)
+        if not note:
+            return _nb("笔记不存在或无权修改", 404)
+        att = NoteAttachment.objects.filter(pk=aid, note=note).first()
+        if not att:
+            return _nb("附件不存在", 404)
+        att.delete()
+        return Response({"message": "附件已移除"})
+
+
+class NoteFilePickerView(APIView):
+    """F237/F239 选文件用的轻量清单（仅本人未删除文件，供封面/附件选择）"""
+
+    def get(self, request):
+        try:
+            limit = _qp_int(request.query_params, "limit", 30, lo=1, hi=100)
+        except ValueError as e:
+            return _nb(str(e))
+        from files.models import FileMeta
+
+        kind = request.query_params.get("kind")
+        qs = FileMeta.objects.filter(owner=request.user, is_deleted=False)
+        if kind:
+            qs = qs.filter(kind=kind)
+        q = (request.query_params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(Q(name__icontains=q) | Q(description__icontains=q))
+        rows = list(qs.order_by("-created_at")[:limit])
+        return Response({"list": [{
+            "id": f.id, "name": f.name, "size": f.size, "kind": f.kind, "ext": f.ext,
+            "url": f.url, "thumbnail": f.thumbnail_url or f.url,
+        } for f in rows], "total": len(rows)})
+
+
+def _template_data(tpl):
+    return NoteTemplateSerializer(tpl).data
+
+
+def _split_tag_field(raw):
+    """模板标签统一存成逗号分隔字符串（列表/字符串/None 均可）"""
+    if isinstance(raw, (list, tuple)):
+        names = [str(x).strip()[:50] for x in raw if str(x).strip()]
+    else:
+        names = [x.strip()[:50] for x in str(raw or "").split(",") if x.strip()]
+    seen, out = set(), []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return ",".join(out)[:200]
+
+
+class NoteTemplateMineView(APIView):
+    """F243 我的模板：列表 / 新建（把当前笔记存为模板）"""
+
+    def get(self, request):
+        qs = NoteTemplate.objects.filter(owner=request.user)
+        q = (request.query_params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(Q(title__icontains=q) | Q(content__icontains=q))
+        rows = list(qs[:200])
+        return Response({"list": [_template_data(t) for t in rows], "total": len(rows)})
+
+    def post(self, request):
+        title = str(request.data.get("title") or "").strip()[:200]
+        content = str(request.data.get("content") or "")
+        if not title and not content.strip():
+            return _nb("模板标题或内容不能为空")
+        if not title:
+            title = content.strip().split("\n", 1)[0][:60] or "未命名模板"
+        tpl = NoteTemplate.objects.create(
+            owner=request.user, title=title, content=content,
+            icon=str(request.data.get("icon") or "").strip()[:8],
+            tags=_split_tag_field(request.data.get("tags")),
+        )
+        return Response(_template_data(tpl), status=status.HTTP_201_CREATED)
+
+
+class NoteTemplateMineDetailView(APIView):
+    """F243 我的模板：修改 / 删除"""
+
+    def _get(self, request, pk):
+        return NoteTemplate.objects.filter(pk=pk, owner=request.user).first()
+
+    def patch(self, request, pk):
+        tpl = self._get(request, pk)
+        if not tpl:
+            return _nb("模板不存在", 404)
+        if "title" in request.data and str(request.data["title"]).strip():
+            tpl.title = str(request.data["title"]).strip()[:200]
+        if "content" in request.data:
+            tpl.content = str(request.data["content"])
+        if "icon" in request.data:
+            tpl.icon = str(request.data["icon"] or "").strip()[:8]
+        if "tags" in request.data:
+            tpl.tags = _split_tag_field(request.data["tags"])
+        tpl.save()
+        return Response(_template_data(tpl))
+
+    def delete(self, request, pk):
+        tpl = self._get(request, pk)
+        if not tpl:
+            return _nb("模板不存在", 404)
+        tpl.delete()
+        return Response({"message": "模板已删除"})
+
+
+class NoteFromMyTemplateView(APIView):
+    """F243 从我的模板创建笔记"""
+
+    def post(self, request, pk):
+        tpl = NoteTemplate.objects.filter(pk=pk, owner=request.user).first()
+        if not tpl:
+            return _nb("模板不存在", 404)
+        title = str(request.data.get("title") or tpl.title).strip()[:200] or "未命名笔记"
+        note = Note.objects.create(
+            title=title, content=tpl.content, owner=request.user,
+            words=count_words(tpl.content), source="template", icon=tpl.icon,
+            folder=_folder_of(request.user, request.data.get("folder")),
+        )
+        _apply_tags(request.user, note, tpl.tag_list)
+        return Response(NoteSerializer(note).data, status=status.HTTP_201_CREATED)
+
+
+TITLE_WORD_RE = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]")
+
+
+def _title_tokens(title):
+    return set(TITLE_WORD_RE.findall((title or "").lower()))
+
+
+class NoteRelatedView(APIView):
+    """F245 相关笔记：共同标签数 × 3 + 标题词重合度打分，排除自身与已双链"""
+
+    LIMIT = 10
+    CANDIDATES = 500
+
+    def get(self, request, pk):
+        note = _get_note(request.user, pk, include_deleted=True)
+        if not note:
+            return _nb("笔记不存在", 404)
+        # 只在本人笔记内推荐，避免把他人笔记标题/摘要暴露给当前用户
+        exclude_ids = {note.id}
+        outgoing = set(
+            NoteLink.objects.filter(owner_id=note.owner_id, source=note, target__isnull=False)
+            .values_list("target_id", flat=True)
+        )
+        incoming = set(
+            NoteLink.objects.filter(owner_id=note.owner_id, target=note)
+            .values_list("source_id", flat=True)
+        )
+        exclude_ids |= outgoing | incoming
+        my_tags = set(note.tags.values_list("name", flat=True))
+        my_tokens = _title_tokens(note.title)
+        candidates = list(
+            Note.objects.filter(owner_id=note.owner_id, is_deleted=False)
+            .exclude(id__in=exclude_ids)
+            .prefetch_related("tags")
+            .order_by("-updated_at")[:self.CANDIDATES]
+        )
+        rows = []
+        for c in candidates:
+            shared = my_tags & {t.name for t in c.tags.all()}
+            overlap = my_tokens & _title_tokens(c.title)
+            score = len(shared) * 3 + len(overlap) * 2
+            if score <= 0:
+                continue
+            rows.append({
+                "id": c.id, "title": c.title, "icon": c.icon, "color": c.color,
+                "words": c.words, "updated_at": c.updated_at,
+                "tags": [t.name for t in c.tags.all()],
+                "shared_tags": sorted(shared), "score": score,
+                "reason": "共同标签 " + "、".join(sorted(shared)) if shared else "标题相似",
+            })
+        rows.sort(key=lambda r: (-r["score"], r["title"]))
+        return Response({"note_id": note.id, "list": rows[:self.LIMIT],
+                         "total": len(rows), "limit": self.LIMIT})
+
+
+class NoteQuickView(APIView):
+    """F246 快速记录：只收正文，标题取首行，缺省用「速记 月-日 时:分」"""
+
+    def post(self, request):
+        content = str(request.data.get("content") or "")
+        if not content.strip():
+            return _nb("内容不能为空")
+        first = ""
+        for line in content.splitlines():
+            s = re.sub(r"^\s*(#{1,6}\s+|[-*+]\s+)", "", line).strip()
+            if s:
+                first = s
+                break
+        title = first[:200] if first else f"速记 {timezone.localtime():%m-%d %H:%M}"
+        note = Note.objects.create(
+            title=title, content=content, owner=request.user,
+            words=count_words(content), source="quick",
+        )
+        if isinstance(request.data.get("tags"), list):
+            _apply_tags(request.user, note, request.data["tags"])
+        return Response(NoteSerializer(note).data, status=status.HTTP_201_CREATED)
+
+
+class NoteTagMergeView(APIView):
+    """F256 合并标签：事务内把 from 的笔记关联迁到 to 后删除 from"""
+
+    def post(self, request):
+        try:
+            from_id = int(request.data.get("from_id"))
+            to_id = int(request.data.get("to_id"))
+        except (TypeError, ValueError):
+            return _nb("from_id / to_id 必须是整数")
+        if from_id == to_id:
+            return _nb("不能与自身合并")
+        with transaction.atomic():
+            src = NoteTag.objects.select_for_update().filter(pk=from_id, owner=request.user).first()
+            dst = NoteTag.objects.select_for_update().filter(pk=to_id, owner=request.user).first()
+            if not src:
+                return _nb("源标签不存在", 404)
+            if not dst:
+                return _nb("目标标签不存在", 404)
+            through = Note.tags.through
+            exist = set(
+                through.objects.filter(notetag_id=dst.id).values_list("note_id", flat=True)
+            )
+            moved = 0
+            for row in through.objects.filter(notetag_id=src.id).only("id", "note_id"):
+                if row.note_id in exist:
+                    continue
+                through.objects.filter(pk=row.pk).update(notetag_id=dst.id)
+                moved += 1
+            src.delete()
+        return Response({
+            "message": f"已把「{src.name}」合并到「{dst.name}」（迁移 {moved} 篇）",
+            "from_id": from_id, "to_id": dst.id, "moved": moved,
+            "use_count": NoteTagSerializer(dst).data.get("use_count", 0),
+        })
+
+
+def _preview_payload(note, request=None):
+    """F257 双链悬停预览：标题 + 前 160 字 + 标签 + 更新时间"""
+    text = re.sub(r"```[\s\S]*?```", " ", note.content or "")
+    text = re.sub(r"[#>*`\[\]!|_-]+", " ", text)
+    text = " ".join(text.split())
+    return {
+        "id": note.id, "title": note.title, "icon": note.icon, "color": note.color,
+        "excerpt": text[:160], "words": note.words,
+        "tags": list(note.tags.values_list("name", flat=True)[:10]),
+        "updated_at": note.updated_at, "is_public": note.is_public,
+    }
+
+
+class NotePreviewView(APIView):
+    """F257 单篇笔记预览摘要：GET /api/notes/<pk>/preview/"""
+
+    def get(self, request, pk):
+        note = _get_note(request.user, pk, include_deleted=True)
+        if not note:
+            return _nb("笔记不存在", 404)
+        return Response(_preview_payload(note, request))
+
+
+class NotePreviewByTitleView(APIView):
+    """F257 按标题取预览（双链 [[标题]] 悬停时用）：GET /api/notes/preview/?title=xxx"""
+
+    def get(self, request):
+        title = (request.query_params.get("title") or "").strip()
+        if not title:
+            return _nb("title 不能为空")
+        qs = _note_qs(request.user).filter(is_deleted=False, title__iexact=title[:200])
+        exclude = request.query_params.get("exclude")
+        if exclude:
+            try:
+                qs = qs.exclude(id=int(exclude))
+            except (TypeError, ValueError):
+                return _nb("exclude 必须是整数")
+        note = qs.order_by("-updated_at").first()
+        if note is None:
+            return _nb("未找到同名笔记", 404)
+        return Response(_preview_payload(note, request))
+
+
+class NotePinOrderView(APIView):
+    """F260 置顶区拖拽排序：POST /api/notes/pin-order/ {"note_ids": [3, 1, 2]}"""
+
+    def post(self, request):
+        ids = request.data.get("note_ids") or []
+        if not isinstance(ids, list) or not ids:
+            return _nb("note_ids 不能为空")
+        clean = []
+        for raw in ids:
+            try:
+                nid = int(raw)
+            except (TypeError, ValueError):
+                return _nb("note_ids 必须是整数数组")
+            if nid not in clean:
+                clean.append(nid)
+        owned = set(
+            _note_write_qs(request.user).filter(id__in=clean).values_list("id", flat=True)
+        )
+        with transaction.atomic():
+            for idx, nid in enumerate(clean, start=1):
+                if nid in owned:
+                    Note.objects.filter(pk=nid, owner=request.user).update(pin_order=idx)
+        return Response({"message": f"已保存置顶顺序（{len(owned)} 篇）", "count": len(owned)})

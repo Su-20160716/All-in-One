@@ -343,6 +343,32 @@ class CodeJudgeTask(models.Model):
         return f"{self.title} · {self.verdict} ({self.passed}/{self.total})"
 
 
+class CodeTestCaseSet(models.Model):
+    """判题用例集（第 275 条）：常用题目的测试用例保存后复用。"""
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="code_testcase_sets",
+        verbose_name="所有者",
+    )
+    title = models.CharField(max_length=200, verbose_name="用例集名称")
+    language = models.CharField(max_length=32, default="python", verbose_name="语言")
+    # [{"stdin": "...", "expected": "...", "enabled": true}]
+    cases = models.JSONField(default=list, blank=True, verbose_name="测试用例")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "判题用例集"
+        verbose_name_plural = "判题用例集"
+        ordering = ["-updated_at"]
+        indexes = [models.Index(fields=["owner", "-updated_at"])]
+
+    def __str__(self):
+        return f"{self.title}（{len(self.cases or [])} 条）"
+
+
 class CodeComment(models.Model):
     """行级评论（第 71/72 条）：钉在某文件某一行上的讨论串。"""
 
@@ -424,6 +450,29 @@ class CodeShare(models.Model):
     @staticmethod
     def new_token():
         return uuid.uuid4().hex[:24]
+
+
+class CodeShareVisit(models.Model):
+    """分享访问记录（第 269 条）：只存哈希，用于独立访客与趋势统计。"""
+
+    share = models.ForeignKey(
+        CodeShare,
+        on_delete=models.CASCADE,
+        related_name="visits",
+        verbose_name="分享",
+    )
+    ip_hash = models.CharField(max_length=40, blank=True, default="", verbose_name="IP 哈希")
+    ua_hash = models.CharField(max_length=40, blank=True, default="", verbose_name="UA 哈希")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "分享访问记录"
+        verbose_name_plural = "分享访问记录"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["share", "-created_at"])]
+
+    def __str__(self):
+        return f"{self.share_id}@{self.created_at:%Y-%m-%d %H:%M}"
 
 
 # ============================================================

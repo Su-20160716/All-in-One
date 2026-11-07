@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""minitools 路由：27 大家族 × 376 个纯函数工具 + catalog = 377 个 URL。"""
+"""minitools 路由：28 大家族 × 383 个纯函数工具 + catalog = 384 个 URL。"""
 from django.urls import path
 
 from .common import endpoint, endpoint_index, ok
@@ -31,6 +31,7 @@ from . import tools_trivia as trivia
 from . import tools_statsx as statsx
 from . import tools_lab as lab
 from . import tools_media as media
+from . import tools_work as work
 
 SUBSYSTEMS = [
     ("text", "文本处理", [
@@ -42,6 +43,7 @@ SUBSYSTEMS = [
         "extract-summary", "keyword-extract", "stopword-filter", "shuffle-words",
         "case-convert-naming", "md-table-generate", "indent-block", "center-align",
         "word-wrap", "zero-width-remove",
+        "sensitive-words",
     ]),
     ("num", "数字数学", [
         "to-chinese-upper", "to-english-words", "roman-convert", "prime-factorize",
@@ -167,7 +169,8 @@ SUBSYSTEMS = [
         "dilution", "titration", "concentration-convert",
         "standard-solution", "sig-figs", "temp-table",
     ]),
-    ("media", "图片与批量哈希", ["image-compress", "hash-batch"]),
+    ("media", "图片与批量哈希", ["image-compress", "hash-batch", "image-info", "image-watermark"]),
+    ("work", "职场计算", ["gpa-calc", "annual-leave", "overtime-pay", "severance-pay"]),
 ]
 
 
@@ -575,6 +578,13 @@ VIEWS = {
     "lab/temp-table/": lab.temp_table,
     # F42/F44 图片压缩与批量哈希
     "media/image-compress/": media.image_compress, "media/hash-batch/": media.hash_batch,
+    # ---- 第三轮 S26（399–405，7 个）----
+    "work/gpa-calc/": work.gpa_calc,
+    "work/annual-leave/": work.annual_leave,
+    "work/overtime-pay/": work.overtime_pay,
+    "work/severance-pay/": work.severance_pay,
+    "media/image-info/": media.image_info, "media/image-watermark/": media.image_watermark,
+    "text/sensitive-words/": tx.sensitive_words,
 }
 
 
@@ -595,4 +605,4 @@ urlpatterns = [path("catalog/", minitools_catalog, name="minitools-catalog")]
 for _route, _view in VIEWS.items():
     urlpatterns.append(path(_route, _view))
 
-assert len(urlpatterns) == 377, f"minitools 接口数应为 377，实际 {len(urlpatterns)}"
+assert len(urlpatterns) == 384, f"minitools 接口数应为 384，实际 {len(urlpatterns)}"

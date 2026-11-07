@@ -2,6 +2,7 @@
 """minitools · 生成器家族（25 个，编号 124-148）。"""
 import hashlib
 import hmac
+import html
 import random
 import secrets
 import string
@@ -247,7 +248,7 @@ def _barcode_svg(text, size=200):
         pos += w
     width = max(pos, size)
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="100" viewBox="0 0 {width} 100">'
-           + "".join(bars) + f'<text x="{width/2}" y="100" text-anchor="middle" font-size="10">{text}</text></svg>')
+           + "".join(bars) + f'<text x="{width/2}" y="100" text-anchor="middle" font-size="10">{html.escape(text)}</text></svg>')
     return svg
 
 

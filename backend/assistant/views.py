@@ -18,11 +18,12 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from assistant import generators, llm, retrieval
 from assistant.models import AIConversation, AIGeneratedQuestion, AIMessage, AIPrompt
-from core.scoping import scope_queryset
+from core.scoping import can_write, scope_queryset
 from core.validators import as_int, parse_bool
 
 SYSTEM_TUTOR = (
@@ -151,18 +152,22 @@ class NoteSummarizeView(APIView):
             summary = llm.extractive_summary(content, 5)
             points = llm.bullet_points(content, 5)
 
-        note.ai_summary = summary[:4000]
-        from django.utils import timezone
+        # #48：读范围 ≠ 写范围。dept/all 角色能看到他人笔记，但不能把摘要写回去。
+        persisted = can_write(request.user, note)
+        if persisted:
+            note.ai_summary = summary[:4000]
+            from django.utils import timezone
 
-        note.ai_summary_at = timezone.now()
-        note.save(update_fields=["ai_summary", "ai_summary_at"])
+            note.ai_summary_at = timezone.now()
+            note.save(update_fields=["ai_summary", "ai_summary_at"])
 
         modes = _summary_modes(summary, points, content)
         return Response({
             "summary": summary, "key_points": points, "note_id": note.id, "title": note.title,
             "provider": result["provider"], "model": result.get("model", ""), "cached": False,
+            "persisted": persisted,
             "fallback_reason": "" if result["ok"] else result.get("error", ""),
-            "generated_at": note.ai_summary_at,
+            "generated_at": note.ai_summary_at if persisted else timezone.now(),
             "mode": mode or "paragraph", "modes": modes,
             "result": modes.get(mode, summary) if mode else summary,
         })
@@ -244,6 +249,10 @@ class AssistantAskView(APIView):
 
     POST /api/assistant/ask/  {"question": "...", "note_ids": [1,2], "keyword": "架构"}
     """
+
+    # #47：AI 对话类接口单独限流（scope 见 settings.DEFAULT_THROTTLE_RATES）
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "assistant_chat"
 
     def post(self, request):
         question = str(request.data.get("question") or "").strip()
@@ -359,16 +368,40 @@ class ConversationListView(APIView):
 
 
 class ConversationDetailView(APIView):
-    """会话消息 / 重命名 / 删除"""
+    """会话消息 / 重命名 / 删除
+
+    #111：默认只回最近 200 条消息（更早消息用 `before=<最旧消息 id>` 翻页），
+    消息查询 select_related 会话，避免长对话一次性序列化全部正文。
+    """
+
+    PAGE_SIZE = 200
 
     def _get(self, request, pk):
-        return AIConversation.objects.filter(pk=pk, owner=request.user).first()
+        return (
+            AIConversation.objects
+            .select_related("parent_conversation", "parent_message")
+            .filter(pk=pk, owner=request.user).first()
+        )
 
     @endpoint(("GET",))
     def get(self, request, pk):
         c = self._get(request, pk)
         if not c:
             return Response({"message": "会话不存在"}, status=404)
+        try:
+            limit = as_int(request.query_params.get("limit"), default=self.PAGE_SIZE,
+                           field="limit", minimum=1, maximum=self.PAGE_SIZE)
+            before = as_int(request.query_params.get("before"), default=None,
+                            field="before", minimum=1)
+        except ValidationError as e:
+            return Response({"message": str(e.detail[0]) if e.detail else "参数非法"}, status=400)
+        total = c.messages.count()
+        qs = c.messages.select_related("conversation").order_by("-id")
+        if before is not None:
+            qs = qs.filter(id__lt=before)
+        rows = list(qs[:limit])
+        rows.reverse()
+        has_more = qs.count() > len(rows)
         return Response({
             "id": c.id, "title": c.title, "model": c.model, "updated_at": c.updated_at,
             "created_at": c.created_at, "date": c.updated_at.date().isoformat(),
@@ -377,8 +410,11 @@ class ConversationDetailView(APIView):
             "messages": [
                 {"id": m.id, "role": m.role, "content": m.content,
                  "provider": m.provider, "references": m.references, "created_at": m.created_at}
-                for m in c.messages.all()
+                for m in rows
             ],
+            # 分页元信息：next_before 传给下一次请求即可继续往前翻
+            "message_total": total, "returned": len(rows), "limit": limit,
+            "has_more": has_more, "next_before": rows[0].id if (has_more and rows) else None,
         })
 
     def patch(self, request, pk):
@@ -405,12 +441,21 @@ class ChatView(APIView):
     """
 
     HISTORY_LIMIT = 12
+    # #47：AI 对话类接口单独限流（scope 见 settings.DEFAULT_THROTTLE_RATES）
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "assistant_chat"
 
     @endpoint(("POST",))
     def post(self, request):
-        message = (request.data.get("message") or "").strip()
+        # #110：入口即限制长度，后续检索 / 落库 / 拼 prompt 都用截断后的文本，
+        # 避免用超长提问去匹配全部笔记切片。
+        raw = request.data.get("message")
+        if not isinstance(raw, str):
+            return Response({"message": "message 必须是字符串"}, status=400)
+        message = raw.strip()
         if not message:
             return Response({"message": "请输入内容"}, status=400)
+        message = message[:MAX_INPUT_CHARS]
 
         conv = None
         cid = request.data.get("conversation_id")
@@ -421,7 +466,7 @@ class ChatView(APIView):
                 owner=request.user, title=message[:40], model=llm.status()["model"]
             )
 
-        AIMessage.objects.create(conversation=conv, role="user", content=message[:MAX_INPUT_CHARS])
+        AIMessage.objects.create(conversation=conv, role="user", content=message)
 
         use_knowledge = request.data.get("use_knowledge", True)
         references = []

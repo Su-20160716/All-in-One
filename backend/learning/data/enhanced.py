@@ -6539,7 +6539,7 @@ for n in numbers {
 print()
 
 for (index, value) in numbers.enumerated() {
-    print("[\(index)] = \\(value)")
+    print("[\\(index)] = \\(value)")
 }
 
 // ===== 高阶函数 =====
@@ -6754,9 +6754,9 @@ let multiLine = \"\"\"
 print(multiLine)
 
 // 原始字符串（#...#，不解析转义）
-let raw = #"这包含 \n 但不换行，\(name) 也不插值"#
+let raw = #"这包含 \\n 但不换行，\\(name) 也不插值"#
 print(raw)
-let rawInterpolated = #"插值需要 \#(name)"#
+let rawInterpolated = #"插值需要 \\#(name)"#
 print(rawInterpolated)
 
 // ===== 长度与访问 =====
@@ -6774,7 +6774,7 @@ print()
 
 // 带索引遍历
 for (index, char) in str.enumerated() {
-    print("[\(index)] = \\(char)")
+    print("[\\(index)] = \\(char)")
 }
 
 // ===== 前缀后缀与包含 =====

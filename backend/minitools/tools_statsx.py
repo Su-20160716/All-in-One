@@ -18,9 +18,12 @@ def _nums(request, key="values"):
         if x is None or (isinstance(x, str) and not x.strip()):
             continue
         try:
-            out.append(float(x))
+            val = float(x)
         except (TypeError, ValueError):
             raise ValueError(f"参数 {key} 含非数字项: {x}")
+        if not math.isfinite(val):
+            raise ValueError(f"参数 {key} 含 NaN/Inf")
+        out.append(val)
     if len(out) < 2:
         raise ValueError(f"参数 {key} 至少需要 2 个数字")
     return out
@@ -138,17 +141,24 @@ def iqr(request):
 def moving_average(request):
     """SX05. 移动平均：支持简单/加权，可指定窗口。"""
     vals = _nums(request, "values")
-    window = req_num(request, "window", integer=True, minimum=1, maximum=len(vals))
+    window = req_num(request, "window", integer=True, minimum=1, maximum=min(len(vals), 1000))
     kind = (opt_str(request, "kind", "simple") or "simple").lower()
     w = int(window)
+    # 前缀和：原本每窗口重算一次是 O(n·w)，大窗口下约 10⁸ 次乘加
+    prefix = [0.0]
+    weighted_prefix = [0.0]
+    for i, v in enumerate(vals):
+        prefix.append(prefix[-1] + v)
+        weighted_prefix.append(weighted_prefix[-1] + v * (i + 1))
     out = []
+    total_w = w * (w + 1) / 2.0
     for i in range(len(vals) - w + 1):
-        seg = vals[i:i + w]
         if kind == "weighted":
-            total_w = w * (w + 1) / 2.0
-            out.append(sum(v * (k + 1) for k, v in enumerate(seg)) / total_w)
+            # Σ v[j]*(j-i+1) = Σ v[j]*(j+1) - i*Σ v[j]
+            seg_sum = weighted_prefix[i + w] - weighted_prefix[i] - i * (prefix[i + w] - prefix[i])
+            out.append(seg_sum / total_w)
         else:
-            out.append(sum(seg) / w)
+            out.append((prefix[i + w] - prefix[i]) / w)
     return ok({"window": w, "kind": kind, "count": len(out),
                "values": [round(v, 6) for v in out],
                "note": "输出长度 = 原长度 − 窗口 + 1（不补边）。"})
@@ -164,6 +174,10 @@ def frequency_bins(request):
         k = int(bins)
         if k < 1:
             raise ValueError("bins 至少为 1")
+        if k > 1000:
+            raise ValueError("bins 上限为 1000")
+        if k > len(vals):
+            raise ValueError("bins 不能超过样本数")
     else:
         k = max(1, int(math.ceil(math.sqrt(len(vals)))))
     width = (hi - lo) / k if hi > lo else 1.0

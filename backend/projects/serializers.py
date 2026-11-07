@@ -48,7 +48,7 @@ class CardTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = CardTemplate
         fields = ["id", "name", "title", "description", "priority", "labels", "story_points",
-                  "estimated_minutes", "created_at"]
+                  "estimated_minutes", "dod_items", "created_at"]
         read_only_fields = ["created_at"]
 
 
@@ -103,6 +103,10 @@ class TaskCardSerializer(serializers.ModelSerializer):
     is_blocked = serializers.SerializerMethodField()
     dod_total = serializers.SerializerMethodField()
     dod_done = serializers.SerializerMethodField()
+    # 289：卡片面部显示 spent/estimate 双数值与差额
+    estimate_diff = serializers.SerializerMethodField()
+    estimate_over = serializers.SerializerMethodField()
+    remaining_minutes = serializers.SerializerMethodField()
 
     class Meta:
         model = TaskCard
@@ -113,8 +117,10 @@ class TaskCardSerializer(serializers.ModelSerializer):
             "sort_order", "started_at", "completed_at", "created_by",
             "comment_count", "is_overdue", "subtask_total", "subtask_done", "progress",
             "dod_total", "dod_done", "spent_minutes", "created_at", "updated_at",
+            "estimate_diff", "estimate_over", "remaining_minutes", "resolved_at", "resolve_reason",
         ]
-        read_only_fields = ["created_by", "created_at", "updated_at", "started_at", "completed_at"]
+        read_only_fields = ["created_by", "created_at", "updated_at", "started_at", "completed_at",
+                            "resolved_at"]
 
     def get_code(self, obj):
         return f"C-{obj.number}" if obj.number else ""
@@ -178,11 +184,35 @@ class TaskCardSerializer(serializers.ModelSerializer):
             return 100 if obj.status == "done" else 0
         return round(obj.subtasks.filter(is_done=True).count() / total * 100)
 
+    def _spent(self, obj):
+        """工时合计（同一实例只算一次，避免 estimate_* 三个字段重复聚合）"""
+        if not hasattr(obj, "_spent_cache"):
+            if _has_prefetch(obj, "worklogs"):
+                obj._spent_cache = sum(w.minutes or 0 for w in obj.worklogs.all())
+            else:
+                from django.db.models import Sum
+                obj._spent_cache = obj.worklogs.aggregate(s=Sum("minutes"))["s"] or 0
+        return obj._spent_cache
+
     def get_spent_minutes(self, obj):
-        if _has_prefetch(obj, "worklogs"):
-            return sum(w.minutes or 0 for w in obj.worklogs.all())
-        from django.db.models import Sum
-        return obj.worklogs.aggregate(s=Sum("minutes"))["s"] or 0
+        return self._spent(obj)
+
+    def get_estimate_diff(self, obj):
+        """289：已花费 - 预估（正数表示超估）"""
+        estimated = obj.estimated_minutes or 0
+        if not estimated:
+            return 0
+        return self._spent(obj) - estimated
+
+    def get_estimate_over(self, obj):
+        estimated = obj.estimated_minutes or 0
+        return bool(estimated and self._spent(obj) > estimated)
+
+    def get_remaining_minutes(self, obj):
+        estimated = obj.estimated_minutes or 0
+        if not estimated:
+            return 0
+        return max(estimated - self._spent(obj), 0)
 
 
 class ProjectSerializer(serializers.ModelSerializer):

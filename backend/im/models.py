@@ -10,6 +10,8 @@ class QuickReply(models.Model):
     title = models.CharField(max_length=120, blank=True, verbose_name="标题")
     content = models.TextField(verbose_name="内容")
     sort_order = models.IntegerField(default=0, verbose_name="排序")
+    # #319 分组标题：管理面板按 group 分块展示，空串归入「未分组」
+    group = models.CharField(max_length=60, blank=True, default="", verbose_name="分组")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
 
     class Meta:
@@ -42,7 +44,12 @@ class ChatSession(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="owned_sessions", verbose_name="群主"
     )
     announcement = models.CharField(max_length=500, blank=True, verbose_name="群公告")
+    # #317 公告最后更新时间：成员 announcement_read_at 早于它即为「公告未读」
+    announcement_updated_at = models.DateTimeField(null=True, blank=True, verbose_name="公告更新时间")
     avatar = models.CharField(max_length=500, blank=True, verbose_name="群头像")
+    # #61：单聊去重键 = "min_user_id:max_user_id"。唯一约束兜底并发重复建会话；
+    # 群聊与历史单聊为空（NULL 不参与唯一比较），因此对存量数据零破坏。
+    pair_key = models.CharField(max_length=64, null=True, blank=True, unique=True, verbose_name="单聊去重键")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
 
     class Meta:
@@ -60,7 +67,11 @@ class SessionMemberSetting(models.Model):
     session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name="member_settings", verbose_name="会话")
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="session_settings", verbose_name="成员")
     is_muted = models.BooleanField(default=False, verbose_name="免打扰")
+    # #326 临时免打扰到期时间：为 NULL 表示永久免打扰；到期后按未静音处理
+    mute_until = models.DateTimeField(null=True, blank=True, verbose_name="免打扰到期")
     is_pinned = models.BooleanField(default=False, verbose_name="置顶")
+    # #327 置顶排序权重（越小越靠前），仅在 is_pinned 时参与排序
+    pin_order = models.IntegerField(default=0, verbose_name="置顶排序")
     is_archived = models.BooleanField(default=False, verbose_name="已归档")
     # F25 自定义标签（列表页可按标签过滤）
     tags = models.JSONField(default=list, blank=True, verbose_name="标签")
@@ -68,6 +79,8 @@ class SessionMemberSetting(models.Model):
     draft_updated_at = models.DateTimeField(null=True, blank=True, verbose_name="草稿更新时间")
     typing_at = models.DateTimeField(null=True, blank=True, verbose_name="最近正在输入时间")
     last_read_at = models.DateTimeField(null=True, blank=True, verbose_name="最后已读时间")
+    # #317 公告已读时间：早于会话 announcement_updated_at 即公告有未读
+    announcement_read_at = models.DateTimeField(null=True, blank=True, verbose_name="公告已读时间")
 
     class Meta:
         verbose_name = "会话设置"

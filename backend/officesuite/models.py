@@ -97,6 +97,27 @@ class RoomBooking(SuiteBase):
         verbose_name = "会议室预订"
 
 
+class MeetingRoomFavorite(models.Model):
+    """S26-357 常用会议室：每个用户对同一会议室最多一条收藏。"""
+
+    room = models.ForeignKey(MeetingRoom, on_delete=models.CASCADE,
+                             related_name="favorites", verbose_name="会议室")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                             related_name="os_room_favorites", verbose_name="用户")
+    created_at = models.DateTimeField("收藏时间", auto_now_add=True)
+
+    class Meta:
+        verbose_name = "常用会议室"
+        verbose_name_plural = "常用会议室"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["room", "user"], name="os_room_fav_uniq"),
+        ]
+
+    def __str__(self):
+        return f"{self.user} -> {self.room}"
+
+
 class Asset(SuiteBase):
     code = models.CharField("资产编码", max_length=60, blank=True, default="")
     category = models.CharField("类别", max_length=40, default="设备")
@@ -106,6 +127,27 @@ class Asset(SuiteBase):
 
     class Meta(SuiteBase.Meta):
         verbose_name = "资产"
+
+
+class AssetCheck(models.Model):
+    """S26-365 资产盘点批次：code 标识批次，snapshot 存盘点时的资产状态快照。"""
+
+    code = models.CharField("盘点批次", max_length=40)
+    status = models.CharField("状态", max_length=20, default="open")
+    snapshot = models.JSONField("资产状态快照", default=dict, blank=True)
+    remark = models.TextField("备注", blank=True, default="")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              related_name="os_asset_checks", verbose_name="发起人")
+    created_at = models.DateTimeField("发起时间", auto_now_add=True)
+
+    class Meta:
+        verbose_name = "资产盘点"
+        verbose_name_plural = "资产盘点"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["code"], name="os_asset_check_code_idx")]
+
+    def __str__(self):
+        return f"{self.code}({len(self.snapshot or {})})"
 
 
 class Vehicle(models.Model):
@@ -238,6 +280,14 @@ class TrainingEnrollment(models.Model):
     rating = models.IntegerField("评分", null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        verbose_name = "培训报名"
+        # #68：同一培训同一成员只能报名一次（并发重复报名由约束兜底）
+        constraints = [
+            models.UniqueConstraint(fields=["session", "member_name"],
+                                    name="os_training_enroll_uniq"),
+        ]
+
 
 class RecognitionRecord(SuiteBase):
     to_name = models.CharField("被表彰人", max_length=60)
@@ -248,6 +298,23 @@ class RecognitionRecord(SuiteBase):
         verbose_name = "表彰记录"
 
 
+class RecognitionLike(models.Model):
+    """#69 表彰点赞关系：每个用户对每条表彰最多一次，防止无限刷赞。"""
+
+    recognition = models.ForeignKey(RecognitionRecord, on_delete=models.CASCADE,
+                                    related_name="like_records", verbose_name="表彰")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                             related_name="os_recognition_likes", verbose_name="点赞人")
+    created_at = models.DateTimeField("点赞时间", auto_now_add=True)
+
+    class Meta:
+        verbose_name = "表彰点赞"
+        constraints = [
+            models.UniqueConstraint(fields=["recognition", "user"],
+                                    name="os_recognition_like_uniq"),
+        ]
+
+
 class StandupEntry(SuiteBase):
     standup_date = models.DateField("日期", null=True, blank=True)
     yesterday = models.TextField("昨天", blank=True, default="")
@@ -256,6 +323,11 @@ class StandupEntry(SuiteBase):
 
     class Meta(SuiteBase.Meta):
         verbose_name = "站会汇报"
+        # #70：同一人同一天只能有一条站会（并发重复提交由约束兜底）
+        constraints = [
+            models.UniqueConstraint(fields=["owner", "standup_date"],
+                                    name="os_standup_owner_date_uniq"),
+        ]
 
 
 class Objective(SuiteBase):

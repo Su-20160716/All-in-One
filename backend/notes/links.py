@@ -232,3 +232,16 @@ def all_backlink_ids(owner_id: int):
         NoteLink.objects.filter(owner_id=owner_id, target__isnull=False)
         .values_list("target_id", flat=True)
     )
+
+
+def backlink_ids_for(owner_id: int, note_ids):
+    """指定笔记中「有反链」的 id 集合（列表分页后只查当前页，避免全库扫描）"""
+    from notes.models import NoteLink
+
+    ids = list(note_ids)
+    if not ids:
+        return set()
+    return set(
+        NoteLink.objects.filter(owner_id=owner_id, target_id__in=ids, target__isnull=False)
+        .values_list("target_id", flat=True)
+    )

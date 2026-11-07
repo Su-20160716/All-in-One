@@ -4,10 +4,13 @@
 智能辅助全部遵循「LLM 可用则用，不可用则本地降级」的项目约定，
 本地降级实现基于 `code.runtime` 的静态分析，保证无 Key 也能用。
 """
+import hashlib
 import json
 import re
+from datetime import timedelta
 
-from django.db.models import Q
+from django.conf import settings
+from django.db.models import F, Q
 from django.utils import timezone
 
 from assistant import llm
@@ -18,7 +21,9 @@ from devtools.common import (
 )
 
 from . import runtime as rt
-from .models import CodeComment, CodeFile, CodeShare, CodeSnippet, CodeVersion
+from .models import (
+    CodeComment, CodeFile, CodeShare, CodeShareVisit, CodeSnippet, CodeVersion,
+)
 from .serializers import file_brief, file_qs, get_file, get_ws
 
 # ============================================================
@@ -1062,11 +1067,24 @@ def ai_status(request):
 def comment_list(request, pk):
     f = get_file(request.user, pk)
     roots = f.comments.filter(parent__isnull=True).select_related("author")
-    items = []
-    for c in roots:
-        items.append(_comment_payload(c, request.user))
-    unresolved = sum(1 for c in roots if not c.resolved)
-    return ok({"items": items, "unresolved": unresolved, "total": roots.count()})
+    all_roots = f.comments.filter(parent__isnull=True)
+    total = all_roots.count()
+    unresolved = all_roots.filter(resolved=False).count()
+    # 第 277 条：resolved=0/1 过滤 + line 定位；计数始终按全部评论统计
+    resolved_raw = opt_str(request, "resolved", "").strip().lower()
+    if resolved_raw in ("0", "false", "no", "unresolved"):
+        roots = roots.filter(resolved=False)
+    elif resolved_raw in ("1", "true", "yes", "resolved"):
+        roots = roots.filter(resolved=True)
+    line = opt_num(request, "line", None, integer=True, minimum=1)
+    if line:
+        roots = roots.filter(line=line)
+    items = [_comment_payload(c, request.user) for c in roots]
+    return ok({
+        "items": items, "unresolved": unresolved, "resolved": total - unresolved,
+        "total": total, "filtered": len(items),
+        "file": f.id, "resolved_filter": resolved_raw, "line_filter": line,
+    })
 
 
 def _comment_payload(c, user):
@@ -1788,6 +1806,118 @@ def share_revoke(request, token):
     return ok({"deleted": n})
 
 
+# ------------------------------------------------------------
+# 第 269 条：分享访问统计（只存哈希，不落明文 IP / UA）
+# ------------------------------------------------------------
+
+
+def _digest(raw):
+    salt = str(getattr(settings, "SECRET_KEY", ""))[:24]
+    return hashlib.sha256((salt + (raw or "")).encode("utf-8", "ignore")).hexdigest()[:32]
+
+
+def _visit_hashes(request):
+    ip = (request.META.get("HTTP_X_FORWARDED_FOR") or "").split(",")[0].strip()
+    ip = ip or request.META.get("REMOTE_ADDR", "")
+    return _digest(ip), _digest(request.META.get("HTTP_USER_AGENT", ""))
+
+
+def record_share_visit(sh, request):
+    """记录一次公开访问，并顺带清理 180 天前的旧记录。"""
+    ip_hash, ua_hash = _visit_hashes(request)
+    try:
+        CodeShareVisit.objects.create(share=sh, ip_hash=ip_hash, ua_hash=ua_hash)
+        CodeShareVisit.objects.filter(
+            share=sh, created_at__lt=timezone.now() - timedelta(days=180)
+        ).delete()
+    except Exception:  # noqa: BLE001 —— 统计失败不影响分享页
+        pass
+
+
+@endpoint(("GET",))
+def share_visits(request, token):
+    """分享访问统计（第 269 条）：总数 / 独立访客 / 近 30 天 / 每日趋势。"""
+    sh = CodeShare.objects.filter(token=token, owner=request.user).first()
+    if not sh:
+        raise ValueError(f"分享不存在或无权访问: {token}")
+    qs = sh.visits.all()
+    now = timezone.now()
+    since = now - timedelta(days=30)
+    total = qs.count()
+    unique_visitors = qs.values("ip_hash", "ua_hash").distinct().count()
+    unique_ips = qs.exclude(ip_hash="").values("ip_hash").distinct().count()
+    last_30 = qs.filter(created_at__gte=since).count()
+
+    daily_map = {}
+    for row in qs.filter(created_at__gte=since).values("created_at"):
+        key = timezone.localtime(row["created_at"]).date()
+        daily_map[key] = daily_map.get(key, 0) + 1
+    today = timezone.localdate()
+    daily = [
+        {"date": str(today - timedelta(days=i)),
+         "count": daily_map.get(today - timedelta(days=i), 0)}
+        for i in range(29, -1, -1)
+    ]
+    last_at = qs.order_by("-created_at").values_list("created_at", flat=True).first()
+    return ok({
+        "token": sh.token, "title": sh.title, "view_count": sh.view_count,
+        "total": total, "unique_visitors": unique_visitors, "unique_ips": unique_ips,
+        "last_30_days": last_30, "last_visit_at": last_at, "daily": daily,
+    })
+
+
+@endpoint(("POST",))
+def share_clone(request, token):
+    """把分享内容保存到自己的片段库（可选同时写入工作区文件），第 270 条。"""
+    sh = CodeShare.objects.filter(token=token).first()
+    if not sh:
+        raise ValueError("分享链接不存在或已失效")
+    if sh.expires_at and sh.expires_at < timezone.now():
+        raise ValueError("分享链接已过期")
+
+    if sh.file_id:
+        language, code = sh.file.language, sh.file.content or ""
+        title = sh.title or sh.file.name
+    else:
+        language, code = sh.snippet.language, sh.snippet.code or ""
+        title = sh.title or sh.snippet.title
+    if not code.strip():
+        raise ValueError("分享内容为空，无法保存")
+
+    # 先校验工作区 / 路径，避免片段已建好但文件写入失败留下半成品
+    ws, path = None, ""
+    ws_id = opt_num(request, "workspace", None, integer=True)
+    if ws_id:
+        from .views_core import _safe_filename  # 复用文件名清洗，避免循环导入问题
+        ws = get_ws(request.user, ws_id, write=True)
+        ext = rt.language_meta(language).get("ext", ".txt")
+        path = opt_str(request, "path", "").strip().replace("\\", "/").lstrip("/")
+        if not path:
+            path = _safe_filename(title, ext)
+        if ".." in path.split("/") or CodeFile.objects.filter(workspace=ws, path=path).exists():
+            raise ValueError(f"目标路径不可用: {path}")
+
+    snippet = CodeSnippet.objects.create(
+        title=f"{title}（分享副本）"[:200],
+        description=f"来自分享链接 {token}",
+        language=language, code=code, tags=[language],
+        owner=request.user, scope="private", source_url=f"share:{token}",
+    )
+    payload = {"snippet": {"id": snippet.id, "title": snippet.title, "language": snippet.language}}
+    if sh.snippet_id:
+        CodeSnippet.objects.filter(id=sh.snippet_id).update(copy_count=F("copy_count") + 1)
+
+    if ws:
+        obj = CodeFile.objects.create(
+            workspace=ws, owner=request.user, path=path,
+            name=path.rsplit("/", 1)[-1], language=language, content=code,
+            is_entry=not ws.files.exists(),
+        )
+        payload["file"] = file_brief(obj, with_content=False)
+        payload["workspace"] = ws.id
+    return ok(payload)
+
+
 # 公开访问视图（无需登录）
 def public_share_view(request, token):
     """公开分享页：返回代码内容 + 是否允许运行。
@@ -1802,6 +1932,8 @@ def public_share_view(request, token):
         return JsonResponse({"ok": False, "error": "分享链接已过期"}, status=410)
 
     CodeShare.objects.filter(id=sh.id).update(view_count=sh.view_count + 1)
+    # 第 269 条：记录一次访问（只存哈希，供独立访客与近 30 天统计）
+    record_share_visit(sh, request)
 
     if sh.file_id:
         f = sh.file

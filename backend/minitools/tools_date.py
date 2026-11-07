@@ -194,6 +194,8 @@ def workdays(request):
     end = _parse(req_str(request, "end")).date()
     if start > end:
         raise ValueError("start 不能晚于 end")
+    if (end - start).days > 3660:
+        raise ValueError("日期跨度过长（上限 3660 天）")
     work = 0
     weekend = 0
     cur = start
@@ -214,6 +216,8 @@ def date_range(request):
     step = int(opt_num(request, "step", 1, minimum=1, maximum=365, integer=True))
     if start > end:
         raise ValueError("start 不能晚于 end")
+    if (end - start).days > 3660:
+        raise ValueError("日期跨度过长（上限 3660 天）")
     out = []
     cur = start
     while cur <= end:

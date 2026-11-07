@@ -3,6 +3,7 @@
 from django.urls import path
 
 from learning import views as v
+from learning import views_study as s
 from learning.learn_tools import LEARN_TOOL_REGISTRY
 
 prog = [
@@ -55,6 +56,8 @@ school = [
     path("school/formulas/", v.FormulaListView.as_view(), name="learn-formulas"),
     path("school/formulas/calc/", v.FormulaCalcView.as_view(), name="learn-formula-calc"),
     path("school/formulas/favorites/", v.FormulaFavoriteView.as_view(), name="learn-formula-fav"),  # F532
+    # 385 公式计算历史：静态段必须排在 <str:key> 兜底之前
+    path("school/formulas/calc-history/", s.FormulaCalcHistoryView.as_view(), name="learn-formula-calc-history"),
     path("school/formulas/<str:key>/", v.FormulaDetailView.as_view(), name="learn-formula"),
     path("school/poems/", v.PoemListView.as_view(), name="learn-poems"),
     path("school/poems/drill/", v.PoemDrillView.as_view(), name="learn-poem-drill"),
@@ -66,14 +69,28 @@ school = [
     path("school/words/dictation/grade/", v.DictationGradeView.as_view(), name="learn-dict-grade"),  # F543
     path("school/words/quiz/", v.WordQuizView.as_view(), name="learn-word-quiz"),
     path("school/words/wordbook/", v.WordbookView.as_view(), name="learn-wordbook"),
+    # 386 生词本导入导出：必须在 <str:word> 兜底之前
+    path("school/words/wordbook/export/", s.WordbookExportView.as_view(), name="learn-wordbook-export"),
+    path("school/words/wordbook/import/", s.WordbookImportView.as_view(), name="learn-wordbook-import"),
     path("school/words/<str:word>/", v.WordDetailView.as_view(), name="learn-word"),
     path("school/questions/", v.QuestionListView.as_view(), name="learn-questions"),
     path("school/questions/favorites/", v.QuestionFavoriteView.as_view(), name="learn-question-fav"),  # F536
+    # 382 题库统计：必须在 <str:qid> 兜底之前
+    path("school/questions/stats/", s.QuestionStatsView.as_view(), name="learn-question-stats"),
     path("school/paper/compose/", v.PaperComposeView.as_view(), name="learn-paper-compose"),
     path("school/paper/grade/", v.PaperGradeView.as_view(), name="learn-paper-grade"),
     path("school/questions/<str:qid>/", v.QuestionDetailView.as_view(), name="learn-question"),
     path("school/mistakes/", v.MistakeView.as_view(), name="learn-mistakes"),
+    # 第三轮 373–376 / 387–388 错题增强（静态段在前，动态段在后）
+    path("school/mistakes/import/", s.MistakeImportView.as_view(), name="learn-mistake-import"),
+    path("school/mistakes/export/", s.MistakeExportView.as_view(), name="learn-mistake-export"),
+    path("school/mistakes/similar/", s.MistakeSimilarView.as_view(), name="learn-mistake-similar"),
+    path("school/mistakes/clusters/", s.MistakeClustersView.as_view(), name="learn-mistake-clusters"),
+    path("school/mistakes/<int:pk>/to-note/", s.MistakeToNoteView.as_view(), name="learn-mistake-to-note"),
+    path("school/mistakes/<int:pk>/to-todo/", s.MistakeToTodoView.as_view(), name="learn-mistake-to-todo"),
     path("school/mastery/", v.MasteryView.as_view(), name="learn-mastery"),
+    # 384 掌握度热力图
+    path("school/mastery/heatmap/", s.MasteryHeatmapView.as_view(), name="learn-mastery-heatmap"),
     path("school/idioms/", v.IdiomListView.as_view(), name="learn-idioms"),
     path("school/idioms/chain/", v.IdiomChainView.as_view(), name="learn-idiom-chain"),
     path("school/idioms/chain-records/", v.IdiomChainRecordView.as_view(), name="learn-idiom-chains"),  # F529
@@ -111,14 +128,33 @@ personal = [
     path("study/progress-detail/", v.ProgressDetailView.as_view(), name="learn-progress-detail"),  # F544
     path("study/mistake-cause/", v.MistakeCauseView.as_view(), name="learn-mistake-cause"),  # F545
     path("study/plan-detail/", v.StudyPlanDetailView.as_view(), name="learn-plan-detail"),   # F546
+    # ---- 第三轮 377–381 / 383 / 385 / 389–390（只增不改）----
+    path("study/pref/", s.StudyPrefView.as_view(), name="learn-pref"),                          # 377
+    path("study/remind/check/", s.StudyRemindCheckView.as_view(), name="learn-remind-check"),    # 377
+    path("study/exam/", s.ExamCountdownView.as_view(), name="learn-exam"),                       # 378
+    path("study/groups/", s.StudyGroupView.as_view(), name="learn-groups"),                      # 379
+    path("study/groups/<int:pk>/join/", s.StudyGroupJoinView.as_view(), name="learn-group-join"),
+    path("study/groups/<int:pk>/checkin/", s.StudyGroupCheckinView.as_view(), name="learn-group-checkin"),
+    path("study/leaderboard/", s.StudyLeaderboardView.as_view(), name="learn-leaderboard"),      # 380
+    path("study/question-sets/<int:pk>/share/", s.QuestionSetShareView.as_view(), name="learn-question-set-share"),  # 381
+    path("study/plans/<int:pk>/schedule/", s.StudyPlanScheduleView.as_view(), name="learn-plan-schedule"),           # 383
+    path("study/usage-report/", s.UsageReportView.as_view(), name="learn-usage-report"),         # 389
+    path("study/daily-goal/forecast/", s.DailyGoalForecastView.as_view(), name="learn-daily-goal-forecast"),  # 390
 ]
 
 tools = [
     path("tools/catalog/", v.LearnToolCatalogView.as_view(), name="learn-tool-catalog"),
     path("tools/run/", v.LearnToolRunView.as_view(), name="learn-tool-run"),
 ]
+
+# ---- 第三轮 381：免登录只读分享（挂在 /api/learning/share/ 下；
+#      鉴权由视图 permission_classes = [] 关闭，无需改 config/urls.py）----
+public = [
+    path("share/questionset/<str:token>/", s.PublicQuestionSetView.as_view(), name="learn-public-questionset"),
+]
+
 # 每个学习工具的直达入口 /api/learning/tools/<key>/
 for _key in LEARN_TOOL_REGISTRY:
     tools.append(path(f"tools/{_key}/", v.LearnToolRunView.as_view(), kwargs={"tool": _key}))
 
-urlpatterns = prog + school + personal + tools
+urlpatterns = prog + school + personal + tools + public

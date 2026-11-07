@@ -3,6 +3,10 @@
 
 行数据来源统一走 load_rows()：可直接传 rows 数组，或传 dataset_id 从库里取
 （dataset 归属走 core.scoping 行级权限收口）。
+
+第三轮 S26（406–410）追加：transform/one-hot、transform/lag、transform/mask-pii、
+profile/unique-values、dataset/<pk>/export —— 变换结果只落新 DatasetVersion，
+不改写 Dataset.rows（可回滚）。
 """
 import json
 import math
@@ -11,7 +15,7 @@ import re
 
 from core.scoping import is_visible, scope_queryset
 
-from dataintel.models import Dataset
+from dataintel.models import Dataset, DatasetVersion
 from dataintel.statkit import (mean, median, pearson, quantile, stdev,
                                variance)
 
@@ -143,13 +147,14 @@ def dataset_rows_import(request, pk):
     if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
         raise ValueError("rows 必须是对象数组")
     mode = opt_str(request, "mode", "append")
+    total_rows = len(rows) if mode == "replace" else len(ds.rows or []) + len(rows)
+    if total_rows > 5000:
+        raise ValueError("超过 5000 行上限，请改用 replace 或先清理")
     if mode == "replace":
         ds.rows = rows
     else:
         ds.rows = (ds.rows or []) + rows
-    ds.row_count = len(ds.rows)
-    if ds.row_count > 5000:
-        raise ValueError("超过 5000 行上限，请改用 replace 或先清理")
+    ds.row_count = total_rows
     new_keys = {k for r in rows for k in r} - {c["name"] for c in ds.columns}
     ds.columns = ds.columns + [{"name": k, "type": "string"} for k in sorted(new_keys)]
     ds.save()
@@ -644,4 +649,353 @@ def calc_vlookup(request):
                "key": key, "brought_fields": [f for f in fields if f != key]})
 
 
-DATA_FAMILY_COUNT = 6 + 5 + 6 + 5  # = 22
+DATA_FAMILY_COUNT = 6 + 5 + 6 + 5  # = 22（不含 S26 追加 5 个）
+
+
+# =====================================================================
+# 第三轮 S26（406–410）：特征展开 / 时序移位 / PII 脱敏 / 取值画像 / 导出
+# =====================================================================
+
+
+def _build_columns(ds, rows, extra=None):
+    """列定义：原 columns → 行里出现的新键 → 本次新增列（extra=[(name,type)]）。"""
+    out, seen = [], set()
+    for c in (getattr(ds, "columns", None) or []):
+        if isinstance(c, dict) and c.get("name") and c["name"] not in seen:
+            out.append({"name": c["name"], "type": c.get("type", "string")})
+            seen.add(c["name"])
+    for r in rows:
+        for k in r:
+            if k not in seen:
+                out.append({"name": k, "type": "string"})
+                seen.add(k)
+    for name, typ in (extra or []):
+        if name not in seen:
+            out.append({"name": name, "type": typ})
+            seen.add(name)
+    return out
+
+
+def _save_transform_version(ds, user, rows, columns, note):
+    """把变换结果落成新 DatasetVersion（照抄 views_plus.snapshot_version 的落版口径）。
+
+    与 snapshot_version 的区别：快照内容来自变换后的 rows，而不是 Dataset.rows；
+    rows 内联入库（≤5000 行规模可控），不写 MEDIA，MEDIA 不可写时行为一致。
+    """
+    import hashlib
+
+    payload = json.dumps(rows or [], sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    h = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    last = ds.versions.order_by("-version").first()
+    if last is not None and last.rows_hash == h:
+        return last, False
+    version = (last.version if last else 0) + 1
+    obj = DatasetVersion.objects.create(
+        dataset=ds, version=version, rows_hash=h, row_count=len(rows),
+        columns=columns or [], rows=rows, storage_path="",
+        note=(note or "")[:200],
+        created_by=user if getattr(user, "pk", None) else None,
+    )
+    return obj, True
+
+
+def _persist(ds, user, rows, columns, note):
+    """落版并返回 (version_dict|None, error|None)，失败不影响接口主体结果。"""
+    if ds is None:
+        return None, "未传 dataset_id，变换结果未落版本"
+    try:
+        version, created = _save_transform_version(ds, user, rows, columns, note)
+    except Exception as e:  # noqa: BLE001 —— 落版失败降级
+        return None, f"{type(e).__name__}: {e}"
+    return {"id": version.pk, "version": version.version, "created": created,
+            "row_count": version.row_count, "note": version.note}, None
+
+
+@endpoint()
+def transform_one_hot(request):
+    """406 独热编码：field 的 TOP N 取值展开为 0/1 列，落新 DatasetVersion。"""
+    rows, ds = load_rows(request)
+    field = req_str(request, "field")
+    if not rows:
+        raise ValueError("rows 为空")
+    if not any(field in r for r in rows):
+        raise ValueError(f"字段 {field} 不存在")
+    top_n = int(req_num(request, "top_n", 10, minimum=1, maximum=50, integer=True))
+    with_other = opt_bool(request, "other", True)
+
+    counter = {}
+    for r in rows:
+        raw = r.get(field)
+        key = "" if raw is None else str(raw)
+        counter[key] = counter.get(key, 0) + 1
+    ranked = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0] == "", kv[0]))
+    kept = ranked[:top_n]
+    kept_values = [v for v, _ in kept]
+
+    used, mapping = set(), []
+    for value, count in kept:
+        slug = re.sub(r"[^\w\u4e00-\u9fff]+", "_", value).strip("_")[:30] or "empty"
+        name, i = f"{field}_{slug}", 2
+        while name in used:
+            name = f"{field}_{slug}_{i}"
+            i += 1
+        used.add(name)
+        mapping.append({"value": value if value != "" else "(空)",
+                        "raw": value, "column": name, "count": count,
+                        "pct": round(count / len(rows) * 100, 2)})
+    other_col = f"{field}_other" if with_other and len(ranked) > len(kept) else None
+
+    out = []
+    for r in rows:
+        raw = r.get(field)
+        key = "" if raw is None else str(raw)
+        new = dict(r)
+        for m in mapping:
+            new[m["column"]] = 1 if key == m["raw"] else 0
+        if other_col:
+            new[other_col] = 0 if key in kept_values else 1
+        out.append(new)
+
+    new_columns = [m["column"] for m in mapping] + ([other_col] if other_col else [])
+    columns = _build_columns(ds, out, [(c, "number") for c in new_columns])
+    version, err = _persist(ds, request.user, out, columns, f"one-hot {field} top{top_n}")
+    return ok({
+        "field": field,
+        "top_n": top_n,
+        "new_columns": new_columns,
+        "other_column": other_col,
+        "mapping": mapping,
+        "unique": len(ranked),
+        "coverage": round(sum(c for _, c in kept) / len(rows) * 100, 2),
+        "rows": out,
+        "preview": out[:20],
+        "total_rows": len(out),
+        "version": version,
+        "version_error": err,
+    })
+
+
+def _order_key(field):
+    """排序键：数字优先、缺失垫底（与 transform_sort 同口径）。"""
+
+    def key_fn(r):
+        v = r.get(field)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return (0, float(v), "")
+        if v in (None, ""):
+            return (2, 0.0, "")
+        return (1, 0.0, str(v))
+
+    return key_fn
+
+
+@endpoint()
+def transform_lag(request):
+    """407 时序位移：按 order_by 排序后生成 lag/lead 列，落新 DatasetVersion。"""
+    rows, ds = load_rows(request)
+    field = req_str(request, "field")
+    if not rows:
+        raise ValueError("rows 为空")
+    if not any(field in r for r in rows):
+        raise ValueError(f"字段 {field} 不存在")
+    order_by = opt_str(request, "order_by").strip()
+    periods = int(req_num(request, "periods", 1, minimum=1, maximum=12, integer=True))
+    if order_by and not any(order_by in r for r in rows):
+        raise ValueError(f"排序字段 {order_by} 不存在")
+
+    ordered = list(rows) if not order_by else sorted(rows, key=_order_key(order_by))
+    values = [r.get(field) for r in ordered]
+    new_columns = []
+    for k in range(1, periods + 1):
+        new_columns.extend([f"{field}_lag{k}", f"{field}_lead{k}"])
+
+    out = []
+    for i, r in enumerate(ordered):
+        new = dict(r)
+        for k in range(1, periods + 1):
+            new[f"{field}_lag{k}"] = values[i - k] if i - k >= 0 else None
+            new[f"{field}_lead{k}"] = values[i + k] if i + k < len(values) else None
+        if order_by:
+            new["_row_no"] = i + 1
+        out.append(new)
+
+    columns = _build_columns(ds, out, [(c, "number") for c in new_columns])
+    version, err = _persist(ds, request.user, out, columns,
+                            f"lag/lead {field} ×{periods}" + (f" by {order_by}" if order_by else ""))
+    return ok({
+        "field": field,
+        "order_by": order_by or None,
+        "periods": periods,
+        "new_columns": new_columns,
+        "rows": out,
+        "preview": out[:20],
+        "total_rows": len(out),
+        "version": version,
+        "version_error": err,
+        "hint": "lag = 前 periods 行取值，lead = 后 periods 行取值，边界为 null",
+    })
+
+
+_PII_RULES = (
+    # 顺序敏感：身份证 → 银行卡 → 手机号 → 邮箱（先长后短，避免二次命中）
+    ("id_card", re.compile(r"(?<!\d)(\d{6})(?:\d{8})(\d{3}[\dXx])(?!\d)"),
+     lambda m: m.group(1) + "********" + m.group(2).upper()),
+    ("bank_card", re.compile(r"(?<!\d)(\d{4})(\d{8,11})(\d{4})(?!\d)"),
+     lambda m: m.group(1) + "*" * len(m.group(2)) + m.group(3)),
+    ("phone", re.compile(r"(?<!\d)(1[3-9]\d)\d{4}(\d{4})(?!\d)"),
+     lambda m: m.group(1) + "****" + m.group(2)),
+    ("email", re.compile(r"([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"),
+     lambda m: m.group(1) + "***" + m.group(2)),
+)
+
+
+@endpoint()
+def transform_mask_pii(request):
+    """408 PII 脱敏：手机/邮箱/身份证/银行卡正则替换后落新 DatasetVersion。"""
+    rows, ds = load_rows(request)
+    if not rows:
+        raise ValueError("rows 为空")
+    raw_fields = p(request, "fields")
+    if isinstance(raw_fields, str) and raw_fields.strip():
+        try:
+            raw_fields = json.loads(raw_fields)
+        except json.JSONDecodeError:
+            raw_fields = [x.strip() for x in raw_fields.split(",") if x.strip()]
+    if raw_fields:
+        fields = [str(f) for f in raw_fields]
+    else:
+        fields = [k for k in rows[0].keys()]
+    if len(fields) > 50:
+        raise ValueError("单次最多脱敏 50 个字段")
+    missing = [f for f in fields if not any(f in r for r in rows)]
+    if missing:
+        raise ValueError(f"字段不存在: {', '.join(missing[:3])}")
+
+    out, hits = [], {}
+    for r in rows:
+        new = dict(r)
+        for f in fields:
+            v = new.get(f)
+            if not isinstance(v, str) or not v:
+                continue
+            text, field_hits = v, {}
+            for kind, pattern, repl in _PII_RULES:
+                text, n = pattern.subn(repl, text)
+                if n:
+                    field_hits[kind] = n
+                    hits[kind] = hits.get(kind, 0) + n
+            if field_hits:
+                summary = hits.setdefault("_by_field", {})
+                for kind, n in field_hits.items():
+                    summary.setdefault(f, {})
+                    summary[f][kind] = summary[f].get(kind, 0) + n
+                new[f] = text
+        out.append(new)
+
+    by_field = hits.pop("_by_field", {})
+    total = sum(hits.values())
+    masked_fields = sorted(by_field.keys())
+    columns = _build_columns(ds, out)
+    version, err = _persist(ds, request.user, out, columns,
+                            f"mask-pii {', '.join(masked_fields[:5]) or '无命中'}")
+    return ok({
+        "fields": fields,
+        "masked_fields": masked_fields,
+        "hits": hits,
+        "by_field": by_field,
+        "total_hits": total,
+        "rows": out,
+        "preview": out[:20],
+        "total_rows": len(out),
+        "version": version,
+        "version_error": err,
+        "rules": ["id_card", "bank_card", "phone", "email"],
+    })
+
+
+@endpoint(("GET",))
+def profile_unique_values(request):
+    """409 取值分布：去重值 + 计数 TOP N + 占比（供画像页图表渲染）。"""
+    rows, _ = load_rows(request)
+    field = req_str(request, "field")
+    if not rows:
+        raise ValueError("rows 为空")
+    if not any(field in r for r in rows):
+        raise ValueError(f"字段 {field} 不存在")
+    limit = int(req_num(request, "limit", 20, minimum=1, maximum=100, integer=True))
+
+    counter, blanks = {}, 0
+    for r in rows:
+        v = r.get(field)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            blanks += 1
+            continue
+        key = str(v)
+        counter[key] = counter.get(key, 0) + 1
+    ranked = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+    total = len(rows)
+    items = [{"value": k, "count": c, "pct": round(c / total * 100, 2), "rank": i + 1}
+             for i, (k, c) in enumerate(ranked[:limit])]
+    shown = sum(i["count"] for i in items)
+    return ok({
+        "field": field,
+        "total": total,
+        "unique": len(counter),
+        "blank": blanks,
+        "limit": limit,
+        "items": items,
+        "other_values": max(0, len(ranked) - len(items)),
+        "other_count": max(0, total - blanks - shown),
+        "coverage": round(shown / total * 100, 2) if total else 0,
+        "truncated": len(ranked) > len(items),
+    })
+
+
+def _export_cell(value):
+    """导出单元格：None → 空串，嵌套结构 → JSON 文本。"""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float, str)):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+@endpoint(("GET",))
+def dataset_export(request, pk):
+    """410 数据集导出：fmt=csv（默认，core.platform.csv_response）| json。"""
+    from django.http import HttpResponse
+
+    try:
+        ds = Dataset.objects.get(pk=pk)
+    except Dataset.DoesNotExist:
+        raise ValueError("数据集不存在")
+    if not is_visible(ds, request.user):
+        raise ValueError("无权导出该数据集")
+    fmt = opt_str(request, "fmt", "csv").lower() or "csv"
+    if fmt not in ("csv", "json"):
+        raise ValueError("fmt 支持 csv/json")
+    rows = ds.rows or []
+    cols = [c["name"] for c in (ds.columns or [])
+            if isinstance(c, dict) and c.get("name")]
+    for r in rows:
+        if isinstance(r, dict):
+            for k in r:
+                if k not in cols:
+                    cols.append(k)
+    raw_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", ds.name or "").strip("_")[:40]
+    safe = f"dataset-{ds.pk}" + (f"-{raw_name}" if raw_name else "")
+
+    if fmt == "json":
+        payload = json.dumps({"id": ds.id, "name": ds.name, "description": ds.description,
+                              "columns": ds.columns or [], "row_count": len(rows),
+                              "rows": rows}, ensure_ascii=False)
+        resp = HttpResponse(payload, content_type="application/json; charset=utf-8")
+        resp["Content-Disposition"] = f"attachment; filename={safe}.json"
+        return resp
+
+    from core.platform import csv_response
+
+    body = [[_export_cell(r.get(c)) if isinstance(r, dict) else "" for c in cols] for r in rows]
+    return csv_response(f"{safe}.csv", cols, body)

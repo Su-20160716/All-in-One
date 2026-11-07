@@ -24,6 +24,9 @@ _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 def num_base(request):
     """2-36 进制互转（整数 + 6 位小数精度）。"""
     value = req_str(request, "value").strip().lower()
+    # 逐位累乘是 O(n²) 大整数运算，1024 字符已足够表达任意实用精度
+    if len(value) > 1024:
+        raise ValueError("value 长度不能超过 1024 字符")
     from_base = int(req_num(request, "from_base", 10, minimum=2, maximum=36, integer=True))
     to_base = int(req_num(request, "to_base", 2, minimum=2, maximum=36, integer=True))
     neg = value.startswith("-")
@@ -329,21 +332,54 @@ def date_add(request):
     return ok({"result": result.strftime("%Y-%m-%d %H:%M"), "weekday": ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][result.weekday()]})
 
 
+_WORKDAY_SPAN_LIMIT = 3660  # 约 10 年，超出改走整周公式，避免 0001→9999 级别的逐日循环
+
+
+def _workdays_by_weeks(start, end, holidays):
+    """整周公式计算工作日：整周 * 5 + 首尾残周按星期推算，再扣除区间内落在工作日的节假日。"""
+    total = (end - start).days + 1
+    weeks, rem = divmod(total, 7)
+    days = weeks * 5
+    # 每个整周都是同样 7 天，残周只需按 start 的星期偏移推算，不产生日期运算（避开 9999 年越界）
+    wd = start.weekday()
+    for i in range(rem):
+        if (wd + i) % 7 < 5:
+            days += 1
+    # 只遍历节假日集合（规模远小于区间天数），按解析后的日期去重，避免同一天多种写法重复扣减
+    off = set()
+    for h in holidays:
+        try:
+            hd = _parse_date(h).date()
+        except ValueError:
+            continue
+        if start <= hd <= end and hd.weekday() < 5:
+            off.add(hd)
+    return max(days - len(off), 0)
+
+
 @endpoint()
 def date_workdays(request):
     """工作日计算：区间内工作日数 / 加 N 个工作日后的日期。"""
     start = _parse_date(req(request, "start")).date()
     holidays = set(p(request, "holidays") or [])
+    if len(holidays) > 10000:
+        raise ValueError("holidays 不能超过 10000 项")
     mode = opt_str(request, "mode", "count")
     if mode == "count":
         end = _parse_date(req(request, "end")).date()
+        total = (end - start).days + 1
+        if total > _WORKDAY_SPAN_LIMIT:
+            # 大跨度改走整周公式：整周固定 5 个工作日，只逐日遍历首尾残周
+            days = _workdays_by_weeks(start, end, holidays)
+            return ok({"workdays": days, "calendar_days": total,
+                       "weekend_days": total - days, "method": "formula"})
         days, d = 0, start
         while d <= end:
             if d.weekday() < 5 and d.isoformat() not in holidays:
                 days += 1
             d += timedelta(days=1)
-        total = (end - start).days + 1
-        return ok({"workdays": days, "calendar_days": total, "weekend_days": total - days})
+        return ok({"workdays": days, "calendar_days": total, "weekend_days": total - days,
+                   "method": "iterate"})
     n = int(req_num(request, "n", 1, minimum=0, maximum=10000, integer=True))
     d, added = start, 0
     while added < n:
@@ -640,6 +676,15 @@ def math_linear_solve(request):
     a = req_list(request, "a")
     b = req_list(request, "b")
     n = len(a)
+    if n == 0:
+        raise ValueError("a 不能为空")
+    if n > 100:
+        raise ValueError("矩阵阶数过大（上限 100）")
+    if len(b) != n:
+        raise ValueError("b 的长度必须等于 a 的行数")
+    for row in a:
+        if not isinstance(row, (list, tuple)) or len(row) != n:
+            raise ValueError("a 必须是 n×n 方阵")
     aug = [[float(a[i][j]) for j in range(n)] + [float(b[i])] for i in range(n)]
     for col in range(n):
         piv = max(range(col, n), key=lambda r: abs(aug[r][col]))
@@ -671,7 +716,7 @@ def _is_prime(n):
 @endpoint()
 def math_primes(request):
     """质数工具：因子分解 / 是否质数 / N 以内计数与抽样。"""
-    n = int(req_num(request, "n", 2, minimum=1, maximum=10 ** 12, integer=True))
+    n = int(req_num(request, "n", 2, minimum=1, maximum=10 ** 9, integer=True))
     factors, x = [], n
     d = 2
     while d * d <= x:
@@ -708,6 +753,8 @@ _CONSTS = {"pi": math.pi, "e": math.e, "tau": math.tau, "inf": math.inf}
 def math_expr(request):
     """安全表达式求值（AST 白名单，支持变量与函数，如 x**2 + sin(x)）。"""
     expr = req_str(request, "expr")
+    if len(expr) > 200:
+        raise ValueError("表达式过长（上限 200 字符）")
     variables = p(request, "variables") or {}
     if not isinstance(variables, dict):
         raise ValueError("variables 必须是对象")
@@ -727,8 +774,23 @@ def math_expr(request):
             raise ValueError(f"未知变量: {node.id}")
         if isinstance(node, ast.BinOp) and type(node.op) in (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.FloorDiv):
             l, r = eval_node(node.left), eval_node(node.right)
-            return {ast.Add: l + r, ast.Sub: l - r, ast.Mult: l * r, ast.Div: l / r,
-                    ast.Pow: l ** r, ast.Mod: l % r, ast.FloorDiv: l // r}[type(node.op)]
+            # 逐个分支求值：字典字面量会先把所有运算都算一遍（如加法也会触发除零）
+            if isinstance(node.op, ast.Add):
+                return l + r
+            if isinstance(node.op, ast.Sub):
+                return l - r
+            if isinstance(node.op, ast.Mult):
+                return l * r
+            if isinstance(node.op, ast.Div):
+                return l / r
+            if isinstance(node.op, ast.Mod):
+                return l % r
+            if isinstance(node.op, ast.FloorDiv):
+                return l // r
+            # Pow：拦截 9**9**9**9 这类天文数字大整数
+            if isinstance(l, int) and isinstance(r, int) and r > 0 and abs(l) > 1 and r * math.log10(abs(l)) > 5000:
+                raise ValueError("幂运算结果过大（上限约 5000 位）")
+            return l ** r
         if isinstance(node, ast.UnaryOp) and type(node.op) in (ast.USub, ast.UAdd):
             v = eval_node(node.operand)
             return -v if isinstance(node.op, ast.USub) else v
@@ -745,6 +807,10 @@ def math_expr(request):
         if isinstance(node, ast.Name) and node.id not in allowed_names:
             raise ValueError(f"未知标识符: {node.id}")
     value = eval_node(tree.body)
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("表达式结果是 NaN/Inf，无法序列化")
+    if isinstance(value, int) and value.bit_length() > 5000:
+        raise ValueError("表达式结果过大（上限约 5000 位）")
     return ok({"expr": expr, "value": round(value, 10) if isinstance(value, float) else value,
                "variables": variables, "engine": "ast-whitelist"})
 
@@ -781,6 +847,8 @@ def math_dist(request):
 def math_dijkstra(request):
     """Dijkstra 最短路径：edges=[{from,to,weight}]，返回路径与距离。"""
     edges = req_list(request, "edges")
+    if len(edges) > 2000:
+        raise ValueError("边数过多（上限 2000）")
     start = str(req(request, "start"))
     end = str(req(request, "end"))
     graph = {}
@@ -788,6 +856,8 @@ def math_dijkstra(request):
         if not isinstance(e, dict):
             raise ValueError("edges 每项需为 {from, to, weight}")
         f, t, w = str(e.get("from")), str(e.get("to")), float(e.get("weight", 1))
+        if not math.isfinite(w):
+            raise ValueError("权重必须是有限数字")
         if w < 0:
             raise ValueError("Dijkstra 不支持负权重")
         graph.setdefault(f, []).append((t, w))
@@ -881,4 +951,88 @@ def unit_apparel(request):
     return ok({"tables": APPAREL_SIZE, "hint": "传 table 与可选 size 精查"})
 
 
-MATH_FAMILY_COUNT = 6 + 6 + 6 + 4 + 6 + 4  # = 32
+MATH_FAMILY_COUNT = 6 + 6 + 6 + 4 + 6 + 4  # = 32（不含 S26 追加 cron/next-runs）
+
+
+# =====================================================================
+# S26(395) CRON 未来触发时刻（按分钟集合精确推算，不依赖外部库）
+# =====================================================================
+
+_CRON_ALIASES = {
+    "@hourly": "0 * * * *", "@daily": "0 0 * * *", "@midnight": "0 0 * * *",
+    "@weekly": "0 0 * * 0", "@monthly": "0 0 1 * *", "@yearly": "0 0 1 1 *",
+    "@annually": "0 0 1 1 *",
+}
+_CRON_FIELD_NAMES = ("minute", "hour", "day", "month", "week")
+_CRON_NAMES = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+
+
+def _parse_cron_expr(expr):
+    """5 段 CRON → (分, 时, 日, 月, 周) 取值集合元组；支持 @daily 等别名。"""
+    text = str(expr or "").strip().lower()
+    text = _CRON_ALIASES.get(text, text)
+    fields = text.split()
+    if len(fields) != 5:
+        raise ValueError("标准 5 位 CRON：分 时 日 月 周（如 */5 9-18 * * 1-5）")
+    return tuple(_parse_cron_field(f, *_CRON_FIELD_RANGES[name],
+                                   _CRON_NAMES if name == "week" else None)
+                 for f, name in zip(fields, _CRON_FIELD_NAMES))
+
+
+@endpoint()
+def cron_next_runs(request):
+    """未来 N 次触发时间：expr/n/tz，按「日 → 时 → 分」精确推算。"""
+    from zoneinfo import ZoneInfo
+
+    expr = req_str(request, "expr").strip()
+    n = int(req_num(request, "n", 5, minimum=1, maximum=50, integer=True))
+    zone = opt_str(request, "tz", "Asia/Shanghai").strip() or "Asia/Shanghai"
+    try:
+        tz = ZoneInfo(zone)
+    except Exception:  # noqa: BLE001
+        raise ValueError(f"未知时区: {zone}（示例 Asia/Shanghai / UTC）")
+    minute_v, hour_v, day_v, month_v, week_v = _parse_cron_expr(expr)
+
+    raw_from = opt_str(request, "from").strip()
+    if raw_from:
+        try:
+            base = datetime.fromisoformat(raw_from.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("from 需为 ISO 时间，如 2026-11-01T09:00:00")
+        base = base.astimezone(tz) if base.tzinfo else base.replace(tzinfo=tz)
+    else:
+        base = datetime.now(tz)
+
+    runs, day, horizon = [], base.date(), 3660
+    for _ in range(horizon):
+        if len(runs) >= n:
+            break
+        if (day.month in month_v and day.day in day_v
+                and (day.weekday() + 1) % 7 in week_v):
+            for h in sorted(hour_v):
+                for mi in sorted(minute_v):
+                    cand = datetime(day.year, day.month, day.day, h, mi, tzinfo=tz)
+                    if cand > base:
+                        runs.append(cand)
+                        if len(runs) >= n:
+                            break
+                if len(runs) >= n:
+                    break
+        day = day + timedelta(days=1)
+    if not runs:
+        raise ValueError("未来 10 年内无触发时刻，请检查表达式")
+
+    return ok({
+        "expression": expr,
+        "timezone": zone,
+        "count": len(runs),
+        "truncated": len(runs) < n,
+        "runs": [{
+            "iso": t.isoformat(),
+            "local": t.strftime("%Y-%m-%d %H:%M"),
+            "epoch": int(t.timestamp()),
+            "weekday": _CRON_DOW[(t.weekday() + 1) % 7],
+            "in_seconds": int((t - base).total_seconds()),
+        } for t in runs],
+        "from": base.isoformat(),
+    })

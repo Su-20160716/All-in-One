@@ -7,21 +7,36 @@ urlpatterns = [
     # 文件夹
     path("folders/", views.FolderListView.as_view(), name="folder-list"),
     path("folders/tree/", views.FolderTreeView.as_view(), name="folder-tree"),
+    # S24-218 空文件夹（须先于 <int:pk>）
+    path("folders/empty/", views.EmptyFolderListView.as_view(), name="folder-empty"),
+    path("folders/empty/cleanup/", views.EmptyFolderCleanupView.as_view(), name="folder-empty-cleanup"),
     path("folders/<int:pk>/", views.FolderDetailView.as_view(), name="folder-detail"),
     path("folders/<int:pk>/breadcrumb/", views.FolderBreadcrumbView.as_view(), name="folder-breadcrumb"),
+    # S24-212 整包下载文件夹
+    path("folders/<int:pk>/download/", views.FolderDownloadView.as_view(), name="folder-download"),
     # 文件
     path("", views.FileListView.as_view(), name="file-list"),
     path("search/", views.FileSearchView.as_view(), name="file-search"),
     path("search/fulltext/", views.FileFullTextSearchView.as_view(), name="file-search-fulltext"),
     path("recent/", views.RecentFileView.as_view(), name="recent-file"),
+    # S24-226 移除单条最近访问
+    path("recent/<int:file_id>/", views.RecentFileDetailView.as_view(), name="recent-file-detail"),
     path("starred/", views.StarredFileView.as_view(), name="starred-file"),
     path("analysis/", views.StorageAnalysisView.as_view(), name="storage-analysis"),
+    # S24-219 文件夹占用排行
+    path("storage/folders/", views.StorageFolderStatsView.as_view(), name="storage-folders"),
+    # S24-222 文件完整性校验
+    path("integrity/", views.FileIntegrityView.as_view(), name="file-integrity"),
+    # S24-231 重复文件保留一份
+    path("duplicates/resolve/", views.DuplicateResolveView.as_view(), name="duplicate-resolve"),
     path("quota/advice/", views.StorageAdviceView.as_view(), name="file-quota-advice"),
     path("batch/", views.FileBatchView.as_view(), name="file-batch"),
     path("batch-tag/", views.FileBatchTagView.as_view(), name="file-batch-tag"),
     path("batch-rename/", views.FileBatchRenameView.as_view(), name="file-batch-rename"),
     path("batch-download/", views.FileBatchDownloadView.as_view(), name="file-batch-download"),
     path("tags/", views.FileTagListView.as_view(), name="file-tag-list"),
+    # S24-217 标签合并（须先于 <int:pk>）
+    path("tags/merge/", views.FileTagMergeView.as_view(), name="file-tag-merge"),
     path("tags/<int:pk>/", views.FileTagDetailView.as_view(), name="file-tag-detail"),
     path("folder-templates/", views.FolderTemplatesView.as_view(), name="folder-templates"),
     path("folders/from-template/", views.FolderFromTemplateView.as_view(), name="folder-from-template"),
@@ -38,6 +53,8 @@ urlpatterns = [
     path("starred/order/", views.StarredOrderView.as_view(), name="file-starred-order"),
     path("folder-hits/", views.FolderHitsView.as_view(), name="file-folder-hits"),
     path("operations/", views.FileOperationListView.as_view(), name="file-operations"),
+    # S24-220 操作记录热力图
+    path("operations/heatmap/", views.FileOperationHeatmapView.as_view(), name="file-operations-heatmap"),
     path("shares/expiring/", views.ShareExpiringView.as_view(), name="file-shares-expiring"),
     path("tags/stats/", views.FileTagStatsView.as_view(), name="file-tag-stats"),
     path("favorites/export/", views.FavoritesExportView.as_view(), name="file-favorites-export"),
@@ -50,6 +67,8 @@ urlpatterns = [
     path("<int:pk>/", views.FileDetailView.as_view(), name="file-detail"),
     path("<int:pk>/star/", views.FileStarView.as_view(), name="file-star"),
     path("<int:pk>/copy/", views.FileCopyView.as_view(), name="file-copy"),
+    # S24-224 文本文件转为笔记
+    path("<int:pk>/to-note/", views.FileToNoteView.as_view(), name="file-to-note"),
     path("<int:pk>/save-text/", views.FileSaveTextView.as_view(), name="file-save-text"),
     path("<int:pk>/download/", views.FileDownloadView.as_view(), name="file-download"),
     path("<int:pk>/preview/", views.FilePreviewView.as_view(), name="file-preview"),
@@ -86,4 +105,7 @@ share_urlpatterns = [
     path("api/share/<str:token>/", views.ShareAccessView.as_view(), name="share-access-api"),
     path("api/share/<str:token>/download/<int:pk>/", views.ShareDownloadView.as_view(), name="share-download-api"),
     path("api/share/<str:token>/raw/<int:pk>/", views.ShareRawView.as_view(), name="share-raw-api"),
+    # S24-223 访客收集上传
+    path("share/<str:token>/upload/", views.ShareUploadView.as_view(), name="share-upload"),
+    path("api/share/<str:token>/upload/", views.ShareUploadView.as_view(), name="share-upload-api"),
 ]

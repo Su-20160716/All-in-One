@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""devtools · 工具家族接口：hash(5) token(6) code(6) diff(5) id(4) file(6) qr(3) webdev(6) db(5) = 46 个。"""
+"""devtools · 工具家族接口：hash(5) token(6) code(6) diff(5) id(4) file(6) qr(3) webdev(6) db(5) = 46 个。
+
+第三轮 S26（391–398）追加 +5：code/complexity、code/import-graph、diff/three-way、
+id/snowflake-parse、db/sql-to-model（全部静态分析 / 纯计算，不执行用户代码、不连库）。
+"""
+import ast
 import base64
 import binascii
 import hashlib
@@ -448,6 +453,8 @@ def diff_json(request):
 def diff_similarity(request):
     """相似度（SequenceMatcher 比率 + 行级 Jaccard）。"""
     a, b = req_str(request, "a"), req_str(request, "b")
+    if len(a) > 20000 or len(b) > 20000:
+        raise ValueError("两段文本各限 20000 字符（difflib 最坏为 O(n·m)）")
     import difflib
 
     ratio = difflib.SequenceMatcher(None, a, b).ratio()
@@ -1092,5 +1099,577 @@ def db_epoch(request):
                "relative": relative, "now_epoch": int(now)})
 
 
+# =====================================================================
+# 第三轮 S26（391–398）：静态分析 / 三方合并 / 雪花反解 / DDL 转模型
+# =====================================================================
+
+# 控制流节点：既用于圈复杂度，也用于嵌套深度
+_CONTROL_NODES = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try,
+                  ast.With, ast.AsyncWith, ast.IfExp)
+_MATCH_NODE = getattr(ast, "Match", None)
+
+
+def _fn_body_nodes(fn):
+    """函数自身（不含嵌套函数/类）的全部 AST 节点。"""
+    out, stack = [], list(fn.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        out.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _fn_max_depth(fn):
+    """控制结构最大嵌套深度（函数体顶层记为 0）。"""
+
+    def walk(node, depth):
+        inner = depth + 1 if isinstance(node, _CONTROL_NODES) else depth
+        best = inner
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            best = max(best, walk(child, inner))
+        return best
+
+    return walk(fn, 0)
+
+
+def _fn_branches(nodes):
+    """圈复杂度近似：1 + 判定节点数（含 and/or、except、推导式 if）。"""
+    cc = 1
+    for n in nodes:
+        if isinstance(n, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.IfExp, ast.Assert)):
+            cc += 1
+        elif isinstance(n, ast.Try):
+            cc += max(1, len(n.handlers)) + (1 if n.orelse else 0) + (1 if n.finalbody else 0)
+        elif isinstance(n, ast.BoolOp):
+            cc += max(1, len(n.values) - 1)
+        elif isinstance(n, ast.comprehension):
+            cc += 1 + len(n.ifs)
+        elif _MATCH_NODE is not None and isinstance(n, _MATCH_NODE):
+            cc += max(1, len(n.cases))
+    return cc
+
+
+def _cc_grade(cc):
+    if cc <= 5:
+        return "低"
+    if cc <= 10:
+        return "中"
+    if cc <= 20:
+        return "高"
+    return "极高"
+
+
+def _collect_functions(tree):
+    """按限定名收集函数（Class.method 形式，避免嵌套重复统计）。"""
+    out = []
+
+    def walk(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                walk(child, prefix + child.name + ".")
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.append((child, prefix + child.name, bool(prefix)))
+                walk(child, prefix + child.name + ".")
+
+    walk(tree, "")
+    return out
+
+
+@endpoint()
+def code_complexity(request):
+    """Python 圈复杂度与嵌套深度（ast 静态分析，绝不执行用户代码）。"""
+    src = req_str(request, "code")
+    language = opt_str(request, "language", "python").lower() or "python"
+    if language not in ("python", "py", "python3"):
+        raise ValueError("code/complexity 仅支持 Python 源码（language=python）")
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        raise ValueError(f"Python 语法错误：第 {e.lineno} 行 {e.msg}")
+
+    functions = []
+    for node, qualname, _is_nested in _collect_functions(tree):
+        own = _fn_body_nodes(node)
+        cc = _fn_branches(own)
+        depth = _fn_max_depth(node)
+        args = list(getattr(node.args, "posonlyargs", [])) + list(node.args.args)
+        first = args[0].arg if args else ""
+        functions.append({
+            "name": node.name,
+            "qualified": qualname,
+            "line": node.lineno,
+            "end_line": getattr(node, "end_lineno", node.lineno) or node.lineno,
+            "loc": max(1, (getattr(node, "end_lineno", node.lineno) or node.lineno) - node.lineno + 1),
+            "args": len(args),
+            "is_async": isinstance(node, ast.AsyncFunctionDef),
+            "is_method": bool(first in ("self", "cls")),
+            "branches": cc,
+            "complexity": cc,
+            "depth": depth,
+            "grade": _cc_grade(cc),
+        })
+    functions.sort(key=lambda f: (-f["complexity"], -f["depth"], f["line"]))
+    total = len(functions)
+    avg = round(sum(f["complexity"] for f in functions) / total, 2) if total else 0
+    hotspots = [f for f in functions if f["complexity"] > 10][:10]
+    return ok({
+        "language": "python",
+        "functions": functions,
+        "count": total,
+        "classes": sum(1 for n in ast.walk(tree) if isinstance(n, ast.ClassDef)),
+        "hotspots": hotspots,
+        "summary": {
+            "avg_complexity": avg,
+            "max_complexity": max((f["complexity"] for f in functions), default=0),
+            "max_depth": max((f["depth"] for f in functions), default=0),
+            "high_risk": len(hotspots),
+            "worst": functions[0]["name"] if functions else None,
+        },
+        "hint": "complexity = 1 + 判定节点数；depth 为控制结构最大嵌套层级",
+    })
+
+
+# ---------- 392 import 依赖图 ----------
+
+
+def _module_imports(tree):
+    """收集 import 目标（含相对导入的层级前缀）。"""
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                found.append((a.name, node.lineno, a.asname or ""))
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            prefix = "." * (node.level or 0)
+            for a in node.names:
+                if a.name == "*":
+                    target = f"{prefix}{base}" if base else prefix
+                else:
+                    target = f"{prefix}{base}.{a.name}" if base else f"{prefix}{a.name}"
+                found.append((target, node.lineno, a.asname or ""))
+    return [f for f in found if f[0]]
+
+
+@endpoint()
+def code_import_graph(request):
+    """import 依赖图：nodes/edges + 被引 Top10（供前端 DomainExplorer 渲染）。"""
+    raw_files = p(request, "files")
+    if raw_files is not None:
+        if isinstance(raw_files, str):
+            try:
+                raw_files = json.loads(raw_files)
+            except json.JSONDecodeError:
+                raise ValueError("files 必须是 JSON 数组")
+        if not isinstance(raw_files, list) or not raw_files:
+            raise ValueError("files 需为非空数组")
+        if len(raw_files) > 50:
+            raise ValueError("files 最多 50 个文件")
+        items = []
+        for i, f in enumerate(raw_files):
+            if not isinstance(f, dict):
+                raise ValueError("files 每项需为 {name, code}")
+            name = str(f.get("name") or f"file{i}.py")
+            items.append((name, str(f.get("code") or "")))
+    else:
+        code = req_str(request, "code")
+        items = [(opt_str(request, "name", "", max_len=200) or "<code>.py", code)]
+
+    def _module_of(filename):
+        return filename.replace("\\", "/").lstrip("./").rsplit(".py", 1)[0].replace("/", ".")
+
+    internal = {}
+    parsed = []
+    for name, code in items:
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as e:
+            raise ValueError(f"{name} 语法错误：第 {e.lineno} 行 {e.msg}")
+        mod = _module_of(name)
+        internal[mod] = name
+        internal.setdefault(mod.split(".")[-1], name)
+        parsed.append((name, mod, _module_imports(tree)))
+
+    nodes, edges = {}, {}
+    for name, mod, deps in parsed:
+        nodes.setdefault(name, {"id": name, "type": "file", "in": 0, "out": 0})
+        for target, lineno, alias in deps:
+            nodes[name]["out"] += 1
+            hit = internal.get(target) or internal.get(target.split(".")[0])
+            if hit:
+                tgt, kind = hit, "internal"
+            else:
+                tgt, kind = target, "external"
+            nodes.setdefault(tgt, {"id": tgt, "type": "file" if kind == "internal" else "external",
+                                   "in": 0, "out": 0})
+            nodes[tgt]["in"] += 1
+            key = (name, tgt)
+            if key in edges:
+                edges[key]["weight"] += 1
+                edges[key]["lines"].append(lineno)
+                if alias and alias not in edges[key]["names"]:
+                    edges[key]["names"].append(alias)
+            else:
+                edges[key] = {"source": name, "target": tgt, "type": kind,
+                              "weight": 1, "lines": [lineno], "names": [alias] if alias else []}
+
+    ranked = sorted((n for n in nodes.values() if n["type"] != "file"),
+                    key=lambda n: (-n["in"], n["id"]))
+    return ok({
+        "nodes": list(nodes.values()),
+        "edges": list(edges.values()),
+        "top10": [{"module": n["id"], "count": n["in"]} for n in ranked[:10]],
+        "counts": {"files": len(parsed), "nodes": len(nodes), "edges": len(edges),
+                   "external": sum(1 for n in nodes.values() if n["type"] == "external"),
+                   "internal_edges": sum(1 for e in edges.values() if e["type"] == "internal")},
+    })
+
+
+# ---------- 394 三方合并 ----------
+
+
+def _line_changes(base, other):
+    """base→other 的非 equal 变更段（i1/i2 为 base 行区间）。"""
+    import difflib
+
+    sm = difflib.SequenceMatcher(None, base, other, autojunk=False)
+    return [{"i1": i1, "i2": i2, "lines": other[j1:j2]}
+            for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag != "equal"]
+
+
+def _touch(change, start, end):
+    """变更段是否与当前合并簇相交（纯插入按点判断，避免误吞相邻变更）。"""
+    if start == end:  # 当前簇是纯插入点：只和同点的插入合并
+        return change["i1"] == change["i2"] == start
+    if change["i1"] == change["i2"]:
+        return start <= change["i1"] < end
+    return change["i1"] < end and change["i2"] > start
+
+
+def _side_segment(base, start, end, changes):
+    """把单侧变更应用到 base[start:end] 上。"""
+    out, pos = [], start
+    for ch in changes:
+        if ch["i1"] == ch["i2"]:
+            if not (start <= ch["i1"] <= end):
+                continue
+            s = e = ch["i1"]
+        else:
+            s, e = max(ch["i1"], start), min(ch["i2"], end)
+            if s >= e:
+                continue
+        if s > pos:
+            out.extend(base[pos:s])
+        out.extend(ch["lines"])
+        pos = max(pos, e)
+    if pos < end:
+        out.extend(base[pos:end])
+    return out
+
+
+@endpoint()
+def diff_three_way(request):
+    """三方合并：base/ours/theirs → hunks（含冲突段）+ conflicts 计数。"""
+    base = as_lines(req_str(request, "base"))
+    ours = as_lines(req_str(request, "ours"))
+    theirs = as_lines(req_str(request, "theirs"))
+    oc = _line_changes(base, ours)
+    tc = _line_changes(base, theirs)
+    max_lines = max(len(base), len(ours), len(theirs))
+    if max_lines > 5000:
+        raise ValueError("单侧行数超过 5000 行上限")
+
+    hunks, out, conflicts = [], [], 0
+    pos = oi = ti = 0
+    while oi < len(oc) or ti < len(tc):
+        o = oc[oi] if oi < len(oc) else None
+        t = tc[ti] if ti < len(tc) else None
+        o_start, t_start = oi, ti
+        if t is None or (o is not None and o["i1"] <= t["i1"]):
+            start, end = o["i1"], o["i2"]
+            oi += 1
+        else:
+            start, end = t["i1"], t["i2"]
+            ti += 1
+        grew = True
+        while grew:
+            grew = False
+            while oi < len(oc) and _touch(oc[oi], start, end):
+                end = max(end, oc[oi]["i2"])
+                oi += 1
+                grew = True
+            while ti < len(tc) and _touch(tc[ti], start, end):
+                end = max(end, tc[ti]["i2"])
+                ti += 1
+                grew = True
+        ours_seg = _side_segment(base, start, end, oc[o_start:oi])
+        theirs_seg = _side_segment(base, start, end, tc[t_start:ti])
+        if oi == o_start:
+            kind, seg = "theirs", theirs_seg
+        elif ti == t_start:
+            kind, seg = "ours", ours_seg
+        elif ours_seg == theirs_seg:
+            kind, seg = "both", ours_seg
+        else:
+            kind = "conflict"
+            seg = ["<<<<<<< ours"] + ours_seg + ["======="] + theirs_seg + [">>>>>>> theirs"]
+            conflicts += 1
+        if start > pos:
+            out.extend(base[pos:start])
+        out.extend(seg)
+        pos = end
+        hunks.append({"type": kind, "base": [start, end],
+                      "base_lines": base[start:end],
+                      "ours": ours_seg, "theirs": theirs_seg, "result": seg})
+    out.extend(base[pos:])
+
+    return ok({"merged": "\n".join(out), "hunks": hunks, "conflicts": conflicts,
+               "clean": conflicts == 0,
+               "ours_changes": len(oc), "theirs_changes": len(tc),
+               "base_lines": len(base)})
+
+
+# ---------- 397 雪花 ID 反解 ----------
+
+
+@endpoint()
+def id_snowflake_parse(request):
+    """雪花 ID 反解：时间戳 / worker / sequence（epoch、位数可配）。"""
+    from datetime import datetime, timezone
+
+    raw = req(request, "id")
+    try:
+        sid = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise ValueError("id 必须是整数雪花 ID")
+    if sid < 0:
+        raise ValueError("雪花 ID 为无符号整数，不接受负数")
+    if sid >= (1 << 64):
+        raise ValueError("id 超出 64 位范围")
+    epoch = int(req_num(request, "epoch", 1288834974657, minimum=0))
+    worker_bits = int(req_num(request, "worker_bits", 5, minimum=1, maximum=20, integer=True))
+    seq_bits = int(req_num(request, "sequence_bits", 12, minimum=1, maximum=22, integer=True))
+    ts_bits = int(req_num(request, "timestamp_bits", 41, minimum=20, maximum=48, integer=True))
+    dc_bits = 63 - ts_bits - worker_bits - seq_bits
+    if dc_bits < 0:
+        raise ValueError("timestamp_bits + worker_bits + sequence_bits 超过 63 位")
+
+    seq = sid & ((1 << seq_bits) - 1)
+    worker = (sid >> seq_bits) & ((1 << worker_bits) - 1)
+    datacenter = (sid >> (seq_bits + worker_bits)) & ((1 << dc_bits) - 1) if dc_bits else 0
+    delta = (sid >> (seq_bits + worker_bits + dc_bits)) & ((1 << ts_bits) - 1)
+    ts_ms = epoch + delta
+
+    zone = opt_str(request, "tz", "Asia/Shanghai")
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(zone)
+    except Exception:  # noqa: BLE001
+        tz = timezone.utc
+        zone = "UTC"
+    try:
+        dt = datetime.fromtimestamp(ts_ms / 1000, tz=tz)
+        iso = dt.isoformat()
+    except (OverflowError, OSError, ValueError):
+        dt, iso = None, None
+
+    now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    return ok({
+        "id": str(sid),
+        "epoch": epoch,
+        "timestamp_ms": ts_ms,
+        "delta_ms": delta,
+        "datetime": iso,
+        "utc": datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat() if iso else None,
+        "timezone": zone,
+        "worker": worker,
+        "datacenter": datacenter,
+        "sequence": seq,
+        "age_days": round((now_ms - ts_ms) / 86400000, 2) if iso else None,
+        "in_future": ts_ms > now_ms,
+        "bits": {"sign": 1, "timestamp": ts_bits, "datacenter": dc_bits,
+                 "worker": worker_bits, "sequence": seq_bits},
+    })
+
+
+# ---------- 398 DDL → Django 模型 ----------
+
+_SQL_SKIP = re.compile(r"^(PRIMARY\s+KEY|UNIQUE(\s+KEY|\s+INDEX)?|KEY|INDEX|CONSTRAINT|"
+                       r"FOREIGN\s+KEY|CHECK|FULLTEXT|SPATIAL)\b", re.I)
+
+
+def _split_columns(body):
+    """按顶层逗号切分列定义（尊重括号与引号）。"""
+    parts, cur, depth, quote = [], "", 0, ""
+    for ch in body:
+        if quote:
+            cur += ch
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in "'\"`":
+            quote = ch
+            cur += ch
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+            continue
+        cur += ch
+    if cur.strip():
+        parts.append(cur)
+    return [x.strip() for x in parts if x.strip()]
+
+
+def _django_field(sql_type, args, tail_upper=""):
+    """SQL 类型 → (Django 字段表达式, 字段类型名)。"""
+    t = re.sub(r"\s+", "", sql_type).upper()
+    base = {"SERIAL": "AutoField", "BIGSERIAL": "BigAutoField", "SMALLSERIAL": "SmallAutoField"}
+    if t in base:
+        return f"models.{base[t]}()", base[t]
+    if "AUTO_INCREMENT" in (tail_upper or ""):
+        return "models.AutoField()", "AutoField"
+    if t.startswith("BIGINT"):
+        return "models.BigIntegerField()", "BigIntegerField"
+    if t.startswith("SMALLINT") or t.startswith("TINYINT") or t.startswith("MEDIUMINT"):
+        if args and str(args[0]) == "1":
+            return "models.BooleanField()", "BooleanField"
+        return "models.SmallIntegerField()", "SmallIntegerField"
+    if t.startswith(("INT", "INTEGER")):
+        return "models.IntegerField()", "IntegerField"
+    if t.startswith(("DECIMAL", "NUMERIC", "MONEY")):
+        md = args[0] if args else "10"
+        dp = args[1] if len(args) > 1 else "2"
+        return (f"models.DecimalField(max_digits={md}, decimal_places={dp})", "DecimalField")
+    if t.startswith(("DOUBLE", "FLOAT", "REAL")):
+        return "models.FloatField()", "FloatField"
+    if t.startswith(("BOOL", "BIT")):
+        return "models.BooleanField()", "BooleanField"
+    if t.startswith(("DATETIME", "TIMESTAMP")):
+        return "models.DateTimeField()", "DateTimeField"
+    if t.startswith("DATE"):
+        return "models.DateField()", "DateField"
+    if t.startswith("TIME"):
+        return "models.TimeField()", "TimeField"
+    if t.startswith("YEAR"):
+        return "models.SmallIntegerField()", "SmallIntegerField"
+    if t.startswith(("JSON", "JSONB")):
+        return "models.JSONField()", "JSONField"
+    if t.startswith("UUID"):
+        return "models.UUIDField()", "UUIDField"
+    if t.startswith(("BLOB", "BINARY", "VARBINARY", "BYTEA")):
+        return "models.BinaryField()", "BinaryField"
+    if t.startswith(("TEXT", "CLOB", "LONGTEXT", "MEDIUMTEXT", "TINYTEXT")):
+        return "models.TextField()", "TextField"
+    if t.startswith(("VARCHAR", "CHAR", "NVARCHAR", "NCHAR", "ENUM", "SET", "STRING")):
+        return f"models.CharField(max_length={args[0] if args else 255})", "CharField"
+    return "models.CharField(max_length=255)", "CharField"
+
+
+@endpoint()
+def db_sql_to_model(request):
+    """CREATE TABLE → Django models.py 字段片段（纯正则解析，不连库）。"""
+    sql = req_str(request, "sql")
+    m = re.search(r"CREATE\s+(?:TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+                  r"([`\"\[\]\w.]+)\s*\(", sql, re.I)
+    if not m:
+        raise ValueError("未找到 CREATE TABLE 语句")
+    table = m.group(1).strip('`"[]').split(".")[-1]
+    override = opt_str(request, "table").strip()
+    if override:
+        table = override.strip('`"[]').split(".")[-1]
+    open_at = m.end() - 1
+    depth, body = 0, None
+    for idx in range(open_at, len(sql)):
+        if sql[idx] == "(":
+            depth += 1
+        elif sql[idx] == ")":
+            depth -= 1
+            if depth == 0:
+                body = sql[open_at + 1:idx]
+                break
+    if body is None:
+        raise ValueError("CREATE TABLE 括号未闭合")
+
+    cls = "".join(w[:1].upper() + w[1:] for w in re.split(r"[_\W]+", table) if w) or "Model"
+    if cls[0].isdigit():
+        cls = "T" + cls
+    fields, notes = [], []
+    for raw in _split_columns(body):
+        if _SQL_SKIP.match(raw):
+            flat = re.sub(r"\s+", " ", raw)[:80]
+            notes.append("跳过表级约束：" + flat)
+            continue
+        cm = re.match(r"^[`\"\[]?(\w+)[`\"\]]?\s+(.+)$", raw, re.S)
+        if not cm:
+            notes.append("无法解析：" + raw[:60])
+            continue
+        col, rest = cm.group(1), cm.group(2).strip()
+        tm = re.match(r"^([A-Za-z]+(?:\s+(?:PRECISION|VARYING|UNSIGNED|ZEROFILL|"
+                      r"WITH(?:OUT)?\s+TIME\s+ZONE))*)\s*(?:\(([^)]*)\))?(.*)$", rest, re.S | re.I)
+        if not tm:
+            notes.append("无法解析列 " + col + "：" + rest[:60])
+            continue
+        sql_type = re.sub(r"\s+", " ", tm.group(1)).strip()
+        args = [a.strip() for a in (tm.group(2) or "").split(",") if a.strip()]
+        tail = tm.group(3) or ""
+        upper_tail = tail.upper()
+        kw = ["verbose_name=" + json.dumps(c, ensure_ascii=False)
+              for c in re.findall(r"COMMENT\s+'([^']*)'", tail, re.I)]
+        expr, dtype = _django_field(sql_type, args, upper_tail)
+        opts = []
+        is_pk = "PRIMARY KEY" in upper_tail or dtype.endswith("AutoField")
+        if is_pk:
+            opts.append("primary_key=True")
+        elif "NOT NULL" not in upper_tail:
+            opts.append("null=True")
+        if "UNIQUE" in upper_tail:
+            opts.append("unique=True")
+        dm = re.search(r"DEFAULT\s+('(?:[^']*)'|\"[^\"]*\"|[^\s,]+)", tail, re.I)
+        if dm:
+            dv = dm.group(1)
+            if dv.upper() in ("CURRENT_TIMESTAMP", "NOW()", "GETDATE()"):
+                opts.append("default=timezone.now")
+            elif dv.startswith(("'", '"')):
+                opts.append("default=" + json.dumps(dv[1:-1], ensure_ascii=False))
+            elif re.fullmatch(r"-?\d+(\.\d+)?", dv):
+                opts.append("default=" + dv)
+            else:
+                opts.append("default=" + json.dumps(dv))
+        opts.extend(kw)
+        if opts:
+            inner = expr[:-1]
+            sep = "" if inner.endswith("(") else ", "
+            assign = inner + sep + ", ".join(opts) + ")"
+        else:
+            assign = expr
+        fields.append({"name": col, "sql_type": sql_type, "django_type": dtype,
+                       "assignment": assign, "args": args,
+                       "primary_key": is_pk, "nullable": "null=True" in opts})
+        if len(fields) >= 200:
+            raise ValueError("列数超过 200，请拆分建表语句")
+
+    if not fields:
+        raise ValueError("未解析出任何列定义")
+    lines = [f"class {cls}(models.Model):"]
+    for f in fields:
+        lines.append(f"    {f['name']} = {f['assignment']}")
+    if table.lower() != cls.lower():
+        lines += ["", "    class Meta:", f'        db_table = "{table}"']
+    code = "\n".join(lines)
+    return ok({"model": cls, "table": table, "code": code, "fields": fields,
+               "field_count": len(fields), "notes": notes,
+               "hint": "已自动生成 null/primary_key/unique/default/verbose_name，请人工复核枚举与索引"})
+
+
 # 模块计数自检
-CODE_FAMILY_COUNT = 5 + 6 + 6 + 5 + 4 + 6 + 3 + 6 + 5  # = 46
+CODE_FAMILY_COUNT = 5 + 6 + 6 + 5 + 4 + 6 + 3 + 6 + 5  # = 46（不含 S26 追加 5 个）

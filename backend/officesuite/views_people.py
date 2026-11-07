@@ -6,18 +6,22 @@ standup(7) okr(10) decision(7) todobox(11) = 73 个。
 """
 from datetime import timedelta
 
+from django.db import IntegrityError, transaction
 from django.db.models import Avg, Count, F, Q, Sum
 from django.utils import timezone
 
-from core.scoping import is_visible, scope_queryset
+from core.scoping import is_visible, scope_queryset, visible_user_ids
+from core.validators import parse_bool
 
 from devtools.common import (endpoint, ok, opt_bool, opt_num, opt_str, p,
                              req, req_list, req_num, req_str)
-from officesuite.common import flow_event, get_obj, obj_dict, parse_day, parse_dt
+from officesuite.common import (can_write_obj, flow_event, get_obj, obj_dict,
+                                parse_day, parse_dt)
 from officesuite.models import (DecisionRecord, DutySchedule, DutyShift,
                                 DutySwapRequest, KeyResult, Objective,
-                                RecognitionRecord, StandupEntry, TimesheetEntry,
-                                TodoItem, TrainingEnrollment, TrainingSession)
+                                RecognitionLike, RecognitionRecord,
+                                StandupEntry, TimesheetEntry, TodoItem,
+                                TrainingEnrollment, TrainingSession)
 
 # =====================================================================
 # duty 排班（9）
@@ -55,10 +59,20 @@ def duty_schedule_delete(request, pk):
 
 @endpoint()
 def duty_shift_add(request):
-    """添加班次（同一人同日同表去重）。"""
-    schedule = get_obj(DutySchedule, int(req_num(request, "schedule_id", minimum=1)), request.user)
+    """添加班次（同一人同日同表去重）。
+
+    #35：父排班表要求写权限；成员必须能解析到真实账号（按账号/昵称），
+    避免任意可见者给同事插入班次。
+    """
+    schedule = get_obj(DutySchedule, int(req_num(request, "schedule_id", minimum=1)),
+                       request.user, write=True)
     duty_date = parse_day(req_str(request, "duty_date"), "duty_date", allow_empty=False)
     member = req_str(request, "member_name")[:60]
+    from accounts.models import User
+    account = User.objects.filter(Q(username=member) | Q(nickname=member)).first()
+    if account is None:
+        raise ValueError(f"成员不存在: {member}")
+    member = account.username
     if DutyShift.objects.filter(schedule=schedule, member_name=member, duty_date=duty_date).exists():
         raise ValueError(f"{member} 在 {duty_date} 已有班次")
     sh = DutyShift.objects.create(
@@ -339,6 +353,8 @@ def timesheet_delete(request, pk):
 def timesheet_approve(request, pk):
     """主管确认工时（数据范围可见即可确认）。"""
     t = get_obj(TimesheetEntry, pk, request.user, write=True)
+    if t.owner_id == request.user.id and not request.user.is_superuser:
+        raise ValueError("不能确认自己的工时")
     if t.status != "submitted":
         raise ValueError("该记录不在待确认状态")
     action = req_str(request, "action")
@@ -352,11 +368,20 @@ def timesheet_approve(request, pk):
 
 @endpoint(("GET",))
 def timesheet_week(request):
-    """本周工时视图：7 天分布 + 合计。默认当前用户，可看可见范围他人。"""
-    user_id = opt_num(request, "user_id") or request.user.id
+    """本周工时视图：7 天分布 + 合计。默认当前用户，可看可见范围他人。
+
+    #34：user_id 必须落在当前用户的数据范围内（管理员/超管不受限），
+    禁止靠遍历 id 读取全公司任意人的工时。
+    """
+    target_id = opt_num(request, "user_id", None, integer=True) or request.user.id
+    if target_id != request.user.id and not (
+            request.user.is_superuser or request.user.is_staff):
+        ids = visible_user_ids(request.user)
+        if ids is not None and target_id not in ids:
+            raise ValueError("无权查看该用户工时")
     ref = parse_day(opt_str(request, "date"), "date", allow_empty=True)
     monday = (ref or timezone.localdate()) - timedelta(days=(ref or timezone.localdate()).weekday())
-    qs = TimesheetEntry.objects.filter(owner_id=user_id, work_date__gte=monday,
+    qs = TimesheetEntry.objects.filter(owner_id=target_id, work_date__gte=monday,
                                        work_date__lt=monday + timedelta(days=7))
     days = {str(monday + timedelta(days=i)): 0.0 for i in range(7)}
     for t in qs:
@@ -485,18 +510,31 @@ def training_delete(request, pk):
 
 @endpoint()
 def training_enroll(request, pk):
-    """报名培训（满员拒绝、重复拒绝；全员可报名，不受数据范围限制）。"""
-    try:
-        s = TrainingSession.objects.get(pk=pk)
-    except TrainingSession.DoesNotExist:
-        raise ValueError("培训不存在")
-    if TrainingEnrollment.objects.filter(session=s, member_name=request.user.username).exists():
-        raise ValueError("已报名过该培训")
-    if s.enrollments.count() >= s.capacity:
-        raise ValueError("名额已满")
-    e = TrainingEnrollment.objects.create(session=s, member_name=request.user.username)
+    """报名培训（#68：幂等 + 并发安全）。
+
+    事务内锁培训行做容量判断；(session, member_name) 唯一约束兜底并发，
+    唯一冲突时返回已存在的报名记录而不是产生重复/超额。
+    """
+    name = request.user.username
+    created = False
+    with transaction.atomic():
+        try:
+            s = TrainingSession.objects.select_for_update().get(pk=pk)
+        except TrainingSession.DoesNotExist:
+            raise ValueError("培训不存在")
+        e = TrainingEnrollment.objects.filter(session=s, member_name=name).first()
+        if e is None:
+            if s.enrollments.count() >= s.capacity:
+                raise ValueError("名额已满")
+            try:
+                with transaction.atomic():
+                    e = TrainingEnrollment.objects.create(session=s, member_name=name)
+                created = True
+            except IntegrityError:
+                e = TrainingEnrollment.objects.get(session=s, member_name=name)
+        left = max(s.capacity - s.enrollments.count(), 0)
     return ok({"id": e.id, "session": s.topic, "member": e.member_name,
-               "left": max(s.capacity - s.enrollments.count(), 0)})
+               "left": left, "created": created})
 
 
 @endpoint()
@@ -574,11 +612,17 @@ def recognition_list(request):
 
 @endpoint()
 def recognition_like(request, pk):
-    """点赞表彰（重复点赞由前端控制，后端幂等自增）。"""
+    """点赞表彰（#69：按用户记录点赞关系，同一用户只计一次，幂等）。
+
+    点赞关系表带 (recognition, user) 唯一约束；重复调用不再累加。
+    """
     r = get_obj(RecognitionRecord, pk, request.user)
-    RecognitionRecord.objects.filter(pk=r.pk).update(likes=F("likes") + 1)
-    r.refresh_from_db()
-    return ok({"id": r.id, "likes": r.likes})
+    liked, created = RecognitionLike.objects.get_or_create(
+        recognition=r, user=request.user)
+    if created:
+        RecognitionRecord.objects.filter(pk=r.pk).update(likes=F("likes") + 1)
+    r.refresh_from_db(fields=["likes"])
+    return ok({"id": r.id, "likes": r.likes, "liked": bool(liked)})
 
 
 @endpoint()
@@ -621,20 +665,29 @@ def recognition_stats(request):
 
 @endpoint()
 def standup_create(request):
-    """提交今日站会汇报（同人同日唯一，重复提交被拒）。"""
+    """提交今日站会汇报（#70：(owner, standup_date) 业务唯一）。
+
+    先做存在性检查快速返回；并发冲突由唯一约束兜底，捕获 IntegrityError
+    后返回已存在的记录，保证幂等。
+    """
     day = parse_day(opt_str(request, "standup_date"), "standup_date",
                     allow_empty=True, default=timezone.localdate())
-    if StandupEntry.objects.filter(owner=request.user, standup_date=day).exists():
-        raise ValueError(f"{day} 的站会已提交，请走更新接口")
-    s = StandupEntry.objects.create(
-        owner=request.user, title=f"站会 {day}",
-        standup_date=day,
-        yesterday=opt_str(request, "yesterday"),
-        today=opt_str(request, "today"),
-        blockers=opt_str(request, "blockers"),
-        status="submitted", data={"events": []})
-    flow_event(s, "submit", request.user)
-    s.save()
+    existing = StandupEntry.objects.filter(owner=request.user, standup_date=day).first()
+    if existing is not None:
+        return ok({"id": existing.id, "date": str(day), "existing": True})
+    try:
+        with transaction.atomic():
+            s = StandupEntry.objects.create(
+                owner=request.user, title=f"站会 {day}",
+                standup_date=day,
+                yesterday=opt_str(request, "yesterday"),
+                today=opt_str(request, "today"),
+                blockers=opt_str(request, "blockers"),
+                status="submitted", data={"events": []})
+            flow_event(s, "submit", request.user)
+            s.save()
+    except IntegrityError:
+        s = StandupEntry.objects.get(owner=request.user, standup_date=day)
     return ok({"id": s.id, "date": str(day)})
 
 
@@ -798,14 +851,20 @@ def okr_objective_delete(request, pk):
     return ok({"deleted": pk})
 
 
-def _get_kr(pk, user):
-    """KR 读取 + 权限：沿 Objective 的 owner 校验（KR 本身无 owner 字段）。"""
+def _get_kr(pk, user, write=False):
+    """KR 读取 + 权限：沿 Objective 的 owner 校验（KR 本身无 owner 字段）。
+
+    S26-351：写路径（改进度 / 删除）传 write=True，按目标对象的写权限校验，
+    避免可见即可改他人 KR。
+    """
     try:
         k = KeyResult.objects.select_related("objective").get(pk=pk)
     except KeyResult.DoesNotExist:
         raise ValueError("KR 不存在")
     if not is_visible(k.objective, user):
-        raise ValueError("无权操作该 KR")
+        raise ValueError("无权访问该 KR")
+    if write and not can_write_obj(user, k.objective):
+        raise ValueError("无权修改该 KR")
     return k
 
 
@@ -822,8 +881,8 @@ def _get_enrollment(pk, user, action_label="该报名记录"):
 
 @endpoint()
 def okr_kr_add(request, pk):
-    """为目标添加关键结果。"""
-    o = get_obj(Objective, pk, request.user)
+    """为目标添加关键结果（#72：仅目标所有者/管理员可写）。"""
+    o = get_obj(Objective, pk, request.user, write=True)
     k = KeyResult.objects.create(
         objective=o,
         content=req_str(request, "content")[:300],
@@ -835,8 +894,8 @@ def okr_kr_add(request, pk):
 
 @endpoint()
 def okr_kr_progress(request, pk):
-    """更新 KR 进度并联动 O 总进度。"""
-    k = _get_kr(pk, request.user)
+    """更新 KR 进度并联动 O 总进度（S26-351：写校验）。"""
+    k = _get_kr(pk, request.user, write=True)
     progress = int(req_num(request, "progress", minimum=0, maximum=100))
     k.progress = progress
     k.save(update_fields=["progress"])
@@ -846,8 +905,8 @@ def okr_kr_progress(request, pk):
 
 @endpoint()
 def okr_kr_delete(request, pk):
-    """删除 KR。"""
-    k = _get_kr(pk, request.user)
+    """删除 KR（S26-351：写校验）。"""
+    k = _get_kr(pk, request.user, write=True)
     o = k.objective
     k.delete()
     _sync_objective_progress(o)
@@ -1004,9 +1063,9 @@ def todo_create(request):
 def todo_list(request):
     """待办列表（完成态/优先级/逾期过滤）。"""
     qs = TodoItem.objects.filter(owner=request.user).order_by("done", "due_date", "-created_at")
-    done = opt_bool(request, "done", None)
-    if done is not None and p(request, "done") is not None:
-        qs = qs.filter(done=bool(p(request, "done")))
+    done = parse_bool(p(request, "done"), default=None, field="done")
+    if done is not None:
+        qs = qs.filter(done=done)
     priority = opt_str(request, "priority")
     if priority:
         qs = qs.filter(priority=priority)
@@ -1046,8 +1105,8 @@ def todo_update(request, pk):
 
 @endpoint()
 def todo_complete(request, pk):
-    """完成待办。"""
-    t = get_obj(TodoItem, pk, request.user)
+    """完成待办（#67：仅所有者/管理员可写）。"""
+    t = get_obj(TodoItem, pk, request.user, write=True)
     t.done = True
     t.status = "done"
     t.save(update_fields=["done", "status", "updated_at"])
@@ -1056,8 +1115,8 @@ def todo_complete(request, pk):
 
 @endpoint()
 def todo_reopen(request, pk):
-    """重开待办。"""
-    t = get_obj(TodoItem, pk, request.user)
+    """重开待办（S26-353：与 todo_complete 一致，要求写权限）。"""
+    t = get_obj(TodoItem, pk, request.user, write=True)
     t.done = False
     t.status = "open"
     t.save(update_fields=["done", "status", "updated_at"])
@@ -1161,9 +1220,13 @@ _QUADRANTS = [
 ]
 
 
-@endpoint(("GET",))
+@endpoint(("GET", "POST"))
 def todo_quadrant(request):
-    """F690 四象限视图：按 重要 × 紧急 把未完成待办分进四个象限。"""
+    """F690 四象限视图：按 重要 × 紧急 把未完成待办分进四个象限。
+
+    S26-354：前端按 POST 调用，接口兼容 GET/POST 且固定返回 4 组 items
+    （quadrants / groups 同内容，便于前端任选键名）。
+    """
     today = timezone.localdate()
     qs = TodoItem.objects.filter(owner=request.user, done=False).order_by("due_date", "-created_at")
     buckets = {k: [] for k, *_ in _QUADRANTS}
@@ -1178,6 +1241,7 @@ def todo_quadrant(request):
     return ok({
         "date": str(today),
         "quadrants": quads,
+        "groups": quads,
         "counts": {k: len(buckets[k]) for k, *_ in _QUADRANTS},
         "total": sum(len(v) for v in buckets.values()),
         "legend": "紧急 = 高/紧急优先级，或截止 ≤ 今天；重要 = important 标记",
@@ -1204,37 +1268,44 @@ def _repeat_due_today(t, today):
 def repeat_scan_for_user(user, today=None):
     """给单个用户按重复规则生成今日待办实例（端点与管理命令共用）。
 
-    幂等：以 data.repeat_parent + data.repeat_date 去重，每天最多生成一次。
+    #71：
+    - 幂等：以 data.repeat_parent + data.repeat_date 去重（存在性检查 + 行锁）；
+    - 父任务标记完成后仍按 repeat 规则继续生成（不再过滤 done=False）。
+
     返回 {"scanned", "created", "items"}。
     """
     today = today or timezone.localdate()
     created = []
     scanned = 0
     qs = (TodoItem.objects.filter(owner=user)
-          .exclude(repeat_rule="none").filter(done=False).order_by("-created_at")[:500])
-    for t in qs:
+          .exclude(repeat_rule="none").order_by("-created_at")[:500])
+    for candidate in qs:
         scanned += 1
-        if t.repeat_until and today > t.repeat_until:
-            continue
-        if t.last_generated == today:
-            continue
-        if not _repeat_due_today(t, today):
-            # 今天不是重复日，只推进标记避免反复评估
-            continue
-        dup = TodoItem.objects.filter(
-            owner=user, data__repeat_parent=t.id, data__repeat_date=str(today)
-        ).exists()
-        if not dup:
-            child = TodoItem.objects.create(
-                owner=user, title=t.title, priority=t.priority,
-                due_date=today, important=t.important,
-                repeat_rule="none", status="open", remark=t.remark,
-                data={"repeat_parent": t.id, "repeat_date": str(today),
-                      "source": "repeat", "events": []},
-            )
-            created.append({"id": child.id, "title": child.title, "parent": t.id})
-        t.last_generated = today
-        t.save(update_fields=["last_generated", "updated_at"])
+        with transaction.atomic():
+            # 行锁：并发扫描同一父任务时串行化「查重 + 创建」
+            t = TodoItem.objects.select_for_update().filter(pk=candidate.pk).first()
+            if t is None:
+                continue
+            if t.repeat_until and today > t.repeat_until:
+                continue
+            if t.last_generated == today:
+                continue
+            if not _repeat_due_today(t, today):
+                # 今天不是重复日，只推进标记避免反复评估
+                continue
+            child, is_new = TodoItem.objects.get_or_create(
+                owner=user, data__repeat_parent=t.id, data__repeat_date=str(today),
+                defaults={
+                    "title": t.title, "priority": t.priority,
+                    "due_date": today, "important": t.important,
+                    "repeat_rule": "none", "status": "open", "remark": t.remark,
+                    "data": {"repeat_parent": t.id, "repeat_date": str(today),
+                             "source": "repeat", "events": []},
+                })
+            if is_new:
+                created.append({"id": child.id, "title": child.title, "parent": t.id})
+            t.last_generated = today
+            t.save(update_fields=["last_generated", "updated_at"])
     return {"date": str(today), "scanned": scanned,
             "created": len(created), "items": created[:50]}
 

@@ -97,14 +97,50 @@ def data_mask(request):
 
 _END_TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
+# 只匹配开始/结束标签本身（不含 .*?），逐段用 find 定位，避免跨行正则在超长 HTML 上回溯
+_BLOCK_OPEN_RE = re.compile(r"(?is)<(script|style)\b[^>]*>")
+_BLOCK_CLOSE_RE = re.compile(r"(?is)</(?:script|style)\s*>")
+_FMT_TEXT_MAX = 1000000  # 1MB
+
+
+def _drop_block(html, open_re, close_re):
+    """线性删除 <script>/<style> 整块：正则只匹配标签，块内文本用 str.find 跳过。"""
+    out, pos = [], 0
+    for m in open_re.finditer(html):
+        if m.start() < pos:
+            continue
+        close = close_re.search(html, m.end())
+        if not close:
+            break
+        out.append(html[pos:m.start()])
+        pos = close.end()
+    out.append(html[pos:])
+    return "".join(out)
+
+
+def _drop_between(text, open_tok, close_tok):
+    """删除 open_tok…close_tok 之间的内容（用于 HTML 注释），纯 str.find 线性扫描。"""
+    out, pos = [], 0
+    while True:
+        i = text.find(open_tok, pos)
+        if i < 0:
+            break
+        j = text.find(close_tok, i + len(open_tok))
+        if j < 0:
+            break
+        out.append(text[pos:i])
+        pos = j + len(close_tok)
+    out.append(text[pos:])
+    return "".join(out)
 
 
 @endpoint()
 def html_text(request):
     """FMT04. HTML 转纯文本（去标签/去脚本）。"""
-    html = req_str(request, "html")
-    html = re.sub(r"(?is)<(script|style).*?</\1>", "", html)
-    html = re.sub(r"(?is)<!--.*?-->", "", html)
+    html = req_str(request, "html", max_len=_FMT_TEXT_MAX)
+    html = _drop_block(html, _BLOCK_OPEN_RE, _BLOCK_CLOSE_RE)
+    if "<!--" in html:
+        html = _drop_between(html, "<!--", "-->")
     text = _END_TAG_RE.sub(" ", html)
     text = _WS_RE.sub(" ", text).strip()
     return ok({"text": text})
@@ -142,9 +178,14 @@ def csv_escape(request):
 @endpoint()
 def json_schema_infer(request):
     """FMT07. 从示例 JSON 推断极简 JSON Schema。"""
-    obj = json.loads(req_str(request, "obj"))
+    raw = req_str(request, "obj")
+    if len(raw) > 1024 * 1024:
+        raise ValueError("obj 过大（上限 1MB）")
+    obj = json.loads(raw)
 
-    def infer(v):
+    def infer(v, depth=0):
+        if depth > 64:
+            raise ValueError("JSON 嵌套过深（上限 64 层）")
         if isinstance(v, bool):
             return {"type": "boolean"}
         if isinstance(v, int):
@@ -156,10 +197,10 @@ def json_schema_infer(request):
         if v is None:
             return {"type": "null"}
         if isinstance(v, list):
-            return {"type": "array", "items": infer(v[0]) if v else {}}
+            return {"type": "array", "items": infer(v[0], depth + 1) if v else {}}
         if isinstance(v, dict):
             return {"type": "object",
-                    "properties": {k: infer(val) for k, val in v.items()}}
+                    "properties": {k: infer(val, depth + 1) for k, val in v.items()}}
         return {}
 
     return ok({"schema": infer(obj)})
@@ -167,13 +208,14 @@ def json_schema_infer(request):
 
 @endpoint()
 def csv_tsv(request):
-    """FMT08. CSV ↔ TSV 互转。"""
+    """FMT08. CSV ↔ TSV 互转（文本上限 1MB，逐行生成后再拼接，避免整表双份副本）。"""
     mode = opt_str(request, "mode", "csv_to_tsv")
-    text = req_str(request, "text")
-    if mode == "csv_to_tsv":
-        rows = [r for r in text.replace("\r\n", "\n").split("\n") if r]
-        out = "\n".join(r.replace(",", "\t") for r in rows)
-        return ok({"result": out})
-    rows = [r for r in text.replace("\r\n", "\n").split("\n") if r]
-    out = "\n".join(r.replace("\t", ",") for r in rows)
-    return ok({"result": out})
+    text = req_str(request, "text", max_len=_FMT_TEXT_MAX)
+    src, dst = (",", "\t") if mode == "csv_to_tsv" else ("\t", ",")
+
+    def _rows():
+        for row in text.replace("\r\n", "\n").split("\n"):
+            if row:
+                yield row.replace(src, dst)
+
+    return ok({"result": "\n".join(_rows())})

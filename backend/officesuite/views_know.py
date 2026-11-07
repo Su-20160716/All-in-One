@@ -1,23 +1,30 @@
 # -*- coding: utf-8 -*-
-"""officesuite · 知识内容面接口：faq(7) policy(7) template(7) wiki(11) minutes(9)
-formcollect(8) announcement(8) poll(9) helpdesk(11) = 78 个（含 minutes_to_todo）。
+"""officesuite · 知识内容面接口：faq(7) policy(8) template(7) wiki(12) minutes(12)
+formcollect(9) announcement(8) poll(9) helpdesk(11) = 83 个（含 minutes_to_todo / 行动项落库与转日程）。
 
 FAQ/制度/模板/wiki 围绕知识沉淀；表单/公告/投票/工单围绕信息流转。
 """
-from datetime import timedelta
+from datetime import datetime, timedelta
+import html
+import re
+from urllib.parse import quote
 
+from django.db import transaction
 from django.db.models import Avg, Count, F, Q, Sum
+from django.http import HttpResponse
 from django.utils import timezone
 
 from core.scoping import is_visible, scope_queryset, visible_user_ids
+from core.validators import parse_bool
 
 from devtools.common import (endpoint, ok, opt_bool, opt_num, opt_str, p,
                              req, req_num, req_str)
-from officesuite.common import flow_event, get_obj, obj_dict, parse_day, parse_dt
+from officesuite.common import (can_write_obj, flow_event, get_obj, obj_dict,
+                                parse_day, parse_dt)
 from officesuite.models import (CollectForm, DeptAnnouncement, FaqEntry,
                                 FormEntry, HelpTicket, MeetingMinutes,
                                 PolicyDoc, DocTemplate, Poll, PollVote,
-                                WikiPage)
+                                SuiteEvent, WikiPage)
 
 # =====================================================================
 # faq FAQ（7）
@@ -98,11 +105,12 @@ def faq_search(request):
 
 @endpoint(("GET",))
 def faq_stats(request):
-    """FAQ 统计：分类分布与高票 TOP5。"""
-    by_cat = FaqEntry.objects.values("category").annotate(c=Count("id")).order_by("-c")
-    top = FaqEntry.objects.order_by("-votes").values("title", "votes")[:5]
+    """FAQ 统计：分类分布与高票 TOP5（#43：所有聚合前置 scope_queryset）。"""
+    qs = scope_queryset(FaqEntry.objects.all(), request.user)
+    by_cat = qs.values("category").annotate(c=Count("id")).order_by("-c")
+    top = qs.order_by("-votes").values("title", "votes")[:5]
     return ok({"by_category": [{"category": b["category"], "count": b["c"]} for b in by_cat],
-               "top_voted": list(top), "total": FaqEntry.objects.count()})
+               "top_voted": list(top), "total": qs.count()})
 
 
 # =====================================================================
@@ -198,6 +206,33 @@ def policy_ack_list(request, pk):
     return ok({"title": d.title, "acked": acked, "unread": unread[:50],
                "ack_rate": round(len([n for n in visible_names if n in acked]) / len(visible_names) * 100, 1)
                if visible_names else 0})
+
+
+@endpoint()
+def policy_remind(request, pk):
+    """S26-370 制度催办：给可见且未确认的用户发站内提醒，返回待催人数。"""
+    d = get_obj(PolicyDoc, pk, request.user, write=True)
+    from accounts.models import User
+    from core.notify import dispatch
+
+    acked = set(d.acked_by or [])
+    ids = visible_user_ids(request.user)
+    users = User.objects.filter(is_active=True)
+    if ids is not None:
+        users = users.filter(id__in=ids)
+    targets = [u for u in users.order_by("id")[:500] if u.username not in acked]
+    sent = 0
+    for u in targets:
+        n = dispatch(u, f"制度待阅读：{d.title}",
+                     f"请阅读并确认《{d.title}》（{d.version}）。",
+                     category="system", level="info", link="/officesuite/policy")
+        if n is not None:
+            sent += 1
+    flow_event(d, "remind", request.user, f"催办 {len(targets)} 人")
+    d.save(update_fields=["data", "updated_at"])
+    return ok({"id": d.id, "title": d.title, "version": d.version,
+               "pending": len(targets), "sent": sent,
+               "unread": [u.username for u in targets[:50]]})
 
 
 @endpoint()
@@ -355,25 +390,33 @@ def wiki_detail(request, pk):
 
 @endpoint()
 def wiki_update(request, pk):
-    """编辑 wiki（自动记修订版本）。"""
-    w = get_obj(WikiPage, pk, request.user, write=True)
-    changed = False
-    if p(request, "title") is not None:
-        w.title = req_str(request, "title")[:200]
-        changed = True
-    if p(request, "content") is not None:
-        w.content = opt_str(request, "content")
-        changed = True
-    if p(request, "order") is not None:
-        w.order = int(req_num(request, "order", minimum=0))
-        changed = True
-    if changed:
-        revs = list(w.revisions or [])
-        revs.append({"v": len(revs) + 1, "by": request.user.username,
-                     "at": timezone.now().isoformat(),
-                     "note": opt_str(request, "note", "更新")})
-        w.revisions = revs
-    w.save()
+    """编辑 wiki（自动记修订版本；#67 事务内行锁，版本号在锁内生成）。"""
+    with transaction.atomic():
+        try:
+            w = WikiPage.objects.select_for_update().get(pk=pk)
+        except WikiPage.DoesNotExist:
+            raise ValueError("对象不存在")
+        if not is_visible(w, request.user):
+            raise ValueError("无权访问该对象")
+        if not can_write_obj(request.user, w):
+            raise ValueError("无权修改该对象")
+        changed = False
+        if p(request, "title") is not None:
+            w.title = req_str(request, "title")[:200]
+            changed = True
+        if p(request, "content") is not None:
+            w.content = opt_str(request, "content")
+            changed = True
+        if p(request, "order") is not None:
+            w.order = int(req_num(request, "order", minimum=0))
+            changed = True
+        if changed:
+            revs = list(w.revisions or [])
+            revs.append({"v": len(revs) + 1, "by": request.user.username,
+                         "at": timezone.now().isoformat(),
+                         "note": opt_str(request, "note", "更新")})
+            w.revisions = revs
+        w.save()
     return ok({"id": w.id, "version": len(w.revisions or [])})
 
 
@@ -395,14 +438,17 @@ def wiki_revisions(request, pk):
 
 @endpoint()
 def wiki_move(request, pk):
-    """移动页面：换父页或调排序（不允许把自己挂到自己的后代）。"""
+    """移动页面：换父页或调排序（不允许把自己挂到自己的后代）。
+
+    #42：目标父页改用 get_obj(write=True)，避免挂到他人/他租户页面下。
+    """
     w = get_obj(WikiPage, pk, request.user, write=True)
     new_parent = None
     if p(request, "parent_id") is not None:
         new_parent_id = int(req_num(request, "parent_id", minimum=1))
         if new_parent_id == w.pk:
             raise ValueError("不能把自己设为父页")
-        target = WikiPage.objects.get(pk=new_parent_id)
+        target = get_obj(WikiPage, new_parent_id, request.user, write=True)
         ancestor = target
         while ancestor is not None:
             if ancestor.pk == w.pk:
@@ -517,6 +563,63 @@ def wiki_star(request, pk):
                "stars": stars[:50]})
 
 
+def _wiki_subtree(root, limit=200):
+    """S26-369：按 BFS 取子页（成环/超深也安全），返回 [root, ...]。"""
+    pages, seen = [root], {root.pk}
+    queue = [root]
+    while queue and len(pages) < limit:
+        node = queue.pop(0)
+        for child in node.children.order_by("order", "id")[:50]:
+            if child.pk in seen or len(pages) >= limit:
+                continue
+            seen.add(child.pk)
+            pages.append(child)
+            queue.append(child)
+    return pages
+
+
+@endpoint(("GET",))
+def wiki_export(request, pk):
+    """S26-369 Wiki 导出：fmt=md/html，children=1 时拼接子页，返回附件流。"""
+    w = get_obj(WikiPage, pk, request.user)
+    fmt = (opt_str(request, "fmt", "md") or "md").strip().lower()
+    if fmt not in ("md", "html"):
+        raise ValueError("fmt 仅支持 md / html")
+    pages = _wiki_subtree(w) if opt_bool(request, "children") else [w]
+    filename = re.sub(r'[\\/:*?"<>|\r\n]+', "_", w.title or "").strip("_ ")[:80] or f"wiki-{w.id}"
+
+    if fmt == "md":
+        parts = []
+        for idx, pg in enumerate(pages):
+            body = (pg.content or "").rstrip()
+            if idx > 0:
+                body = f"# {pg.title}\n\n{body}"
+            parts.append(body)
+        body_text = "\n\n---\n\n".join(parts)
+        content_type = "text/markdown; charset=utf-8"
+        ext = "md"
+    else:
+        sections = []
+        for idx, pg in enumerate(pages):
+            heading = "h1" if idx == 0 else "h2"
+            sections.append(
+                f"<section><{heading}>{html.escape(pg.title or '')}</{heading}>"
+                f"<pre>{html.escape(pg.content or '')}</pre></section>"
+            )
+        body_text = (
+            "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+            f"<title>{html.escape(w.title or 'Wiki')}</title></head><body>"
+            + "\n".join(sections)
+            + "</body></html>"
+        )
+        content_type = "text/html; charset=utf-8"
+        ext = "html"
+
+    resp = HttpResponse(body_text.encode("utf-8"), content_type=content_type)
+    resp["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(filename)}.{ext}"
+    return resp
+
+
 # =====================================================================
 # minutes 会议纪要（7）
 # =====================================================================
@@ -597,6 +700,8 @@ def minutes_action_items(request, pk):
 
     F692：提取结果连同完成状态一起持久化到 data.action_items，
     支撑「标记完成 → 完成率周统计」；响应新增 done / rate（向后兼容）。
+    S26-352：GET 改为纯计算不落库（读接口不再产生写副作用），
+    需要持久化请调用 POST minutes/<pk>/action-items/sync/。
     """
     m = get_obj(MeetingMinutes, pk, request.user)
     old = (m.data or {}).get("action_items") or {}
@@ -617,15 +722,58 @@ def minutes_action_items(request, pk):
             "done_by": prev.get("done_by", ""),
             "done_at": prev.get("done_at", ""),
         })
-    merged = {str(it["line_no"]): it for it in items}
-    if merged != old:
-        m.data = {**(m.data or {}), "action_items": merged}
-        m.save(update_fields=["data", "updated_at"])
     done = sum(1 for it in items if it["done"])
     return ok({
         "title": m.title, "action_items": items, "count": len(items),
         "done": done,
         "rate": round(done * 100 / len(items), 1) if items else 0.0,
+    })
+
+
+@endpoint()
+def minutes_action_items_sync(request, pk):
+    """S26-352 行动项落库：POST action_items（数组或 {line_no: item}）。
+
+    写接口显式走 get_obj(write=True)，与 GET 的纯读语义分离。
+    """
+    m = get_obj(MeetingMinutes, pk, request.user, write=True)
+    raw = p(request, "action_items")
+    if raw is None:
+        raw = p(request, "items")
+    if isinstance(raw, dict):
+        seq = list(raw.values())
+    elif isinstance(raw, list):
+        seq = raw
+    else:
+        raise ValueError("action_items 需为数组或 {line_no: item} 对象")
+    items = {}
+    for idx, it in enumerate(seq):
+        if not isinstance(it, dict):
+            raise ValueError("每个行动项需为对象")
+        try:
+            line_no = int(it.get("line_no") or idx + 1)
+        except (TypeError, ValueError):
+            raise ValueError("line_no 需为整数")
+        if line_no < 1:
+            raise ValueError("line_no 需为正整数")
+        text = str(it.get("text") or "").strip()[:200]
+        if not text:
+            continue
+        done = bool(it.get("done"))
+        items[str(line_no)] = {
+            "line_no": line_no, "text": text, "done": done,
+            "done_by": str(it.get("done_by") or (request.user.username if done else ""))[:60],
+            "done_at": str(it.get("done_at") or (timezone.now().isoformat() if done else "")),
+        }
+    m.data = {**(m.data or {}), "action_items": items}
+    flow_event(m, "action_item_sync", request.user, f"同步 {len(items)} 条行动项")
+    m.save()
+    all_items = list(items.values())
+    done_n = sum(1 for x in all_items if x.get("done"))
+    return ok({
+        "id": m.id, "action_items": all_items, "count": len(all_items),
+        "done": done_n,
+        "rate": round(done_n * 100 / len(all_items), 1) if all_items else 0.0,
     })
 
 
@@ -777,7 +925,7 @@ def form_update(request, pk):
             raise ValueError("fields 需为非空数组")
         f.fields = flds
     if p(request, "closed") is not None:
-        f.closed = bool(p(request, "closed"))
+        f.closed = parse_bool(p(request, "closed"), field="closed")
     f.save()
     return ok({"id": f.id, "title": f.title, "closed": f.closed})
 
@@ -806,10 +954,21 @@ def form_submit(request, pk):
     return ok({"id": e.id, "form": f.title, "values": values})
 
 
+def _require_form_owner(f, user, action="查看"):
+    """#37：答卷含隐私字段，只允许表单创建者或管理员读取/导出。"""
+    if f.owner_id != getattr(user, "id", None) and not (
+            getattr(user, "is_superuser", False) or getattr(user, "is_staff", False)):
+        raise ValueError(f"仅表单创建者可{action}答卷")
+
+
 @endpoint(("GET",))
 def form_entries(request, pk):
-    """查看收集结果（创建人 or 可见范围）。"""
-    f = get_obj(CollectForm, pk, request.user)
+    """查看收集结果（#37：仅创建人或管理员）。"""
+    try:
+        f = CollectForm.objects.get(pk=pk)
+    except CollectForm.DoesNotExist:
+        raise ValueError("表单不存在")
+    _require_form_owner(f, request.user)
     rows = f.entries.order_by("-created_at")[:500]
     return ok({"form": f.title, "fields": f.fields,
                "items": [{"id": e.id, "values": e.values,
@@ -819,8 +978,12 @@ def form_entries(request, pk):
 
 @endpoint(("GET",))
 def form_export(request, pk):
-    """导出填写结果 CSV 文本。"""
-    f = get_obj(CollectForm, pk, request.user)
+    """导出填写结果 CSV 文本（#37：仅创建人或管理员）。"""
+    try:
+        f = CollectForm.objects.get(pk=pk)
+    except CollectForm.DoesNotExist:
+        raise ValueError("表单不存在")
+    _require_form_owner(f, request.user, "导出")
     names = [str(fl.get("name", "")) for fl in (f.fields or [])]
 
     def esc(v):
@@ -830,6 +993,66 @@ def form_export(request, pk):
     for e in f.entries.order_by("created_at")[:2000]:
         lines.append(",".join(esc((e.values or {}).get(n, "")) for n in names))
     return ok({"csv": "\n".join(lines), "rows": len(lines) - 1})
+
+
+def _is_number(val):
+    """S26-371：可参与均值统计的数值（bool 不算）。"""
+    if isinstance(val, bool) or val is None or val == "":
+        return False
+    try:
+        float(val)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+@endpoint(("GET",))
+def form_stats(request, pk):
+    """S26-371 表单字段级统计：选项计数 / 数值均值 / 填空 TOP10。
+
+    仅表单创建人或管理员可看（与 entries/export 的隐私口径一致）。
+    """
+    try:
+        f = CollectForm.objects.get(pk=pk)
+    except CollectForm.DoesNotExist:
+        raise ValueError("表单不存在")
+    _require_form_owner(f, request.user, "查看统计")
+    rows = list(f.entries.order_by("id").values_list("values", flat=True)[:5000])
+    total = len(rows)
+    out = []
+    for fld in f.fields or []:
+        name = str(fld.get("name", ""))
+        ftype = str(fld.get("type", "text")).lower()
+        values = []
+        for vals in rows:
+            v = (vals or {}).get(name)
+            if isinstance(v, list):
+                values.extend([str(x) for x in v if str(x).strip()])
+            elif v not in (None, ""):
+                values.append(v)
+        filled = len([1 for vals in rows if (vals or {}).get(name) not in (None, "", [])])
+        numeric = bool(values) and all(_is_number(v) for v in values)
+        nums = [float(v) for v in values] if numeric else []
+        counts = {}
+        for v in values:
+            key = str(v)[:80]
+            counts[key] = counts.get(key, 0) + 1
+        top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+        out.append({
+            "name": name, "type": ftype, "required": bool(fld.get("required")),
+            "filled": filled, "empty": total - filled,
+            "fill_rate": round(filled * 100 / total, 1) if total else 0.0,
+            "unique": len(counts),
+            "numeric": numeric,
+            "mean": round(sum(nums) / len(nums), 2) if nums else None,
+            "min": min(nums) if nums else None,
+            "max": max(nums) if nums else None,
+            "options": [{"value": k, "count": c,
+                         "pct": round(c * 100 / max(filled, 1), 1)} for k, c in top],
+            "top10": [{"value": k, "count": c} for k, c in top],
+        })
+    return ok({"form": f.title, "entries": total, "fields": out,
+               "field_count": len(out)})
 
 
 # =====================================================================
@@ -893,8 +1116,8 @@ def announcement_update(request, pk):
 
 @endpoint()
 def announcement_pin(request, pk):
-    """置顶/取消置顶切换。"""
-    a = get_obj(DeptAnnouncement, pk, request.user)
+    """置顶/取消置顶切换（#36：仅发布者/管理员可写）。"""
+    a = get_obj(DeptAnnouncement, pk, request.user, write=True)
     a.pinned = not a.pinned
     a.save(update_fields=["pinned", "updated_at"])
     return ok({"id": a.id, "pinned": a.pinned})
@@ -937,14 +1160,41 @@ def announcement_delete(request, pk):
 # poll 投票（9）
 # =====================================================================
 
+# #82：选项数量夹在 2–20，避免一次投票塞进上万选项把 JSONField 与结果面板撑爆
+POLL_OPTION_MIN = 2
+POLL_OPTION_MAX = 20
+# #83：单投票选票上限；超过后拒绝继续投票，聚合也只扫前 N 张（防全量载入内存）
+POLL_BALLOT_MAX = 5000
+
+
+def _poll_tally(poll):
+    """#83：聚合各选项票数。
+
+    只取 ``choices`` 一列并按选票上限截断，不再把整场投票的 PollVote 实例
+    全部实例化到内存；返回 (tally, counted_ballots)。
+    """
+    tally = {opt: 0 for opt in poll.options or []}
+    counted = 0
+    qs = poll.votes.values_list("choices", flat=True).order_by("id")[:POLL_BALLOT_MAX]
+    for choices in qs:
+        counted += 1
+        for c in choices or []:
+            if c in tally:
+                tally[c] += 1
+    return tally, counted
+
 
 @endpoint()
 def poll_create(request):
-    """发起投票（options 至少 2 项）。"""
+    """发起投票（options 2–20 项）。"""
     options = p(request, "options") or []
-    if not isinstance(options, list) or len(options) < 2:
-        raise ValueError("options 需为至少 2 项的数组")
-    options = [str(o)[:60] for o in options]
+    if not isinstance(options, list) or len(options) < POLL_OPTION_MIN:
+        raise ValueError(f"options 需为至少 {POLL_OPTION_MIN} 项的数组")
+    if len(options) > POLL_OPTION_MAX:
+        raise ValueError(f"options 最多 {POLL_OPTION_MAX} 项")
+    options = [str(o)[:60] for o in options if str(o).strip()]
+    if len(options) < POLL_OPTION_MIN:
+        raise ValueError(f"有效选项不足 {POLL_OPTION_MIN} 项（空选项已忽略）")
     poll = Poll.objects.create(
         owner=request.user,
         question=req_str(request, "question")[:300],
@@ -957,12 +1207,14 @@ def poll_create(request):
 @endpoint(("GET",))
 def poll_list(request):
     """投票列表（含票数与状态）。"""
-    qs = scope_queryset(Poll.objects.all(), request.user).order_by("-created_at")
+    # #123：一次 annotate 聚合票数，替代循环内逐条 votes.count()
+    qs = (scope_queryset(Poll.objects.all(), request.user)
+          .select_related("owner").annotate(vc=Count("votes")).order_by("-created_at"))
     items = []
     for o in qs[:100]:
         items.append({"id": o.id, "question": o.question, "multiple": o.multiple,
                       "closed": o.closed, "deadline": str(o.deadline or ""),
-                      "votes": o.votes.count(),
+                      "votes": o.vc,
                       "owner": o.owner.username})
     return ok({"items": items, "count": qs.count()})
 
@@ -971,15 +1223,14 @@ def poll_list(request):
 def poll_detail(request, pk):
     """投票详情（含各选项票数）。"""
     poll = get_obj(Poll, pk, request.user)
-    tally = {opt: 0 for opt in poll.options}
-    for v in poll.votes.all():
-        for c in v.choices or []:
-            if c in tally:
-                tally[c] += 1
+    tally, counted = _poll_tally(poll)
+    total_ballots = poll.votes.count()
     return ok({"id": poll.id, "question": poll.question, "options": poll.options,
                "multiple": poll.multiple, "closed": poll.closed,
                "deadline": str(poll.deadline or ""),
-               "tally": tally, "total_ballots": poll.votes.count()})
+               "tally": tally, "total_ballots": total_ballots,
+               "counted_ballots": counted,
+               "truncated": total_ballots > counted})
 
 
 @endpoint()
@@ -992,6 +1243,9 @@ def poll_vote(request, pk):
         raise ValueError("已过投票截止日")
     if PollVote.objects.filter(poll=poll, voter_name=request.user.username).exists():
         raise ValueError("你已投过票")
+    # #83：单投票票数上限（超出后结果聚合会失真，直接拒绝新票）
+    if PollVote.objects.filter(poll=poll).count() >= POLL_BALLOT_MAX:
+        raise ValueError(f"该投票票数已达上限 {POLL_BALLOT_MAX}")
     choices = p(request, "choices") or []
     if not isinstance(choices, list) or not choices:
         raise ValueError("choices 需为非空数组")
@@ -1009,17 +1263,16 @@ def poll_vote(request, pk):
 def poll_results(request, pk):
     """投票结果（票数 + 占比，排序）。"""
     poll = get_obj(Poll, pk, request.user)
-    tally = {opt: 0 for opt in poll.options}
-    for v in poll.votes.all():
-        for c in v.choices or []:
-            if c in tally:
-                tally[c] += 1
+    tally, counted = _poll_tally(poll)
     total = sum(tally.values())
+    total_ballots = poll.votes.count()
     ranked = sorted([{"option": k, "votes": v,
                       "pct": round(v / total * 100, 1) if total else 0}
                      for k, v in tally.items()], key=lambda x: -x["votes"])
     return ok({"question": poll.question, "results": ranked,
-               "total_ballots": poll.votes.count(), "total_choices": total})
+               "total_ballots": total_ballots, "total_choices": total,
+               "counted_ballots": counted,
+               "truncated": total_ballots > counted})
 
 
 @endpoint()
@@ -1117,6 +1370,13 @@ def ticket_assign(request, pk):
     if t.status == "resolved":
         raise ValueError("已解决的工单无需指派")
     t.assignee_name = req_str(request, "assignee")[:60]
+    assignee_id = opt_num(request, "assignee_id")
+    if not assignee_id and t.assignee_name:
+        from accounts.models import User
+
+        u = User.objects.filter(Q(username=t.assignee_name) | Q(nickname=t.assignee_name)).first()
+        assignee_id = u.id if u else None
+    t.data = {**(t.data or {}), "assignee_id": int(assignee_id) if assignee_id else None}
     if t.status == "open":
         t.status = "in_progress"
     flow_event(t, "assign", request.user, f"指派给 {t.assignee_name}")
@@ -1246,6 +1506,9 @@ def ticket_auto_assign(request):
     base = scope_queryset(
         HelpTicket.objects.filter(status__in=("open", "in_progress")), request.user
     ).order_by("created_at")
+    # 批量改派是管理动作：可见范围不等于处置权
+    if not (request.user.is_superuser or request.user.is_staff):
+        raise ValueError("仅管理员可批量改派工单")
 
     # 各成员当前负载
     load = {}
@@ -1301,7 +1564,7 @@ def ticket_auto_assign(request):
     })
 
 
-KNOW_FAMILY_COUNT = 7 + 7 + 7 + 11 + 9 + 8 + 8 + 9 + 11 + 1  # = 78（F684/F685 工单 +2、F687 wiki +2、F692 纪要 +2，含 minutes_to_todo）
+KNOW_FAMILY_COUNT = 7 + 8 + 7 + 12 + 12 + 9 + 8 + 9 + 11  # = 83（S26：minutes +2 含 to-todo、wiki/policy/form 各 +1）
 
 
 @endpoint()
@@ -1331,3 +1594,82 @@ def minutes_to_todo(request, pk):
             status="open", data={"source": "minutes", "minutes_id": m.id, "events": []})
         created.append({"id": obj.id, "title": obj.title})
     return ok({"created": len(created), "items": created})
+
+
+# 行动项里的日期：2026-05-12 / 2026/5/12 / 5月12日（默认当年）
+_DATE_FULL_RE = re.compile(r"(20\d{2})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})")
+_DATE_MD_RE = re.compile(r"(?<!\d)(\d{1,2})\s*[月/.]\s*(\d{1,2})(?!\d)")
+
+
+def _action_item_date(text, today):
+    """S26-372：从行动项文本里抽出日期（无日期返回 None）。"""
+    hit = _DATE_FULL_RE.search(text or "")
+    if hit:
+        y, m, d = (int(x) for x in hit.groups())
+    else:
+        hit = _DATE_MD_RE.search(text or "")
+        if not hit:
+            return None
+        y, (m, d) = today.year, (int(hit.group(1)), int(hit.group(2)))
+    try:
+        return datetime(y, m, d).date()
+    except ValueError:
+        return None
+
+
+@endpoint()
+def minutes_action_items_to_calendar(request, pk):
+    """S26-372 行动项转日程：把带日期的行动项批量建 SuiteEvent（source=minutes）。
+
+    data.calendar_items 记录 line_no→event_id，重复调用只补新建项（幂等）。
+    """
+    m = get_obj(MeetingMinutes, pk, request.user, write=True)
+    converted = dict((m.data or {}).get("calendar_items") or {})
+    raw = p(request, "items")
+    if isinstance(raw, list) and raw:
+        seq = []
+        for idx, it in enumerate(raw):
+            text = str(it.get("text") if isinstance(it, dict) else it or "").strip()
+            line_no = int(it.get("line_no") or idx + 1) if isinstance(it, dict) else idx + 1
+            if text:
+                seq.append({"line_no": line_no, "text": text})
+    else:
+        stored = (m.data or {}).get("action_items") or {}
+        if isinstance(stored, dict):
+            seq = [{"line_no": int(it.get("line_no") or k), "text": str(it.get("text") or "")}
+                   for k, it in stored.items() if isinstance(it, dict)]
+        else:
+            seq = [{"line_no": i + 1, "text": s.strip()}
+                   for i, s in enumerate((m.content or "").splitlines()) if s.strip()]
+        seq = [it for it in seq if any(k in it["text"] for k in
+                                       ("行动", "TODO", "待办", "跟进", "负责", "@"))]
+    today = timezone.localdate()
+    created, skipped = [], 0
+    for it in seq:
+        text = str(it.get("text") or "").strip()[:200]
+        if not text:
+            continue
+        key = str(it.get("line_no"))
+        if key in converted:
+            skipped += 1
+            continue
+        day = _action_item_date(text, today)
+        if day is None:
+            skipped += 1
+            continue
+        start = timezone.make_aware(datetime(day.year, day.month, day.day, 9, 0))
+        e = SuiteEvent.objects.create(
+            owner=request.user, title=text, status="planned",
+            start_at=start, end_at=start + timedelta(hours=1), kind="event",
+            data={"source": "minutes", "minutes_id": m.id, "line_no": it.get("line_no")},
+        )
+        converted[key] = e.id
+        created.append({"id": e.id, "line_no": it.get("line_no"), "title": text,
+                        "date": str(day)})
+    if not created and skipped:
+        raise ValueError("没有可转换的带日期行动项（已转换或缺少日期）")
+    m.data = {**(m.data or {}), "calendar_items": converted}
+    flow_event(m, "to_calendar", request.user, f"转日程 {len(created)} 条")
+    m.save()
+    return ok({"minutes_id": m.id, "created": len(created), "skipped": skipped,
+               "event_ids": [c["id"] for c in created], "items": created})

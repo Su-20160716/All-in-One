@@ -13,9 +13,12 @@ from devtools.common import endpoint, ok, opt_bool, opt_num, opt_str, p, req, re
 def _num_list(request, key):
     values = req_list(request, key)
     try:
-        return [float(v) for v in values]
+        nums = [float(v) for v in values]
     except (TypeError, ValueError):
         raise ValueError(f"{key} 必须是数字数组")
+    if any(not math.isfinite(v) for v in nums):
+        raise ValueError(f"{key} 含 NaN/Inf")
+    return nums
 
 
 # =====================================================================
@@ -468,10 +471,12 @@ def cluster_kmeans(request):
     import random as _r
 
     pts = to_points(req_list(request, "points"))
-    k = int(req_num(request, "k", 3, minimum=2, maximum=max(2, len(pts) - 1), integer=True))
+    if len(pts) > 2000:
+        raise ValueError("聚类点数上限 2000")
+    k = int(req_num(request, "k", 3, minimum=2, maximum=min(20, max(2, len(pts) - 1)), integer=True))
     if len(pts) < k:
         raise ValueError("点数必须多于 k")
-    max_iter = int(opt_num(request, "iterations", 50, minimum=1, maximum=300) or 50)
+    max_iter = int(opt_num(request, "iterations", 50, minimum=1, maximum=100) or 50)
     seed = p(request, "seed")
     rng = _r.Random(seed) if seed is not None else _r.Random(42)
     centroids = rng.sample(pts, k)
@@ -553,6 +558,8 @@ def cluster_hierarchical(request):
 def cluster_dbscan(request):
     """DBSCAN：密度聚类 + 噪声点标记。"""
     pts = to_points(req_list(request, "points"))
+    if len(pts) > 2000:
+        raise ValueError("聚类点数上限 2000")
     eps = float(req_num(request, "eps", 1.0, minimum=1e-6))
     min_pts = int(opt_num(request, "min_pts", 2, minimum=2, maximum=len(pts) or 2) or 2)
     n = len(pts)

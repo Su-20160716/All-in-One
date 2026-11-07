@@ -54,6 +54,24 @@ def _dump_toml(obj, prefix=""):
     return "\n".join(out).strip() + "\n"
 
 
+def _parse_xml(text):
+    if len(text) > 1024 * 1024:
+        raise ValueError("XML 文本过大（上限 1MB）")
+    # 拒绝 DTD/实体声明，规避实体膨胀（billion laughs）类资源耗尽
+    if "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
+        raise ValueError("XML 不支持 DOCTYPE/实体声明")
+    root = ET.fromstring(text)
+    # 迭代测深度，避免递归在深层嵌套上先爆栈
+    depth, stack = 0, [(root, 1)]
+    while stack:
+        node, d = stack.pop()
+        depth = max(depth, d)
+        if depth > 32:
+            raise ValueError("XML 嵌套过深（上限 32 层）")
+        stack.extend((child, d + 1) for child in node)
+    return _xml_to_obj(root)
+
+
 def _xml_to_obj(elem):
     children = list(elem)
     if not children and not elem.attrib:
@@ -108,7 +126,7 @@ def _parse_data(text, fmt):
     if fmt == "toml":
         return _parse_toml(text)
     if fmt == "xml":
-        return _xml_to_obj(ET.fromstring(text))
+        return _parse_xml(text)
     raise ValueError("format 只能是 json/yaml/toml/xml")
 
 
@@ -158,7 +176,7 @@ def data_xml(request):
         return ok({"text": _obj_to_xml(json.loads(text))})
     if mode != "xml_to_json":
         raise ValueError("mode 只能是 xml_to_json / json_to_xml")
-    return ok({"text": json.dumps(_xml_to_obj(ET.fromstring(text)), ensure_ascii=False, indent=2)})
+    return ok({"text": json.dumps(_parse_xml(text), ensure_ascii=False, indent=2)})
 
 
 @endpoint()

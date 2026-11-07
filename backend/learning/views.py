@@ -9,11 +9,14 @@ import datetime as dt
 import random
 import re
 
+from django.db import transaction
+from django.db.models import Count, Q, Sum
 from django.shortcuts import get_object_or_404
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.validators import as_int, parse_bool
+from core.validators import as_date, as_int, parse_bool
 from learning.data import chinese as cn
 from learning.data import chemistry as ch
 from learning.data import curriculum as cu
@@ -566,6 +569,12 @@ class FormulaCalcView(APIView):
             result = cu.safe_eval_expr(f["expr"], values)
         except Exception as e:  # noqa
             return Response({"message": f"计算失败：{e}"}, status=400)
+        # 385：顺带落一条计算历史（失败不影响计算本身）
+        try:
+            from learning.views_study import record_formula_log
+            record_formula_log(request.user, key, values, round(result, 6))
+        except Exception:  # noqa: BLE001
+            pass
         return Response({"key": key, "name": f["name"], "formula": f["formula"], "inputs": values,
                          "result": round(result, 6)})
 
@@ -734,10 +743,15 @@ class PaperComposeView(APIView):
         pool = qb.filter_questions(stage, subject, qtype)
         if not pool:
             return Response({"message": "该条件下暂无题目"}, status=404)
-        picked = [random.choice(pool) for _ in range(min(count, len(pool)))] if count > len(pool) else random.sample(pool, count)
-        return Response({"stage": stage, "subject": subject, "count": len(picked),
-                         "paper": [qb.public_question(x) for x in picked],
-                         "answer_sheet": [{"id": x["id"], "answer": x["answer"], "analysis": x["analysis"]} for x in picked]})
+        # 题库不足时全量打乱，绝不有放回抽样（否则同一张试卷出现重复题）
+        picked = random.sample(pool, min(count, len(pool)))
+        payload = {"stage": stage, "subject": subject, "count": len(picked),
+                   "paper": [qb.public_question(x) for x in picked],
+                   "answer_sheet": [{"id": x["id"], "answer": x["answer"], "analysis": x["analysis"]} for x in picked]}
+        if count > len(pool):
+            payload["requested"] = count
+            payload["note"] = f"符合条件的题目仅 {len(pool)} 道，已按题库上限出题"
+        return Response(payload)
 
 
 class PaperGradeView(APIView):
@@ -745,11 +759,22 @@ class PaperGradeView(APIView):
 
     def post(self, request):
         answers = request.data.get("answers", [])
-        details, correct = [], 0
+        if not isinstance(answers, list):
+            return Response({"message": "answers 必须是数组"}, status=400)
+        if len(answers) > 200:
+            return Response({"message": "单次最多提交 200 道题"}, status=400)
+        index = {q["id"]: q for q in qb.QUESTIONS}
+        details, correct, seen = [], 0, set()
         for item in answers:
-            q = next((x for x in qb.QUESTIONS if x["id"] == item.get("id")), None)
-            if not q:
-                continue
+            if not isinstance(item, dict):
+                return Response({"message": "answers 的每一项必须是对象"}, status=400)
+            qid = item.get("id")
+            if qid in seen:
+                return Response({"message": f"题目重复提交：{qid}"}, status=400)
+            seen.add(qid)
+            q = index.get(qid)
+            if q is None:
+                return Response({"message": f"题目不存在：{qid}"}, status=400)
             ua = item.get("answer")
             if q["type"] in ("single",):
                 ok = str(ua) == str(q["answer"])
@@ -758,8 +783,8 @@ class PaperGradeView(APIView):
                      str(ua).lower() in ("false", "0", "no", "错", "错误") and q["answer"] is False
             else:
                 ok = _normalize(ua) == _normalize(q["answer"])
-            correct += ok
-            details.append({"id": q["id"], "correct": ok, "right_answer": q["answer"], "analysis": q["analysis"]})
+            correct += 1 if ok else 0
+            details.append({"id": q["id"], "correct": bool(ok), "right_answer": q["answer"], "analysis": q["analysis"]})
         total = len(details)
         return Response({"total": total, "correct": correct, "wrong": total - correct,
                          "score": round(correct / total * 100, 1) if total else 0, "details": details})
@@ -909,16 +934,44 @@ class GrammarDetailView(APIView):
 # 三、个人学习中心（附加：专注记录 / 学习计划）
 # ============================================================
 class StudySessionView(APIView):
-    """专注记录：列表/新增/删除，含汇总"""
+    """专注记录：列表/新增/删除，含汇总
+
+    #120：汇总原来把全部记录载入 Python 累加，列表也不分页。现在
+    total_minutes/count 由一次 aggregate 得出，by_subject 走 values+annotate 分组，
+    列表按 ?page/?page_size（默认 50，上限 200）分页；响应仍是
+    {total_minutes, count, by_subject, list}，只增量补了 page/page_size/has_more。
+    """
+
+    DEFAULT_PAGE_SIZE = 50
+    MAX_PAGE_SIZE = 200
 
     def get(self, request):
         qs = StudySession.objects.filter(owner=request.user)
-        total_minutes = sum(s.minutes for s in qs)
-        by_subject = {}
-        for s in qs:
-            by_subject[s.subject] = by_subject.get(s.subject, 0) + s.minutes
-        return Response({"total_minutes": total_minutes, "count": qs.count(),
-                         "by_subject": by_subject, "list": StudySessionSerializer(qs, many=True).data})
+        try:
+            page = as_int(request.query_params.get("page"), default=1, field="page", minimum=1)
+            size = as_int(
+                request.query_params.get("page_size"), default=self.DEFAULT_PAGE_SIZE,
+                field="page_size", minimum=1, maximum=self.MAX_PAGE_SIZE,
+            )
+        except ValidationError:
+            return Response({"message": f"page / page_size 必须是正整数，page_size 不超过 {self.MAX_PAGE_SIZE}"}, status=400)
+        totals = qs.aggregate(total_minutes=Sum("minutes"), count=Count("id"))
+        by_subject = {
+            row["subject"] or "": row["minutes"] or 0
+            for row in qs.values("subject").annotate(minutes=Sum("minutes")).order_by("subject")
+        }
+        start = (page - 1) * size
+        rows = qs[start:start + size]
+        count = totals["count"] or 0
+        return Response({
+            "total_minutes": totals["total_minutes"] or 0,
+            "count": count,
+            "by_subject": by_subject,
+            "list": StudySessionSerializer(rows, many=True).data,
+            "page": page,
+            "page_size": size,
+            "has_more": start + size < count,
+        })
 
     def post(self, request):
         d = request.data
@@ -1264,44 +1317,53 @@ class StudyReDrillView(APIView):
 
 
 class StudyWeaknessView(APIView):
-    """F541 弱项雷达：按学科 / 题型算订正率，给出补弱顺序。"""
+    """F541 弱项雷达：按学科 / 题型算订正率，给出补弱顺序。
+
+    #122：原来把全部错题记录载入 Python 再两次分组累加。改成
+    values(<维度>).annotate(Count, Count(filter=mastered)) 一次 DB 聚合，
+    响应结构不变（total 由分组行汇总得到，不再额外查一次）。
+    """
 
     def get(self, request):
-        recs = list(MistakeRecord.objects.filter(owner=request.user))
         sub_cn = _subject_cn_map()
         type_cn = dict(MistakeRecord.TYPES)
+        base = MistakeRecord.objects.filter(owner=request.user)
 
-        def agg(key_fn, label_fn=None):
-            buckets = {}
-            for m in recs:
-                k = key_fn(m) or ""
-                b = buckets.setdefault(k, {"total": 0, "mastered": 0})
-                b["total"] += 1
-                if m.mastered:
-                    b["mastered"] += 1
+        def agg(field, label_fn=None):
+            grouped = (
+                base.values(field)
+                .annotate(total=Count("id"), mastered=Count("id", filter=Q(mastered=True)))
+                .order_by()  # 清掉模型默认 ordering（-created_at），否则会混进 GROUP BY
+            )
             rows = []
-            for k, v in buckets.items():
-                rate = round(v["mastered"] / v["total"] * 100) if v["total"] else 0
+            for g in grouped:
+                k = g[field] or ""
+                total = g["total"] or 0
+                mastered = g["mastered"] or 0
+                rate = round(mastered / total * 100) if total else 0
                 rows.append({
                     "key": k or "unknown",
                     "name": (label_fn(k) if label_fn else k) or "未分类",
-                    "total": v["total"], "mastered": v["mastered"],
+                    "total": total, "mastered": mastered,
                     "fixed_rate": rate, "weak": rate < 60,
                 })
             rows.sort(key=lambda r: (r["fixed_rate"], -r["total"]))
             return rows
 
         # 口径统一：name 一律回中文名，另附 key 供前端做稳定映射（豆包 2026-09-30 反馈②）
-        by_subject = agg(lambda m: m.subject, lambda k: sub_cn.get(k, k))
-        by_type = agg(lambda m: m.question_type, lambda k: type_cn.get(k, k))
+        by_subject = agg("subject", lambda k: sub_cn.get(k, k))
+        by_type = agg("question_type", lambda k: type_cn.get(k, k))
         # order = 学科维度（与 by_subject.name 同口径），按订正率升序取前 5（反馈①）
         order = [r["name"] for r in by_subject if r["weak"]] or [r["name"] for r in by_subject]
-        return Response({"total": len(recs), "by_subject": by_subject, "by_type": by_type,
-                         "order": order[:5]})
+        return Response({"total": sum(r["total"] for r in by_subject), "by_subject": by_subject,
+                         "by_type": by_type, "order": order[:5]})
 
 
 class StudyBackupView(APIView):
     """F533 学习数据导出 / 导入（JSON），只覆盖学习区个人数据。"""
+
+    # #112：单次导入每个数组的条数上限（超出直接 400，避免 2MB 请求打爆 DB）
+    MAX_ITEMS = 1000
 
     def get(self, request):
         def dump(qs, fields):
@@ -1333,49 +1395,198 @@ class StudyBackupView(APIView):
         })
 
     def post(self, request):
-        """导入：只新增、不覆盖既有数据（进度按 owner+domain+target_key 去重更新）。"""
+        """导入：整体单事务；每个数组 ≤ 1000 条且逐元素校验类型。
+
+        #58：有业务唯一键的（进度/生词/计划）走 update_or_create / get_or_create，
+             重复导入不再产生重复数据。
+        #112：无唯一键但高写入量的（收藏/错题/专注）先按业务键与库内已有数据去重，
+             再 bulk_create 批量插入，2MB 请求也不会变成数万条单条 INSERT。
+        """
         d = request.data or {}
-        created = {"progress": 0, "bookmarks": 0, "wordbook": 0, "mistakes": 0, "sessions": 0, "plans": 0}
-        for it in d.get("progress", []):
-            LearningProgress.objects.update_or_create(
-                owner=request.user, domain=it.get("domain", "programming"),
-                target_key=it.get("target_key", ""),
-                defaults={"target_name": it.get("target_name", ""),
-                          "status": it.get("status", "learning"),
-                          "percent": as_int(it.get("percent") or 0, field="percent"), "note": it.get("note", "")})
-            created["progress"] += 1
-        for it in d.get("bookmarks", []):
-            SnippetBookmark.objects.create(owner=request.user, language=it.get("language", ""),
-                                           title=it.get("title", ""), code=it.get("code", ""),
-                                           note=it.get("note", ""))
-            created["bookmarks"] += 1
-        for it in d.get("wordbook", []):
-            WordbookItem.objects.get_or_create(
-                owner=request.user, word=it.get("word", ""),
-                defaults={"phonetic": it.get("phonetic", ""), "meaning": it.get("meaning", ""),
-                          "mastered": parse_bool(it.get("mastered"), field="mastered"), "source": it.get("source", "import")})
-            created["wordbook"] += 1
-        for it in d.get("mistakes", []):
-            MistakeRecord.objects.create(
-                owner=request.user, stage=it.get("stage", ""), subject=it.get("subject", ""),
-                question_type=it.get("question_type", "single"), difficulty=as_int(it.get("difficulty") or 1, field="difficulty"),
-                stem=it.get("stem", ""), answer=it.get("answer", ""), user_answer=it.get("user_answer", ""),
-                analysis=it.get("analysis", ""), mastered=parse_bool(it.get("mastered"), field="mastered"))
-            created["mistakes"] += 1
-        for it in d.get("sessions", []):
-            StudySession.objects.create(
-                owner=request.user, subject=it.get("subject", "通用"),
-                minutes=as_int(it.get("minutes") or 0, field="minutes"),
-                study_date=it.get("study_date") or dt.date.today(), note=it.get("note", ""))
-            created["sessions"] += 1
-        for it in d.get("plans", []):
-            StudyPlan.objects.create(
-                owner=request.user, title=it.get("title", "导入计划"), subject=it.get("subject", ""),
-                total=as_int(it.get("total") or 0, field="total"), days=as_int(it.get("days") or 7, field="days"),
-                plan=it.get("plan") or [], finished=as_int(it.get("finished") or 0, field="finished"),
-                start_date=it.get("start_date") or dt.date.today())
-            created["plans"] += 1
-        return Response({"ok": True, "created": created})
+        if not isinstance(d, dict):
+            return Response({"ok": False, "error": "导入数据必须是 JSON 对象"}, status=400)
+        keys = ("progress", "bookmarks", "wordbook", "mistakes", "sessions", "plans")
+
+        def _rows(key):
+            raw = d.get(key) or []
+            if not isinstance(raw, (list, tuple)):
+                raise ValueError(f"{key} 必须是数组")
+            if len(raw) > self.MAX_ITEMS:
+                raise ValueError(f"{key} 单次最多导入 {self.MAX_ITEMS} 条")
+            for i, it in enumerate(raw):
+                if not isinstance(it, dict):
+                    raise ValueError(f"{key}[{i}] 必须是对象")
+            return list(raw)
+
+        try:
+            payload = {k: _rows(k) for k in keys}
+        except ValueError as exc:
+            return Response({"ok": False, "error": str(exc)}, status=400)
+
+        created = {k: 0 for k in keys}
+        updated = {k: 0 for k in keys}
+        try:
+            with transaction.atomic():
+                self._import_all(request.user, payload, created, updated)
+        except ValidationError as exc:
+            detail = exc.detail
+            msg = detail[0] if isinstance(detail, (list, tuple)) and detail else "导入数据不合法"
+            return Response({"ok": False, "error": str(msg)}, status=400)
+        return Response({"ok": True, "created": created, "updated": updated})
+
+    def _import_all(self, user, payload, created, updated):
+        # 1) 进度：自然唯一键 (owner, domain, target_key)
+        for it in payload["progress"]:
+            _obj, is_new = LearningProgress.objects.update_or_create(
+                owner=user,
+                domain=str(it.get("domain") or "programming")[:20],
+                target_key=str(it.get("target_key") or "")[:64],
+                defaults={
+                    "target_name": str(it.get("target_name") or "")[:128],
+                    "status": str(it.get("status") or "learning")[:20],
+                    "percent": as_int(it.get("percent"), default=0, field="percent", minimum=0, maximum=100),
+                    "note": str(it.get("note") or "")[:255],
+                },
+            )
+            if is_new:
+                created["progress"] += 1
+            else:
+                updated["progress"] += 1
+
+        # 2) 生词本：自然唯一键 (owner, word)
+        for it in payload["wordbook"]:
+            word = str(it.get("word") or "").strip()[:64]
+            if not word:
+                continue
+            _obj, is_new = WordbookItem.objects.update_or_create(
+                owner=user, word=word,
+                defaults={
+                    "phonetic": str(it.get("phonetic") or "")[:48],
+                    "meaning": str(it.get("meaning") or "")[:255],
+                    "mastered": parse_bool(it.get("mastered"), field="mastered"),
+                    "source": str(it.get("source") or "import")[:20],
+                },
+            )
+            if is_new:
+                created["wordbook"] += 1
+            else:
+                updated["wordbook"] += 1
+
+        # 3) 代码收藏：无唯一约束，按 (language, title) 业务键去重后 bulk_create
+        existing = set(
+            SnippetBookmark.objects.filter(owner=user).values_list("language", "title")
+        )
+        rows, seen = [], set()
+        for it in payload["bookmarks"]:
+            key = (str(it.get("language") or "")[:20], str(it.get("title") or "")[:128])
+            if not key[1] or key in existing or key in seen:
+                continue
+            seen.add(key)
+            rows.append(SnippetBookmark(
+                owner=user, language=key[0], title=key[1],
+                code=str(it.get("code") or ""), note=str(it.get("note") or "")[:255],
+            ))
+        if rows:
+            SnippetBookmark.objects.bulk_create(rows, batch_size=500)
+        created["bookmarks"] = len(rows)
+
+        # 4) 错题：按 (stage, subject, stem) 业务键去重后 bulk_create
+        stages = {str(it.get("stage") or "")[:20] for it in payload["mistakes"]}
+        subjects = {str(it.get("subject") or "")[:20] for it in payload["mistakes"]}
+        existing = set(
+            MistakeRecord.objects.filter(
+                owner=user, stage__in=stages, subject__in=subjects
+            ).values_list("stage", "subject", "stem")
+        )
+        rows, seen = [], set()
+        for it in payload["mistakes"]:
+            key = (
+                str(it.get("stage") or "")[:20],
+                str(it.get("subject") or "")[:20],
+                str(it.get("stem") or ""),
+            )
+            if not key[2].strip() or key in existing or key in seen:
+                continue
+            seen.add(key)
+            rows.append(MistakeRecord(
+                owner=user, stage=key[0], subject=key[1],
+                question_type=str(it.get("question_type") or "single")[:20],
+                difficulty=as_int(it.get("difficulty"), default=1, field="difficulty", minimum=0),
+                stem=key[2],
+                answer=str(it.get("answer") or "")[:255],
+                user_answer=str(it.get("user_answer") or "")[:255],
+                analysis=str(it.get("analysis") or ""),
+                mastered=parse_bool(it.get("mastered"), field="mastered"),
+                redrill_attempts=as_int(it.get("redrill_attempts"), default=0,
+                                        field="redrill_attempts", minimum=0),
+                redrill_correct=as_int(it.get("redrill_correct"), default=0,
+                                       field="redrill_correct", minimum=0),
+            ))
+        if rows:
+            MistakeRecord.objects.bulk_create(rows, batch_size=500)
+        created["mistakes"] = len(rows)
+
+        # 5) 专注记录：按 (study_date, subject, minutes, note) 业务键去重后 bulk_create
+        sessions = []
+        for i, it in enumerate(payload["sessions"]):
+            try:
+                study_date = as_date(it.get("study_date"), field=f"sessions[{i}].study_date") \
+                    if it.get("study_date") else dt.date.today()
+            except ValidationError:
+                raise ValidationError(f"sessions[{i}].study_date 必须是日期（YYYY-MM-DD）")
+            sessions.append((
+                study_date,
+                str(it.get("subject") or "通用")[:40],
+                as_int(it.get("minutes"), default=0, field=f"sessions[{i}].minutes", minimum=0),
+                str(it.get("note") or "")[:255],
+            ))
+        keys = {(s[0], s[1], s[2], s[3]) for s in sessions}
+        existing = set()
+        if keys:
+            dates = {k[0] for k in keys}
+            existing = set(
+                StudySession.objects.filter(
+                    owner=user, study_date__gte=min(dates), study_date__lte=max(dates)
+                ).values_list("study_date", "subject", "minutes", "note")
+            )
+        rows, seen = [], set()
+        for key in keys:
+            if key in existing or key in seen:
+                continue
+            seen.add(key)
+            rows.append(StudySession(
+                owner=user, study_date=key[0], subject=key[1], minutes=key[2], note=key[3],
+            ))
+        if rows:
+            StudySession.objects.bulk_create(rows, batch_size=500)
+        created["sessions"] = len(rows)
+
+        # 6) 学习计划：按 (title, start_date) 业务键 get_or_create
+        for i, it in enumerate(payload["plans"]):
+            try:
+                start_date = as_date(it.get("start_date"), field=f"plans[{i}].start_date") \
+                    if it.get("start_date") else dt.date.today()
+            except ValidationError:
+                raise ValidationError(f"plans[{i}].start_date 必须是日期（YYYY-MM-DD）")
+            plan = it.get("plan") or []
+            if not isinstance(plan, list):
+                raise ValidationError(f"plans[{i}].plan 必须是数组")
+            _obj, is_new = StudyPlan.objects.get_or_create(
+                owner=user,
+                title=str(it.get("title") or "导入计划")[:128],
+                start_date=start_date,
+                defaults={
+                    "subject": str(it.get("subject") or "")[:40],
+                    "total": as_int(it.get("total"), default=0, field="total", minimum=0),
+                    "days": as_int(it.get("days"), default=7, field="days", minimum=1),
+                    "plan": plan,
+                    "finished": as_int(it.get("finished"), default=0, field="finished", minimum=0),
+                },
+            )
+            if is_new:
+                created["plans"] += 1
+            else:
+                updated["plans"] += 1
 
 
 class ProgRadarView(APIView):
@@ -1411,6 +1622,98 @@ class ProgRadarView(APIView):
         })
 
 
+class _LearningSearchIndex:
+    """#121：学习区全局搜索的进程内倒排索引（模块导入时构建一次）。
+
+    原实现对诗词/单词/成语/汉字/公式/题目/知识点七个题库逐条 lower + 子串匹配，
+    题库合计 2000+ 条，前端每按键一次就全量扫一遍。这里在构建期把每条记录的可搜索
+    字段拼成小写 haystack，并建立「字符 → 文档序号」倒排表；查询时取关键词各字符
+    倒排表中最短的一条做候选，只对候选做一次子串确认——命中集合与顺序同原逐条匹配
+    完全一致，但实际比较的条数通常只有几十条。
+
+    字段之间用 "\\x00" 分隔，保证匹配不会跨字段拼接处（与原「任一字段包含即命中」
+    语义一致）；同组内文档序号递增，因此结果天然保持内置题库原有顺序。
+    """
+
+    GROUPS = ("poems", "words", "idioms", "hanzi", "formulas", "questions", "points")
+    SEP = "\x00"
+
+    def __init__(self):
+        self.docs = {g: [] for g in self.GROUPS}       # 分组 -> [(payload, haystack)]
+        self.postings = {g: {} for g in self.GROUPS}   # 分组 -> {字符: [文档序号]}
+        self._build()
+
+    def _add(self, group, payload, *fields):
+        hay = self.SEP.join(str(f or "") for f in fields).lower()
+        idx = len(self.docs[group])
+        self.docs[group].append((payload, hay))
+        for ch in set(hay):
+            self.postings[group].setdefault(ch, []).append(idx)
+
+    def _build(self):
+        for p in cn.POEMS:
+            self._add(
+                "poems",
+                {"key": p.get("key"), "title": p.get("title"),
+                 "sub": f"{p.get('dynasty', '')} · {p.get('author', '')}"},
+                p.get("title"), p.get("text"), p.get("author"),
+            )
+        for w in en.WORDS:
+            self._add("words", {"word": w.get("word"), "sub": w.get("meaning")},
+                      w.get("word"), w.get("meaning"))
+        for i in cn.IDIOMS:
+            self._add("idioms", {"word": i.get("word"), "sub": i.get("meaning")},
+                      i.get("word"), i.get("meaning"))
+        for h in cn.HANZI:
+            self._add(
+                "hanzi",
+                {"char": h.get("char"), "sub": f"{h.get('pinyin', '')} · {h.get('meaning', '')}"},
+                h.get("char"), h.get("meaning"), h.get("pinyin"),
+            )
+        for f in cu.FORMULAS:
+            self._add("formulas", {"key": f.get("key"), "name": f.get("name"), "sub": f.get("formula")},
+                      f.get("name"), f.get("formula"))
+        for x in qb.QUESTIONS:
+            self._add(
+                "questions",
+                {"id": x.get("id"), "sub": x.get("stem"),
+                 "meta": f"{x.get('stage')} · {x.get('subject')} · {x.get('type')}"},
+                x.get("stem"), x.get("kp"),
+            )
+        for stage_subject, chapters in cu.KNOWLEDGE.items():
+            for blk in chapters:
+                ch_name = blk.get("chapter", "")
+                for pt_name in blk.get("points", []):
+                    self._add(
+                        "points",
+                        {"stage_subject": stage_subject, "chapter": ch_name, "name": pt_name},
+                        pt_name, ch_name,
+                    )
+
+    def search(self, query, limit):
+        low = str(query or "").strip().lower()
+        groups = {g: [] for g in self.GROUPS}
+        if not low:
+            return groups
+        chars = set(low)
+        for group in self.GROUPS:
+            postings = self.postings[group]
+            lists = [postings.get(ch) for ch in chars]
+            if any(lst is None for lst in lists):
+                continue  # 有关键词字符在该分组里根本不存在 → 必然无命中
+            bucket = groups[group]
+            for idx in min(lists, key=len):
+                if low in self.docs[group][idx][1]:
+                    bucket.append(self.docs[group][idx][0])
+                    if len(bucket) >= limit:
+                        break
+        return groups
+
+
+# 进程内只构建一次：学习区内置题库是静态数据，首次导入本模块时建索引
+_SEARCH_INDEX = _LearningSearchIndex()
+
+
 class LearningGlobalSearchView(APIView):
     """F542 学习区全局搜索：诗词 / 单词 / 成语 / 汉字 / 公式 / 题目 / 知识点，一个框。"""
 
@@ -1420,41 +1723,7 @@ class LearningGlobalSearchView(APIView):
         q = (request.query_params.get("q") or "").strip()
         if not q:
             return Response({"ok": False, "error": "请输入关键词 q"}, status=400)
-        low = q.lower()
-
-        def hit(*vals):
-            return any(low in str(v or "").lower() for v in vals)
-
-        poems = [{"key": p.get("key"), "title": p.get("title"),
-                  "sub": f"{p.get('dynasty', '')} · {p.get('author', '')}"}
-                 for p in cn.POEMS if hit(p.get("title"), p.get("text"), p.get("author"))][:self.LIMIT]
-        words = [{"word": w.get("word"), "sub": w.get("meaning")}
-                 for w in en.WORDS if hit(w.get("word"), w.get("meaning"))][:self.LIMIT]
-        idioms = [{"word": i.get("word"), "sub": i.get("meaning")}
-                  for i in cn.IDIOMS if hit(i.get("word"), i.get("meaning"))][:self.LIMIT]
-        hanzi = [{"char": h.get("char"), "sub": f"{h.get('pinyin', '')} · {h.get('meaning', '')}"}
-                 for h in cn.HANZI if hit(h.get("char"), h.get("meaning"), h.get("pinyin"))][:self.LIMIT]
-        formulas = [{"key": f.get("key"), "name": f.get("name"), "sub": f.get("formula")}
-                    for f in cu.FORMULAS if hit(f.get("name"), f.get("formula"))][:self.LIMIT]
-        questions = [{"id": x.get("id"), "sub": x.get("stem"),
-                      "meta": f"{x.get('stage')} · {x.get('subject')} · {x.get('type')}"}
-                     for x in qb.QUESTIONS if hit(x.get("stem"), x.get("kp"))][:self.LIMIT]
-        points = []
-        for stage_subject, chapters in cu.KNOWLEDGE.items():
-            for blk in chapters:
-                ch_name = blk.get("chapter", "")
-                for pt_name in blk.get("points", []):
-                    if hit(pt_name, ch_name):
-                        points.append({"stage_subject": stage_subject, "chapter": ch_name, "name": pt_name})
-                    if len(points) >= self.LIMIT:
-                        break
-                if len(points) >= self.LIMIT:
-                    break
-            if len(points) >= self.LIMIT:
-                break
-
-        groups = {"poems": poems, "words": words, "idioms": idioms, "hanzi": hanzi,
-                  "formulas": formulas, "questions": questions, "points": points}
+        groups = _SEARCH_INDEX.search(q, self.LIMIT)
         return Response({"q": q, "total": sum(len(v) for v in groups.values()), "groups": groups})
 
 

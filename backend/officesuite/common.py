@@ -32,16 +32,41 @@ def _approver_policy(user, obj) -> bool:
         return True
     if obj.owner_id == getattr(user, "id", None):
         return True
-    return _name_hit(user, (obj.data or {}).get("approver", ""))
+    data = obj.data or {}
+    approver_id = data.get("approver_id")
+    if approver_id:
+        return int(approver_id) == getattr(user, "id", None)
+    # 历史单据只有展示名，兼容旧数据；新单据一律写入 approver_id
+    return _name_hit(user, data.get("approver", ""))
 
 
 def _assignee_policy(user, obj) -> bool:
-    """工单：owner + 被指派人（assignee_name 展示名）+ 管理员。"""
+    """工单：owner + 被指派人（assignee_id 优先，兼容旧 assignee_name）+ 管理员。"""
     if _is_admin(user):
         return True
     if obj.owner_id == getattr(user, "id", None):
         return True
+    data = getattr(obj, "data", None) or {}
+    assignee_id = data.get("assignee_id")
+    if assignee_id:
+        return int(assignee_id) == getattr(user, "id", None)
     return _name_hit(user, getattr(obj, "assignee_name", ""))
+
+
+def _supervisor_policy(user, obj) -> bool:
+    """主管类审批：管理员 / 本人 / 具备部门及以上数据范围的可见者。
+
+    审批接口会额外禁止本人自批，这里放开的是「有管理范围的同事」。
+    """
+    if _is_admin(user):
+        return True
+    if obj.owner_id == getattr(user, "id", None):
+        return True
+    try:
+        scope = user.data_scope() if callable(getattr(user, "data_scope", None)) else getattr(user, "data_scope", "self")
+    except Exception:
+        scope = "self"
+    return scope in ("dept", "dept_and_sub", "all") and is_visible(obj, user)
 
 
 # S2-B1：按模型细化写策略（模型名 -> callable(user, obj) -> bool）。
@@ -55,6 +80,8 @@ WRITE_POLICIES = {
     "TravelApply": _approver_policy,
     "Contract": _approver_policy,
     "HelpTicket": _assignee_policy,
+    "VehicleBooking": _supervisor_policy,
+    "TimesheetEntry": _supervisor_policy,
 }
 
 
@@ -110,12 +137,20 @@ def get_obj(model, pk, user, write=False):
     return o
 
 
+EVENT_KEEP = 1000  # #66：审批/用印等长流程的事件保留上限（原为 100 条）
+
+
 def flow_event(obj, action, user, note=""):
-    """把流转动作写进 data.events（轻量审计，不额外建表）。"""
+    """把流转动作写进 data.events（轻量审计，不额外建表）。
+
+    #66：上限由 100 提到 1000，避免审批与用印审计被静默丢弃；仍是尾部截断，
+    防止 JSON 字段无限膨胀。事件结构（action/by/note/at）与存储位置不变，
+    旧数据照旧按 `data["events"]` 列表读取，无需迁移。
+    """
     events = list((obj.data or {}).get("events", []))
     events.append({"action": action, "by": getattr(user, "username", "system"),
                    "note": note, "at": timezone.now().isoformat()})
-    obj.data = {**(obj.data or {}), "events": events[-100:]}
+    obj.data = {**(obj.data or {}), "events": events[-EVENT_KEEP:]}
 
 
 def parse_dt(s, field="时间", allow_empty=False, default=None):

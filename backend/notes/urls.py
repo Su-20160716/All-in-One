@@ -12,6 +12,7 @@ urlpatterns = [
     path("trash/", views.NoteTrashView.as_view(), name="note-trash"),
     path("tree/", views.NoteTreeView.as_view(), name="note-tree"),
     path("tags/", views.NoteTagListView.as_view(), name="note-tags"),
+    path("tags/merge/", views.NoteTagMergeView.as_view(), name="note-tag-merge"),
     path("tags/<int:pk>/", views.NoteTagDetailView.as_view(), name="note-tag-detail"),
     path("recent/", views.NoteRecentView.as_view(), name="note-recent"),
     path("stats/", views.NoteStatsView.as_view(), name="note-stats"),
@@ -35,6 +36,14 @@ urlpatterns = [
     path("folders/<int:pk>/", views.NoteFolderDetailView.as_view(), name="note-folder-detail"),
     path("templates/", views.NoteTemplateListView.as_view(), name="note-templates"),
     path("from-template/", views.NoteFromTemplateView.as_view(), name="note-from-template"),
+    # ---- F236–F260 笔记协作 / 素材 / 模板 / 推荐 ----
+    path("quick/", views.NoteQuickView.as_view(), name="note-quick"),
+    path("pin-order/", views.NotePinOrderView.as_view(), name="note-pin-order"),
+    path("preview/", views.NotePreviewByTitleView.as_view(), name="note-preview-by-title"),
+    path("attachable-files/", views.NoteFilePickerView.as_view(), name="note-attachable-files"),
+    path("templates/mine/", views.NoteTemplateMineView.as_view(), name="note-my-templates"),
+    path("templates/mine/<int:pk>/", views.NoteTemplateMineDetailView.as_view(), name="note-my-template-detail"),
+    path("templates/mine/<int:pk>/create/", views.NoteFromMyTemplateView.as_view(), name="note-from-my-template"),
     path("export-all/", views.NoteExportAllView.as_view(), name="note-export-all"),
     path("public/<str:token>/", views.NoteShareView.as_view(), name="note-public"),
     # 双链
@@ -58,5 +67,12 @@ urlpatterns = [
     path("<int:pk>/outline-lines/", views.NoteOutlineLinesView.as_view(), name="note-outline-lines"),
     path("<int:pk>/pin/", views.NotePinView.as_view(), name="note-pin"),
     path("<int:pk>/reading/", views.NoteReadingView.as_view(), name="note-reading"),
+    # ---- F236–F260 单篇笔记扩展 ----
+    path("<int:pk>/comments/", views.NoteCommentView.as_view(), name="note-comments"),
+    path("<int:pk>/comments/<int:cid>/", views.NoteCommentDetailView.as_view(), name="note-comment-detail"),
+    path("<int:pk>/attachments/", views.NoteAttachmentView.as_view(), name="note-attachments"),
+    path("<int:pk>/attachments/<int:aid>/", views.NoteAttachmentDetailView.as_view(), name="note-attachment-detail"),
+    path("<int:pk>/related/", views.NoteRelatedView.as_view(), name="note-related"),
+    path("<int:pk>/preview/", views.NotePreviewView.as_view(), name="note-preview"),
     path("wordbook/", views.NoteWordbookView.as_view(), name="note-wordbook"),
 ]

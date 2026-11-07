@@ -22,11 +22,14 @@ SUBSYSTEMS = [
         "workspaces/", "workspaces/create/", "workspaces/<int:pk>/",
         "workspaces/<int:pk>/update/", "workspaces/<int:pk>/delete/",
         "workspaces/<int:pk>/star/", "workspaces/<int:pk>/clone/",
+        "workspaces/templates/", "workspaces/from-template/", "workspaces/import/",
+        "workspaces/<int:pk>/replace/",
     ]],
     ["file", "代码文件", "增删改查、树、批量", [
         "files/", "files/create/", "files/<int:pk>/", "files/<int:pk>/update/",
         "files/<int:pk>/delete/", "files/<int:pk>/favorite/",
         "files/<int:pk>/entry/", "files/<int:pk>/move/", "files/batch/", "files/tree/",
+        "files/<int:pk>/copy/", "files/orphans/",
     ]],
     ["version", "版本历史", "快照 / diff / 回滚", [
         "files/<int:pk>/versions/", "files/<int:pk>/versions/create/",
@@ -36,20 +39,22 @@ SUBSYSTEMS = [
     ["run", "安全执行", "执行 / REPL / 历史 / 统计 / 参数预设", [
         "run/", "run/repl/", "run/history/", "run/<int:pk>/", "run/<int:pk>/delete/",
         "run/clear/", "run/stats/", "run/presets/", "run/presets/<int:pk>/",
-        "runs/compare/",
+        "runs/compare/", "run/export/", "run/presets/export/", "run/presets/import/",
     ]],
     ["judge", "判题", "多用例判定与排行榜", [
         "judge/", "judge/history/", "judge/<int:pk>/", "leaderboard/",
+        "judge/testcases/", "judge/testcases/<int:pk>/",
     ]],
     ["snippet", "代码片段库", "可复用片段、标签与收藏夹分组", [
         "snippets/", "snippets/create/", "snippets/<int:pk>/", "snippets/<int:pk>/update/",
         "snippets/<int:pk>/delete/", "snippets/<int:pk>/copy/",
         "snippets/tags/", "snippets/from-file/", "snippets/folders/",
+        "snippets/export/", "snippets/import/", "snippets/<int:pk>/to-file/",
     ]],
     ["analyze", "静态分析", "指标 / 大纲 / 复杂度 / 质量 / 统计卡", [
         "analyze/", "outline/", "complexity/", "quality/", "flow/",
         "similarity/", "secret-scan/", "refactor-hints/", "code-stats/",
-        "dependencies/check/",
+        "dependencies/check/", "dependencies/graph/", "format/",
     ]],
     ["ai", "智能辅助", "生成 / 解释 / 找bug / 重构 / 测试 / 评审", [
         "ai/status/", "ai/generate/", "ai/transform/", "ai/error-explain/",
@@ -66,6 +71,7 @@ SUBSYSTEMS = [
     ]],
     ["share", "分享", "只读/可运行分享链接", [
         "shares/", "shares/create/", "shares/<str:token>/", "shares/<str:token>/revoke/",
+        "shares/<str:token>/visits/", "share/code/<str:token>/clone/",
     ]],
     ["export", "导出", "zip 打包与单文件下载", [
         "export/zip/", "export/file/<int:pk>/",
@@ -111,17 +117,23 @@ VIEWS = {
     "workspaces/<int:pk>/delete/": C.workspace_delete,
     "workspaces/<int:pk>/star/": C.workspace_star,
     "workspaces/<int:pk>/clone/": C.workspace_clone,
+    "workspaces/templates/": C.workspace_templates,
+    "workspaces/from-template/": C.workspace_from_template,
+    "workspaces/import/": C.workspace_import,
+    "workspaces/<int:pk>/replace/": C.workspace_replace,
     # file
     "files/": C.file_list,
     "files/create/": C.file_create,
     "files/batch/": C.file_batch,
     "files/tree/": C.file_tree,
+    "files/orphans/": C.files_orphans,
     "files/<int:pk>/": C.file_detail,
     "files/<int:pk>/update/": C.file_update,
     "files/<int:pk>/delete/": C.file_delete,
     "files/<int:pk>/favorite/": C.file_favorite,
     "files/<int:pk>/entry/": C.file_entry,
     "files/<int:pk>/move/": C.file_move,
+    "files/<int:pk>/copy/": C.file_copy,
     # version
     "files/<int:pk>/versions/": C.version_list,
     "files/<int:pk>/versions/create/": C.version_create,
@@ -135,13 +147,18 @@ VIEWS = {
     "run/clear/": C.run_clear,
     "run/stats/": C.run_stats,
     "run/presets/": C.run_presets,
+    "run/presets/export/": C.run_presets_export,
+    "run/presets/import/": C.run_presets_import,
     "run/presets/<int:pk>/": C.run_preset_detail,
+    "run/export/": C.run_export,
     "runs/compare/": C.run_compare,
     "run/<int:pk>/": C.run_detail,
     "run/<int:pk>/delete/": C.run_delete,
     # judge
     "judge/": C.judge,
     "judge/history/": C.judge_history,
+    "judge/testcases/": C.judge_case_sets,
+    "judge/testcases/<int:pk>/": C.judge_case_set_detail,
     "judge/<int:pk>/": C.judge_detail,
     "leaderboard/": C.leaderboard,
     # snippet
@@ -150,10 +167,13 @@ VIEWS = {
     "snippets/tags/": C.snippet_tags,
     "snippets/folders/": C.snippet_folders,
     "snippets/from-file/": C.snippet_from_file,
+    "snippets/export/": C.snippet_export,
+    "snippets/import/": C.snippet_import,
     "snippets/<int:pk>/": C.snippet_detail,
     "snippets/<int:pk>/update/": C.snippet_update,
     "snippets/<int:pk>/delete/": C.snippet_delete,
     "snippets/<int:pk>/copy/": C.snippet_copy,
+    "snippets/<int:pk>/to-file/": C.snippet_to_file,
     # analyze
     "analyze/": A.analyze,
     "outline/": A.outline,
@@ -165,6 +185,8 @@ VIEWS = {
     "refactor-hints/": A.refactor_hints,
     "code-stats/": A.code_stats,
     "dependencies/check/": C.dependency_check,
+    "dependencies/graph/": C.dependency_graph,
+    "format/": C.format_code,
     # ai
     "ai/status/": A.ai_status,
     "ai/generate/": A.ai_generate,
@@ -195,6 +217,8 @@ VIEWS = {
     "shares/create/": A.share_create,
     "shares/<str:token>/": A.share_update,
     "shares/<str:token>/revoke/": A.share_revoke,
+    "shares/<str:token>/visits/": A.share_visits,
+    "share/code/<str:token>/clone/": A.share_clone,
     # export
     "export/zip/": C.export_zip,
     "export/file/<int:pk>/": C.export_file,
@@ -243,7 +267,9 @@ public_urlpatterns = [
 # 契约断言：接口数量变化时必须显式确认
 # v6 基础 75 + L5 竞技教学 18 + L3 AI 补齐 6 + L4 工程化 6 = 105
 # F669–F680 能力扩展 +5：snippets/folders · run/presets(2) · code-stats · daily/reminder
-_EXPECTED = 112
+# 第三轮 260–280 能力扩展 +18：模板/导入/替换、复制/孤儿、格式化/依赖图、
+# run 导出与预设迁移、用例集(2)、片段导出/导入/转文件、分享访问与克隆
+_EXPECTED = 130
 assert len(urlpatterns) == _EXPECTED, (
     f"code 接口数应为 {_EXPECTED}，实际 {len(urlpatterns)}"
 )

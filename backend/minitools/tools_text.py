@@ -208,6 +208,8 @@ def repeat_generator(request):
     text = req_str(request)
     count = int(req_num(request, "count", minimum=1, maximum=10000, integer=True))
     sep = opt_str(request, "separator", "")
+    if len(text) * count > 5 * 1024 * 1024:
+        raise ValueError("生成结果过大（上限 5MB），请减少文本长度或重复次数")
     return ok({"result": sep.join([text] * count)})
 
 

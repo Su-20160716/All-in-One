@@ -181,6 +181,8 @@ class ShareLink(models.Model):
     password = models.CharField(max_length=128, blank=True, verbose_name="访问密码(hash)")
     expire_at = models.DateTimeField(null=True, blank=True, verbose_name="过期时间")
     max_downloads = models.IntegerField(null=True, blank=True, verbose_name="下载次数上限")
+    # S24-223：文件夹分享允许访客把文件投递进来（收集链接）
+    allow_upload = models.BooleanField(default=False, verbose_name="允许访客上传")
     download_count = models.IntegerField(default=0, verbose_name="下载次数")
     view_count = models.IntegerField(default=0, verbose_name="浏览次数")
     is_revoked = models.BooleanField(default=False, verbose_name="已失效")
