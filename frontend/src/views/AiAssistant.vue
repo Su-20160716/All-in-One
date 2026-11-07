@@ -16,11 +16,11 @@
       <code class="ml-1 rounded bg-ink-50 px-1">$env:LLM_MODEL="gpt-4o-mini"</code>
     </div>
 
-    <div class="flex gap-1 border-b border-ink-100 text-[13px]">
-      <button v-for="t in tabs" :key="t.v"
+    <div class="flex gap-1 border-b border-ink-100 text-[13px]" role="tablist" aria-label="AI 助手分区">
+      <button v-for="(t, i) in tabs" :key="t.v" role="tab" :aria-selected="tab === t.v" :tabindex="tab === t.v ? 0 : -1"
               class="border-b-2 px-4 py-2"
               :class="tab === t.v ? 'border-brand-500 font-medium text-brand-600' : 'border-transparent text-ink-500'"
-              @click="tab = t.v">{{ t.label }}</button>
+              @click="tab = t.v" @keydown="onTabKey($event, i)">{{ t.label }}</button>
     </div>
 
     <!-- 对话 -->
@@ -69,7 +69,7 @@
             <input v-model="useKnowledge" type="checkbox" /> 检索笔记
           </label>
           <input v-model="draft" class="input flex-1" placeholder="输入问题，Enter 发送"
-                 @keyup.enter="ask()" />
+                 @keydown.enter="onDraftEnter" />
           <button class="btn-primary px-3 py-1.5" :disabled="sending" @click="ask()">发送</button>
         </div>
       </div>
@@ -232,6 +232,20 @@ const tabs = [
 const tab = ref('chat')
 const status = ref({})
 
+// #192 tab 语义：左右方向键 / Home / End 切换
+function onTabKey(e, i) {
+  const n = tabs.length
+  let next = -1
+  if (e.key === 'ArrowRight') next = (i + 1) % n
+  else if (e.key === 'ArrowLeft') next = (i - 1 + n) % n
+  else if (e.key === 'Home') next = 0
+  else if (e.key === 'End') next = n - 1
+  if (next < 0) return
+  e.preventDefault()
+  tab.value = tabs[next].v
+  e.currentTarget?.parentElement?.querySelectorAll('[role="tab"]')[next]?.focus()
+}
+
 // 对话
 const conversations = ref([])
 const conversationId = ref(null)
@@ -264,15 +278,24 @@ async function newConversation() {
   conversationId.value = null
   messages.value = []
 }
+// #156 竞态守卫：快速点两个会话时，只允许「仍选中」的那次响应写入消息
+let convSeq = 0
 async function openConversation(id) {
-  const r = await aiApi.conversation(id)
+  const seq = ++convSeq
   conversationId.value = id
+  const r = await aiApi.conversation(id)
+  if (seq !== convSeq || conversationId.value !== id) return
   messages.value = (r.messages || []).map((m) => ({ role: m.role, content: m.content, references: m.references }))
 }
 async function removeConversation(id) {
   await aiApi.deleteConversation(id)
   if (conversationId.value === id) newConversation()
   loadConversations()
+}
+// #151 输入法组合态（选词回车）不提交
+function onDraftEnter(e) {
+  if (e.isComposing || e.keyCode === 229) return
+  ask()
 }
 async function ask(preset) {
   const fromDraft = !preset

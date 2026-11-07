@@ -22,11 +22,14 @@ import { onBeforeUnmount, onMounted } from 'vue'
 export function useAutosave(saveFn, opts = {}) {
   const delay = opts.delay ?? 800
   let timer = null
+  let retryTimer = null
   let pending = false
+  let dirty = false
   let inFlight = null
 
   function schedule() {
     pending = true
+    dirty = true
     clearTimeout(timer)
     timer = setTimeout(() => {
       flush()
@@ -45,9 +48,15 @@ export function useAutosave(saveFn, opts = {}) {
     inFlight = (async () => {
       try {
         await saveFn()
+        dirty = false
       } catch (e) {
-        // 保底失败不抛出：调用方多为事件处理器，抛了也没人接
+        // 失败后恢复待存标记并退避重试，不能把这次输入静默吞掉
+        pending = true
         console.error('autosave failed', e)
+        clearTimeout(retryTimer)
+        retryTimer = setTimeout(() => {
+          if (pending) flush()
+        }, 3000)
       } finally {
         inFlight = null
       }
@@ -57,11 +66,13 @@ export function useAutosave(saveFn, opts = {}) {
 
   function cancel() {
     clearTimeout(timer)
+    clearTimeout(retryTimer)
     pending = false
   }
 
   function flushBeacon() {
-    if (!pending) return
+    // 页面隐藏时即使保存请求正在飞行也要兜底：该请求可能随页面一起被取消
+    if (!dirty && !inFlight) return
     pending = false
     try {
       if (opts.beacon) opts.beacon()
@@ -84,6 +95,8 @@ export function useAutosave(saveFn, opts = {}) {
   onBeforeUnmount(() => {
     window.removeEventListener('beforeunload', onUnload)
     document.removeEventListener('visibilitychange', onVisibility)
+    clearTimeout(timer)
+    clearTimeout(retryTimer)
   })
 
   return { schedule, flush, cancel }

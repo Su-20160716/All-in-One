@@ -3,12 +3,16 @@ import { coreApi } from '../api'
 import { connectWs } from '../utils/ws'
 
 let toastTimer = null
+let notifTimer = null
+let notificationsInflight = null
+let unreadInflight = null
 
 export const useAppStore = defineStore('app', {
   state: () => ({
     notifications: [],
     unreadCount: 0,
     wsConnected: false,
+    wsOpenedOnce: false,
     toast: { show: false, text: '', type: 'info' },
     chatListeners: [],
     fileListeners: [],
@@ -44,16 +48,29 @@ export const useAppStore = defineStore('app', {
       }
     },
     async fetchNotifications() {
-      try {
-        const r = await coreApi.notifications({ page_size: 20 })
-        this.notifications = r.list || []
-      } catch (e) { /* ignore */ }
+      if (notificationsInflight) return notificationsInflight
+      notificationsInflight = coreApi.notifications({ page_size: 20 })
+        .then((r) => { this.notifications = r.list || [] })
+        .catch(() => {})
+        .finally(() => { notificationsInflight = null })
+      return notificationsInflight
     },
     async fetchUnread() {
-      try {
-        const r = await coreApi.unreadCount()
-        this.unreadCount = r.count
-      } catch (e) { /* ignore */ }
+      if (unreadInflight) return unreadInflight
+      unreadInflight = coreApi.unreadCount()
+        .then((r) => { this.unreadCount = r.count })
+        .catch(() => {})
+        .finally(() => { unreadInflight = null })
+      return unreadInflight
+    },
+    // #197 通知刷新合并：WS 突发多条通知 / 页面首屏同时拉取时只发一轮请求
+    refreshNotificationsSoon(delay = 200) {
+      clearTimeout(notifTimer)
+      notifTimer = setTimeout(() => {
+        notifTimer = null
+        this.fetchUnread()
+        this.fetchNotifications()
+      }, delay)
     },
     async markAllRead() {
       try {
@@ -72,12 +89,21 @@ export const useAppStore = defineStore('app', {
     initWs() {
       if (this.wsConnected) return
       connectWs({
-        onOpen: () => (this.wsConnected = true),
+        onOpen: () => {
+          const reconnected = this.wsOpenedOnce
+          this.wsConnected = true
+          this.wsOpenedOnce = true
+          // 断线期间的消息/未读不会补发，重连后主动增量同步
+          if (reconnected) {
+            this.refreshNotificationsSoon(0)
+            this.chatListeners.forEach((cb) => cb('ws.reconnected', {}))
+          }
+        },
         onClose: () => (this.wsConnected = false),
         onMessage: (msg) => {
           if (msg.type === 'notification') {
-            this.fetchUnread()
-            this.fetchNotifications()
+            // 合并刷新：短时间多条通知只触发一轮 HTTP
+            this.refreshNotificationsSoon()
             this.toastMsg(msg.data?.title || '新通知', 'info')
           } else if ([
             'chat.message', 'message.recalled', 'message.pinned', 'message.edited',

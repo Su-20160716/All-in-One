@@ -5,9 +5,11 @@
         <h2 class="text-[16px] font-semibold text-ink-800">题库 · 智能组卷 · 错题本</h2>
         <p class="text-[12px] text-ink-400">按学段学科抽题、在线作答服务端判分，错题自动沉淀到错题本</p>
       </div>
-      <div class="flex gap-1 rounded-control bg-ink-100 p-1">
-        <button v-for="t in tabs" :key="t.v" class="rounded-control px-3 py-1 text-[12px]"
-          :class="tab === t.v ? 'bg-white text-brand-700 shadow-sm' : 'text-ink-500'" @click="switchTab(t.v)">{{ t.label }}</button>
+      <div class="flex gap-1 rounded-control bg-ink-100 p-1" role="tablist" aria-label="题库分区">
+        <button v-for="(t, i) in tabs" :key="t.v" role="tab" :aria-selected="tab === t.v" :tabindex="tab === t.v ? 0 : -1"
+          class="rounded-control px-3 py-1 text-[12px]"
+          :class="tab === t.v ? 'bg-white text-brand-700 shadow-sm' : 'text-ink-500'"
+          @click="switchTab(t.v)" @keydown="onTabKey($event, i)">{{ t.label }}</button>
       </div>
     </div>
 
@@ -18,6 +20,27 @@
         拿不准时点「查看答案解析」展开答案与分析；确实做错的点「收进错题本」，系统会连答案、解析一起存，
         不会存成只有题干的空壳。
       </p>
+      <!-- 382 题库统计条 -->
+      <div v-if="qstats" class="card p-3">
+        <div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[12px]">
+          <span class="text-[13px] font-semibold text-ink-800">题库共 {{ qstats.total }} 题</span>
+          <span class="text-ink-200">|</span>
+          <span class="text-ink-400">学科</span>
+          <span v-for="s in qstats.by_subject" :key="'s' + s.key" class="tag">{{ s.name }} {{ s.count }}</span>
+          <span class="text-ink-200">|</span>
+          <span class="text-ink-400">题型</span>
+          <span v-for="t in qstats.by_type" :key="'t' + t.key" class="tag">{{ t.name }} {{ t.count }}</span>
+          <span class="text-ink-200">|</span>
+          <span class="text-ink-400">难度</span>
+          <span v-for="d in qstats.by_difficulty" :key="'d' + d.difficulty" class="tag">★{{ d.difficulty }} {{ d.count }}</span>
+          <span class="ml-auto text-ink-400">知识点覆盖 {{ qstats.kp?.coverage || 0 }}%（{{ qstats.kp?.covered || 0 }}/{{ qstats.kp?.total || 0 }}）</span>
+        </div>
+      </div>
+      <div v-else class="card flex flex-wrap items-center gap-2 p-3 text-[12px] text-ink-400">
+        <span>题库统计暂不可用：重试一次即可，不影响下面的抽题与组卷。</span>
+        <button class="btn-outline ml-auto px-2 py-0.5 text-[11px]" @click="loadStats">刷新统计</button>
+      </div>
+
       <div class="card flex flex-wrap items-end gap-3 p-4">
         <label class="block"><span class="mb-1 block text-[12px] text-ink-500">学段</span>
           <select v-model="f.stage" class="input w-32"><option value="">全部</option><option value="primary">小学</option><option value="junior">初中</option><option value="senior">高中</option></select>
@@ -79,7 +102,7 @@
         <label class="block"><span class="mb-1 block text-[12px] text-ink-500">题量</span>
           <select v-model.number="p.count" class="input w-28"><option :value="5">5 题</option><option :value="8">8 题</option><option :value="10">10 题</option></select>
         </label>
-        <button class="btn-primary" @click="compose">智能组卷</button>
+        <button class="btn-primary" :disabled="submitting" @click="compose">{{ submitting ? '组卷中…' : '智能组卷' }}</button>
         <button v-if="paper.length" class="btn-outline" @click="gradePaper">交卷判分</button>
         <button v-if="paper.length" class="btn-outline" @click="archivePaper">存档这张卷</button>
         <button v-if="paper.length" class="btn-ghost" @click="showAnswer = !showAnswer">{{ showAnswer ? '隐藏答案卷' : '查看答案卷' }}</button>
@@ -160,7 +183,8 @@
           <h3 class="text-[14px] font-semibold text-ink-800">{{ s.name }}</h3>
           <span class="tag-brand">{{ s.count }} 题</span>
           <span class="text-[11px] text-ink-400">{{ s.created_at }}</span>
-          <button class="btn-outline ml-auto px-2 py-0.5 text-[11px]" @click="openSet(s)">{{ openSetId === s.id ? '收起' : '打开练习' }}</button>
+          <button class="btn-outline ml-auto px-2 py-0.5 text-[11px]" @click="shareSet(s)">分享</button>
+          <button class="btn-outline px-2 py-0.5 text-[11px]" @click="openSet(s)">{{ openSetId === s.id ? '收起' : '打开练习' }}</button>
           <button class="btn-danger px-2 py-0.5 text-[11px]" @click="removeSet(s.id)">删除</button>
         </div>
         <div v-if="openSetId === s.id" class="mt-3 space-y-2">
@@ -239,10 +263,24 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { learnApi } from '../../../api'
 import { useAppStore } from '../../../stores/app'
+import { formatDate } from '../../../utils/format'
 
 const app = useAppStore()
 const tabs = [{ v: 'bank', label: '题库浏览' }, { v: 'paper', label: '智能组卷' }, { v: 'sets', label: '我的题单' }, { v: 'mistake', label: '错题本' }]
 const tab = ref('bank')
+// #192 tab 语义：左右方向键 / Home / End 切换
+function onTabKey(e, i) {
+  const n = tabs.length
+  let next = -1
+  if (e.key === 'ArrowRight') next = (i + 1) % n
+  else if (e.key === 'ArrowLeft') next = (i - 1 + n) % n
+  else if (e.key === 'Home') next = 0
+  else if (e.key === 'End') next = n - 1
+  if (next < 0) return
+  e.preventDefault()
+  switchTab(tabs[next].v)
+  e.currentTarget?.parentElement?.querySelectorAll('[role="tab"]')[next]?.focus()
+}
 const subjectOpts = [
   { v: 'chinese', label: '语文' }, { v: 'math', label: '数学' }, { v: 'english', label: '英语' },
   { v: 'physics', label: '物理' }, { v: 'chemistry', label: '化学' }, { v: 'biology', label: '生物' },
@@ -312,6 +350,33 @@ async function removeSet(id) {
   await learnApi.delQuestionSet(id)
   await loadSets()
 }
+// 381 题单分享：生成 token 并把免登录只读链接复制到剪贴板
+async function shareSet(s) {
+  try {
+    const r = await learnApi.shareQuestionSet(s.id)
+    const url = location.origin + (r.path || `/api/learning/share/questionset/${r.share_token}/`)
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(url)
+      else window.prompt('复制题单分享链接：', url)
+      app.toastMsg('分享链接已复制，可发给同学免登录查看', 'success')
+    } catch {
+      window.prompt('复制题单分享链接：', url)
+    }
+  } catch (e) {
+    app.toastMsg('分享失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+
+// 382 题库统计条
+const qstats = ref(null)
+async function loadStats() {
+  try {
+    qstats.value = await learnApi.questionStats()
+  } catch (e) {
+    qstats.value = null
+    app.toastMsg('题库统计加载失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
 async function addToSet(sid, qid) {
   const detail = await learnApi.questionSet(sid)
   const ids = detail.question_ids.includes(qid) ? detail.question_ids : [...detail.question_ids, qid]
@@ -329,13 +394,23 @@ const ans = reactive({})
 const graded = reactive({})
 const paperResult = ref(null)
 const showAnswer = ref(false)
+// #157 提交中标志：双击不会生成两份试卷
+const submitting = ref(false)
 async function compose() {
+  if (submitting.value) return
+  submitting.value = true
   Object.keys(ans).forEach((k) => delete ans[k])
   Object.keys(graded).forEach((k) => delete graded[k])
   paperResult.value = null; showAnswer.value = false; currentArchiveId.value = null
-  const data = await learnApi.paperCompose(p)
-  paper.value = data.paper
-  answerSheet.value = data.answer_sheet
+  try {
+    const data = await learnApi.paperCompose(p)
+    paper.value = data.paper
+    answerSheet.value = data.answer_sheet
+  } catch (e) {
+    app.toastMsg(e?.message || '组卷失败', 'error')
+  } finally {
+    submitting.value = false
+  }
 }
 async function gradePaper() {
   const answers = paper.value.map((q) => ({ id: q.id, answer: ans[q.id] ?? '' }))
@@ -354,7 +429,8 @@ const currentArchiveId = ref(null)
 async function loadArchives() { archives.value = (await learnApi.paperArchives()).list }
 async function archivePaper() {
   const subjCN = subjectOpts.find((s) => s.v === p.subject)?.label || p.subject
-  const title = `${p.stage}·${subjCN} ${paper.value.length}题 ${new Date().toLocaleDateString()}`
+  // #199 标题日期统一走 formatDate，避免随系统语言漂移
+  const title = `${p.stage}·${subjCN} ${paper.value.length}题 ${formatDate(new Date())}`
   const r = await learnApi.savePaperArchive({
     title, stage: p.stage, subject: p.subject, total: paper.value.length,
     payload: { paper: paper.value, answer_sheet: answerSheet.value },
@@ -415,6 +491,7 @@ async function switchTab(v) {
 }
 
 onMounted(async () => {
+  loadStats()
   await loadBank()
   await loadFavIds()
   await loadSets()

@@ -14,7 +14,7 @@
  * 语言与配置变化时整实例重建（CodeMirror 6 的推荐做法）。
  */
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { EditorState, Compartment } from '@codemirror/state'
+import { EditorState, Compartment, EditorSelection } from '@codemirror/state'
 import {
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter,
   drawSelection, dropCursor, rectangularSelection, crosshairCursor,
@@ -171,16 +171,38 @@ function specialCharsHighlighter() {
   })
 }
 
-/** 复制当前行（多光标批量操作） */
+/**
+ * 复制当前行（多光标批量操作）
+ *
+ * #144 dir 必须真正生效：
+ *  - up   : 在当前行上方插入「原文 + 换行」，光标随原文下移
+ *  - down : 在当前行末尾插入「换行 + 原文」，光标随复制出的那一行移动
+ */
 function copyLine(v, dir) {
   const { state } = v
-  const changes = []
+  const down = dir === 'down'
+  const specs = []
+  const ranges = []
+  const seen = new Set()
   for (const range of state.selection.ranges) {
     const line = state.doc.lineAt(range.head)
-    changes.push({ from: line.from, to: line.from, insert: line.text + '\n' })
+    // 同一行上的多个光标只复制一次，否则位置相同的插入会冲突
+    const key = line.from
+    if (seen.has(key)) continue
+    seen.add(key)
+    specs.push(down
+      ? { from: line.to, to: line.to, insert: '\n' + line.text }
+      : { from: line.from, to: line.from, insert: line.text + '\n' })
+    ranges.push(range)
   }
-  if (!changes.length) return false
-  v.dispatch({ changes })
+  if (!specs.length) return false
+  const changes = state.changes(specs)
+  // assoc=1：向下复制时光标跟到新行，向上复制时随原文一起下移
+  const selection = EditorSelection.create(
+    ranges.map((r) => EditorSelection.range(changes.mapPos(r.anchor, 1), changes.mapPos(r.head, 1))),
+    state.selection.mainIndex,
+  )
+  v.dispatch({ changes, selection })
   return true
 }
 

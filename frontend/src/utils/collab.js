@@ -87,10 +87,11 @@ export class NoteCollab {
           for (const upd of data.updates || []) {
             try { Y.applyUpdate(this.doc, b64ToU8(upd), 'remote') } catch (e) { /* 跳过坏包 */ }
           }
-          // 服务端无任何状态 → 用本地内容作为初始种子
+          // 服务端无任何状态 → 用本地内容作为初始种子；种下后立即广播权威快照
           if (!data.snapshot && !(data.updates || []).length && this.opts.initialContent) {
             this.ytext.insert(0, this.opts.initialContent)
             this.seeded = true
+            this.dirty = true
           }
         } finally {
           this._suppress = false
@@ -99,6 +100,7 @@ export class NoteCollab {
         this.opts.onText && this.opts.onText(this.ytext.toString())
         this.opts.onPresence && this.opts.onPresence(this.participants)
         this._emitStatus('ready')
+        if (this.seeded) this.compact()
         break
       }
       case 'yjs.update':
@@ -125,9 +127,11 @@ export class NoteCollab {
   }
 
   _send(payload) {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+    // 统一走 AuthedSocket：未连上/断线窗口由它排队，连上后按序 flush
+    if (!this.socket) return
+    try {
       this.socket.send(JSON.stringify(payload))
-    }
+    } catch (e) { /* ignore */ }
   }
 
   /** 把编辑器的最新文本映射为 CRDT 操作（前后缀 diff，保留并发语义） */
@@ -179,12 +183,12 @@ export class NoteCollab {
 
   destroy() {
     if (this.destroyed) return
-    this.destroyed = true
     clearInterval(this.snapshotTimer)
-    // F8：先 compact 再关连接——close() 会丢弃尚未 flush 的帧，
-    // 最后一次增量/快照会丢。等 bufferedAmount 归零（上限 300ms）后再 close/destroy。
+    // 先 compact 再标记销毁（compact 内部会因 destroyed 直接返回）
     const hadPending = this.dirty
     if (hadPending) this.compact()
+    this.destroyed = true
+    // F8：close() 会丢弃尚未 flush 的帧，等 bufferedAmount 归零（上限 300ms）后再 close/destroy。
     const sock = this.socket
     const finish = () => {
       try { sock && sock.close() } catch (e) { /* ignore */ }

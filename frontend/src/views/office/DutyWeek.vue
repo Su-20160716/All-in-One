@@ -64,7 +64,14 @@
               <option value="" disabled>请选择排班表</option>
               <option v-for="s in schedules" :key="s.id" :value="s.id">{{ s.name }}</option>
             </select>
-            <button class="btn-outline" @click="createSchedule">＋ 新表</button>
+            <button class="btn-outline" @click="toggleNewSchedule">＋ 新表</button>
+          </div>
+          <!-- #170 内联命名：回车即创建，替代 window.prompt -->
+          <div v-if="showNewSchedule" class="mt-2 flex gap-2">
+            <input ref="newScheduleInput" v-model="newScheduleName" class="input flex-1" placeholder="新排班表名称，回车创建"
+              @keydown.enter="onNewScheduleEnter" />
+            <button class="btn-primary" @click="createSchedule">创建</button>
+            <button class="btn-ghost" @click="showNewSchedule = false">取消</button>
           </div>
         </label>
         <label class="block"><span class="mb-1 block text-[12px] text-ink-500">日期</span>
@@ -99,7 +106,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { nextTick, onMounted, reactive, ref } from 'vue'
 import { suiteApi } from '../../api'
 import { useAppStore } from '../../stores/app'
 import Modal from '../../components/Modal.vue'
@@ -155,14 +162,35 @@ function openAdd() {
   addForm.shift_name = '白班'
   showAdd.value = true
 }
+// #170 新排班表命名：弹窗内联输入，回车创建（原来用 window.prompt）
+const showNewSchedule = ref(false)
+const newScheduleName = ref('')
+const newScheduleInput = ref(null)
+async function toggleNewSchedule() {
+  showNewSchedule.value = !showNewSchedule.value
+  if (showNewSchedule.value) {
+    newScheduleName.value = ''
+    await nextTick()
+    newScheduleInput.value?.focus()
+  }
+}
+function onNewScheduleEnter(e) {
+  if (e.isComposing || e.keyCode === 229) return
+  createSchedule()
+}
 async function createSchedule() {
-  const name = window.prompt('新排班表名称：', '默认排班')
-  if (!name) return
-  const start = isoDate(new Date())
-  const r = await suiteApi.call(D, 'duty/schedule/create/', 'POST', { name, start_date: start })
-  app.toastMsg('排班表已创建', 'success')
-  await loadSchedules()
-  addForm.schedule_id = r.data.id
+  const name = newScheduleName.value.trim()
+  if (!name) return app.toastMsg('请填写排班表名称', 'warn')
+  if (name.length > 30) return app.toastMsg('名称最多 30 个字符', 'warn')
+  try {
+    const start = isoDate(new Date())
+    const r = await suiteApi.call(D, 'duty/schedule/create/', 'POST', { name, start_date: start })
+    app.toastMsg('排班表已创建', 'success')
+    showNewSchedule.value = false
+    newScheduleName.value = ''
+    await loadSchedules()
+    addForm.schedule_id = r.data.id
+  } catch (e) { app.toastMsg(e?.message || '创建排班表失败', 'error') }
 }
 async function doAdd() {
   if (!addForm.schedule_id) return app.toastMsg('请选择排班表', 'warn')

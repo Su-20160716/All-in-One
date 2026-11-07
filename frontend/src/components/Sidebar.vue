@@ -1,5 +1,8 @@
 <template>
-  <aside class="flex w-56 shrink-0 flex-col bg-ink-900 text-ink-300">
+  <aside
+    class="fixed inset-y-0 left-0 z-50 flex w-56 shrink-0 flex-col bg-ink-900 text-ink-300 transition-transform duration-200 md:static md:translate-x-0"
+    :class="mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'"
+  >
     <div class="flex items-center gap-2 px-4 py-4">
       <div class="grid h-8 w-8 place-items-center rounded-control bg-brand-600 text-[15px] font-bold text-white">A</div>
       <div>
@@ -31,11 +34,14 @@ import { useRoute } from 'vue-router'
 import { useAppStore } from '../stores/app'
 import { useUserStore } from '../stores/user'
 import { imApi } from '../api'
+import { PLATFORM_MENU_READY } from '../api/domains'
 
 const route = useRoute()
 const app = useAppStore()
 const user = useUserStore()
 const imUnread = ref(0)
+defineProps({ mobileOpen: { type: Boolean, default: false } })
+const emit = defineEmits(['close'])
 
 const menus = computed(() => [
   { to: '/dashboard', label: '工作台', icon: '▦' },
@@ -45,6 +51,9 @@ const menus = computed(() => [
   { to: '/notes', label: '笔记知识库', icon: '📝' },
   { to: '/projects', label: '项目看板', icon: '📋' },
   { to: '/projects/my-tasks', label: '我的任务', icon: '✅' },
+  { to: '/biz', label: '业务中心', icon: '🧩' },
+  // 平台能力域：流程/表单/报表/规则/合同/管道/计费/市场（8 个已交付工作台）
+  ...PLATFORM_MENU_READY,
   { to: '/im', label: '站内消息', icon: '💬', badge: imUnread.value || '' },
   { to: '/announcements', label: '系统公告', icon: '📣' },
   { to: '/tools', label: '小工具', icon: '🧰' },
@@ -54,6 +63,10 @@ const menus = computed(() => [
   { to: '/toolbox/office', label: '办公套件', icon: '🏢' },
   { to: '/office/helpdesk', label: '工单台', icon: '🎫' },
   { to: '/office/duty', label: '值班排班', icon: '🗓' },
+  { to: '/office/todo', label: '待办四象限', icon: '🧭' },
+  { to: '/office/meeting', label: '会议室预订', icon: '🪑' },
+  { to: '/office/calendar', label: '日程周视图', icon: '📅' },
+  { to: '/office/approvals', label: '审批中心', icon: '✍️' },
   { to: '/learning', label: '学习中心', icon: '🎓' },
   { to: '/learning/programming', label: '编程语言广场', icon: '💻' },
   { to: '/learning/drill', label: '编程刷题训练', icon: '🧩' },
@@ -65,8 +78,10 @@ const menus = computed(() => [
   { to: '/learning/study', label: '我的学习', icon: '⏱' },
   { to: '/code', label: '代码工坊', icon: '🧑‍💻' },
   { to: '/code/learn', label: '代码学习中心', icon: '🏅' },
+  { to: '/developer', label: '开发者门户', icon: '🔌' },
   // F9：管理入口仅管理员可见（与 router meta.requiresAdmin 双保险）
   { to: '/admin/stats', label: '统计面板', icon: '📊', adminOnly: true },
+  { to: '/admin/health', label: '系统健康', icon: '🩺', adminOnly: true },
   { to: '/admin/users', label: '用户管理', icon: '👥', adminOnly: true },
   { to: '/admin/roles', label: '角色权限', icon: '🔐', adminOnly: true },
   { to: '/admin/org', label: '组织架构', icon: '🏢', adminOnly: true },
@@ -80,7 +95,6 @@ const menus = computed(() => [
 const visibleMenus = computed(() => menus.value.filter((m) => !m.adminOnly || user.isAdmin))
 
 function isActive(to) {
-  if (to === '/admin/stats') return route.path.startsWith('/admin')
   if (to === '/projects') return route.path.startsWith('/projects') && !route.path.includes('my-tasks')
   return route.path.startsWith(to)
 }
@@ -113,6 +127,7 @@ onMounted(() => {
 watch(
   () => route.path,
   (to, from) => {
+    emit('close')
     if (String(to).startsWith('/im') || String(from || '').startsWith('/im')) scheduleUnreadRefresh()
   }
 )

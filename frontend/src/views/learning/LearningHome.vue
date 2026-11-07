@@ -193,11 +193,15 @@ const goal = ref('ai')
 const recommends = ref([])
 const recReason = ref('')
 
+// #153 竞态守卫：语言切换与全局搜索各自带自增 seq，只有最后一次请求能写入
+let dailySeq = 0
 async function loadDaily() {
+  const seq = ++dailySeq
   dailyResult.value = null
   pick.value = null
   textAnswer.value = ''
   const data = await learnApi.dailyChallenge(dailyLang.value ? { lang: dailyLang.value } : {})
+  if (seq !== dailySeq) return
   daily.value = data
 }
 async function gradeDaily() {
@@ -232,10 +236,15 @@ const searchGroups = computed(() => {
 })
 function itemMain(it) { return it.sub || it.title || it.name || it.word || it.text || '' }
 function itemSub(it) { return it.meta || it.phonetic || it.meaning || it.author || '' }
+let searchSeq = 0
 async function doGlobalSearch() {
   const q = gq.value.trim()
   if (!q) return app.toastMsg('请输入关键词', 'warn')
-  gresult.value = await learnApi.globalSearch(q)
+  const seq = ++searchSeq
+  const data = await learnApi.globalSearch(q)
+  // 先发后到的旧结果直接丢弃，避免覆盖新关键词的结果
+  if (seq !== searchSeq) return
+  gresult.value = data
 }
 
 onMounted(async () => {

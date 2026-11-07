@@ -18,13 +18,16 @@
 
       <!-- 需要密码 -->
       <div v-else-if="needPassword" class="card p-6">
-        <h3 class="mb-3 text-[14px] font-semibold text-ink-800">🔒 此链接需要访问密码</h3>
+        <h3 class="mb-3 text-[14px] font-semibold text-ink-800">🔒 {{ t('files.needPassword', '此链接需要访问密码') }}</h3>
         <div class="flex gap-2">
+          <!-- #191 密码框通过 aria-describedby 关联错误提示，读屏可播报 -->
           <input v-model="password" class="input flex-1" type="password" placeholder="请输入访问密码"
+                 :aria-invalid="!!pwError"
+                 :aria-describedby="pwError ? 'share-pw-error' : undefined"
                  @keyup.enter="submitPassword" />
           <button class="btn-primary" @click="submitPassword">验证</button>
         </div>
-        <p v-if="pwError" class="mt-2 text-[12px] text-rose-500">{{ pwError }}</p>
+        <p v-if="pwError" id="share-pw-error" role="alert" class="mt-2 text-[12px] text-rose-500">{{ pwError }}</p>
       </div>
 
       <!-- 内容 -->
@@ -44,7 +47,7 @@
 
         <!-- 图片预览 -->
         <div v-if="data.type === 'file' && data.kind === 'image' && mediaUrl" class="flex justify-center bg-ink-50 p-4">
-          <img :src="mediaUrl" class="max-h-[60vh] rounded-control object-contain" />
+          <img :src="mediaUrl" :alt="`${data.name} 预览图`" class="max-h-[60vh] rounded-control object-contain" />
         </div>
 
         <!-- 文本预览 -->
@@ -66,8 +69,23 @@
           <div v-if="!data.files.length" class="py-8 text-center text-[12px] text-ink-400">文件夹为空</div>
         </div>
 
+        <!-- S24-223 收集上传：开启 allow_upload 的文件夹分享可直接投递文件 -->
+        <div v-if="data.type === 'folder' && data.allow_upload" class="border-t border-ink-100 p-4">
+          <div class="mb-2 text-[13px] font-medium text-ink-700">上传文件到该文件夹</div>
+          <div class="flex flex-wrap items-center gap-2 text-[12px]">
+            <input ref="uploadInput" type="file" class="hidden" @change="pickUpload" />
+            <button class="btn-outline px-2" @click="uploadInput?.click()">选择文件</button>
+            <span class="text-ink-400">单个文件 ≤ {{ data.upload_max_mb || 50 }}MB，同名自动加序号</span>
+            <button class="btn-primary px-3" :disabled="uploading || !uploadFile" @click="doUpload">
+              {{ uploading ? '上传中…' : '上传' }}
+            </button>
+          </div>
+          <div v-if="uploadFile" class="mt-1 truncate text-[12px] text-ink-500">已选择：{{ uploadFile.name }}</div>
+          <div v-if="uploadMsg" class="mt-1 text-[12px]" :class="uploadError ? 'text-rose-600' : 'text-emerald-600'">{{ uploadMsg }}</div>
+        </div>
+
         <!-- 其他类型：仅提示 -->
-        <div v-else class="p-8 text-center text-[12px] text-ink-400">该类型不支持在线预览，请下载后查看</div>
+        <div v-else-if="data.type === 'file'" class="p-8 text-center text-[12px] text-ink-400">该类型不支持在线预览，请下载后查看</div>
       </div>
     </div>
   </div>
@@ -87,9 +105,11 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import axios from 'axios'
+import { onBeforeUnmount } from 'vue'
 import { API_URL, apiUrl } from '../../api/base'
 import { saveBlob } from '../../utils/download'
 import { formatSize } from '../../utils/format'
+import { t } from '../../i18n'
 
 const route = useRoute()
 const token = computed(() => route.params.token)
@@ -101,6 +121,49 @@ const needPassword = ref(false)
 const password = ref('')
 const pwError = ref('')
 const mediaUrl = ref('')
+let mediaObjectUrl = ''
+// S24-223 收集上传
+const uploadInput = ref(null)
+const uploadFile = ref(null)
+const uploading = ref(false)
+const uploadMsg = ref('')
+const uploadError = ref(false)
+function pickUpload(e) {
+  uploadFile.value = (e.target.files || [])[0] || null
+  e.target.value = ''
+  uploadMsg.value = ''
+}
+async function doUpload() {
+  if (!uploadFile.value || uploading.value) return
+  uploading.value = true
+  uploadMsg.value = ''
+  try {
+    const fd = new FormData()
+    fd.append('file', uploadFile.value)
+    const r = await axios.post(`${API_URL}/share/${token.value}/upload/`, fd, { headers: pwHeaders() })
+    uploadMsg.value = r.data?.message || '上传成功'
+    uploadError.value = false
+    uploadFile.value = null
+    await load()
+  } catch (e) {
+    uploadError.value = true
+    uploadMsg.value = e?.response?.data?.message || t('files.uploadFailed', '上传失败')
+  } finally {
+    uploading.value = false
+  }
+}
+function releaseMedia() {
+  if (mediaObjectUrl) {
+    URL.revokeObjectURL(mediaObjectUrl)
+    mediaObjectUrl = ''
+  }
+  mediaUrl.value = ''
+}
+onBeforeUnmount(releaseMedia)
+// 密码放请求头而不是查询串，避免进入浏览器历史、Referer 与访问日志
+function pwHeaders() {
+  return password.value ? { 'X-Share-Password': password.value } : {}
+}
 
 onMounted(load)
 
@@ -108,19 +171,20 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const r = await axios.get(`${API_URL}/share/${token.value}/`, {
-      params: password.value ? { password: password.value } : {},
-    })
+    const r = await axios.get(`${API_URL}/share/${token.value}/`, { headers: pwHeaders() })
     if (r.status === 200) {
       data.value = r.data
       needPassword.value = false
-      // 图片走受 token 保护的预览接口（/api/share/<token>/raw/<id>/），
-      // 带密码的分享还要把 password 透传过去，否则图片会 401
+      // 图片必须带密码读取：先拉 blob 再转 objectURL，URL 中不再出现密码
       if (r.data.type === 'file' && r.data.kind === 'image' && r.data.url) {
-        const base = apiUrl(r.data.url)
-        mediaUrl.value = password.value
-          ? `${base}${base.includes('?') ? '&' : '?'}password=${encodeURIComponent(password.value)}`
-          : base
+        try {
+          const br = await axios.get(apiUrl(r.data.url), { responseType: 'blob', headers: pwHeaders() })
+          releaseMedia()
+          mediaObjectUrl = URL.createObjectURL(br.data)
+          mediaUrl.value = mediaObjectUrl
+        } catch (e) {
+          mediaUrl.value = ''
+        }
       }
     }
   } catch (e) {
@@ -129,16 +193,16 @@ async function load() {
     if (status === 401 && !password.value) {
       needPassword.value = true
     } else if (status === 401) {
-      pwError.value = msg || '密码错误'
+      pwError.value = msg || t('files.passwordWrong', '密码错误')
       needPassword.value = true
     } else if (status === 404) {
-      error.value = '链接不存在或已被撤销'
+      error.value = t('files.linkMissing', '链接不存在或已被撤销')
     } else if (status === 410) {
-      error.value = msg || '链接已过期'
+      error.value = msg || t('files.linkExpired', '链接已过期')
     } else if (status === 429) {
-      error.value = msg || '下载次数已达上限'
+      error.value = msg || t('files.downloadLimit', '下载次数已达上限')
     } else {
-      error.value = msg || '加载失败'
+      error.value = msg || t('common.loadFailed', '加载失败')
     }
   } finally {
     loading.value = false
@@ -148,7 +212,7 @@ async function load() {
 async function submitPassword() {
   pwError.value = ''
   if (!password.value) {
-    pwError.value = '请输入密码'
+    pwError.value = t('files.passwordSubmit', '请输入密码')
     return
   }
   await load()
@@ -158,7 +222,7 @@ async function downloadFile(id, name) {
   try {
     const r = await axios.get(`${API_URL}/share/${token.value}/download/${id}/`, {
       responseType: 'blob',
-      params: password.value ? { password: password.value } : {},
+      headers: pwHeaders(),
     })
     saveBlob(r.data, name || 'download')
   } catch (e) {
@@ -172,7 +236,7 @@ async function downloadFile(id, name) {
         /* ignore */
       }
     }
-    alert(hint || '下载失败')
+    alert(hint || t('files.downloadFailed', '下载失败'))
   }
 }
 

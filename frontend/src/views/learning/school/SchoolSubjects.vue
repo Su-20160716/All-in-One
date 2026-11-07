@@ -188,6 +188,27 @@
           <button class="btn-primary" @click="calc">代入计算</button>
           <div v-if="calcResult !== null" class="rounded-control bg-brand-50 p-3 text-[14px] font-semibold text-brand-700">计算结果：{{ calcResult }}</div>
         </div>
+
+        <!-- 385 最近计算历史，点一条回填参数 -->
+        <div class="mt-3 rounded-control border border-ink-100 p-3">
+          <div class="mb-1 flex flex-wrap items-center gap-2 text-[12px]">
+            <span class="font-semibold text-ink-700">最近计算历史</span>
+            <span class="text-[11px] text-ink-400">点一条回填参数与结果，换个数再算一次</span>
+            <button class="btn-outline ml-auto px-2 py-0.5 text-[11px]" @click="loadCalcHistory">刷新</button>
+          </div>
+          <div v-if="calcHistory.length" class="space-y-1">
+            <button v-for="h in calcHistory" :key="h.id" class="flex w-full flex-wrap items-center gap-2 rounded-control px-2 py-1 text-left text-[11px] hover:bg-ink-50"
+              :class="h.key === activeFormula?.key ? 'bg-ink-50' : ''" @click="fillFromHistory(h)">
+              <span class="tag-brand">{{ h.name }}</span>
+              <span class="font-mono text-ink-500">{{ fmtVals(h.values) }}</span>
+              <span class="text-ink-700">＝ {{ h.result }}</span>
+              <span class="ml-auto text-ink-400">{{ h.created_at }}</span>
+            </button>
+          </div>
+          <div v-else class="text-[11px] leading-5 text-ink-400">
+            还没有计算记录：在上面填好参数点一次「代入计算」，这里会留下最近 10 条，点一下就能把参数回填到输入框。
+          </div>
+        </div>
       </div>
     </div>
 
@@ -388,8 +409,35 @@ const usageObj = computed(() => {
   return u && typeof u === 'object' && !Array.isArray(u) ? u : null
 })
 async function calc() {
-  const data = await learnApi.formulaCalc(activeFormula.value.key, calcVals.value)
-  calcResult.value = data.result
+  try {
+    const data = await learnApi.formulaCalc(activeFormula.value.key, calcVals.value)
+    calcResult.value = data.result
+    await loadCalcHistory()
+  } catch (e) {
+    app.toastMsg('计算失败：' + (e?.message || '请检查输入是否为数字'), 'error')
+  }
+}
+// 385 公式计算历史（后端计算时已自动记录，这里只负责读取与回填）
+const calcHistory = ref([])
+async function loadCalcHistory() {
+  try {
+    calcHistory.value = (await learnApi.calcHistory(10)).list || []
+  } catch {
+    calcHistory.value = []
+  }
+}
+function fmtVals(vals) {
+  if (!vals || typeof vals !== 'object') return ''
+  return Object.entries(vals).map(([k, v]) => `${k}=${v}`).join(', ')
+}
+function fillFromHistory(h) {
+  const f = formulas.value.find((x) => x.key === h.key)
+  if (!f) return app.toastMsg('该公式不在当前公式表中，无法回填', 'warn')
+  pickFormula(f)
+  calcVals.value = { ...(h.values || {}) }
+  const num = Number(h.result)
+  calcResult.value = Number.isFinite(num) ? num : h.result
+  app.toastMsg('已回填历史参数', 'success')
 }
 // F532 公式收藏夹
 const favKeys = ref([])
@@ -447,6 +495,7 @@ onMounted(async () => {
   elemCats.value = el.categories
   equations.value = eq.list
   await loadFavKeys()
+  await loadCalcHistory()
   await newEquation()
 })
 </script>

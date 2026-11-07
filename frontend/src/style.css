@@ -116,9 +116,17 @@
 @layer base {
   html {
     @apply antialiased;
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
   }
   body {
     @apply bg-ink-50 text-ink-800 text-[14px];
+  }
+  .dark body {
+    background-color: #0b1220;
+    color: #e2e8f0;
   }
   ::-webkit-scrollbar {
     width: 8px;
@@ -129,6 +137,14 @@
   }
   ::-webkit-scrollbar-thumb:hover {
     @apply bg-ink-300;
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    background-color: #334155;
+  }
+  /* #188 键盘焦点环：全站统一用品牌色，鼠标点击不触发（:focus-visible） */
+  *:focus-visible {
+    outline: 2px solid var(--brand-color, var(--brand-500));
+    outline-offset: 2px;
   }
 }
 
@@ -195,5 +211,104 @@
   }
   .markdown-body li {
     @apply ml-4 list-disc leading-relaxed text-ink-700;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   暗色模式覆盖（#191）
+   历史页面大量使用 bg-white / text-ink-* 原子类，逐文件加 dark: 成本高且易漏；
+   这里在 utilities 层统一替换语义色，后续新代码仍可直接写 dark: 类。
+   --------------------------------------------------------------------------- */
+@layer utilities {
+  .dark .bg-white {
+    background-color: #1e293b;
+  }
+  .dark .bg-ink-50,
+  .dark .bg-ink-50\/50,
+  .dark .bg-ink-50\/40,
+  .dark .bg-ink-50\/30 {
+    background-color: #0f172a;
+  }
+  .dark .bg-ink-100,
+  .dark .bg-ink-100\/50 {
+    background-color: #243244;
+  }
+  .dark .bg-ink-200 {
+    background-color: #334155;
+  }
+  .dark .text-ink-900,
+  .dark .text-ink-800 {
+    color: #e2e8f0;
+  }
+  .dark .text-ink-700 {
+    color: #cbd5e1;
+  }
+  .dark .text-ink-600 {
+    color: #94a3b8;
+  }
+  .dark .text-ink-500,
+  .dark .text-ink-400 {
+    color: #7c8ba1;
+  }
+  .dark .text-ink-300 {
+    color: #64748b;
+  }
+  .dark .border-ink-100,
+  .dark .border-ink-200,
+  .dark .divide-ink-50 > :not([hidden]) ~ :not([hidden]),
+  .dark .divide-ink-100 > :not([hidden]) ~ :not([hidden]) {
+    border-color: #243244;
+  }
+  .dark .card {
+    background-color: #1e293b;
+    border-color: #243244;
+  }
+  .dark .input {
+    background-color: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+  }
+  .dark .btn-outline {
+    background-color: #1e293b;
+    border-color: #334155;
+    color: #cbd5e1;
+  }
+  .dark .btn-ghost {
+    color: #cbd5e1;
+  }
+  .dark .btn-ghost:hover {
+    background-color: #243244;
+  }
+  .dark .tag {
+    background-color: #243244;
+    color: #cbd5e1;
+  }
+  .dark .tag-brand {
+    background-color: rgba(14, 165, 233, 0.18);
+    color: #7dd3fc;
+  }
+  .dark .th {
+    color: #94a3b8;
+  }
+  .dark .td {
+    color: #cbd5e1;
+  }
+  .dark .shadow-pop {
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   #189 动效降级：用户开启「减少动态效果」时把转场/动画压到几乎瞬时，
+   只保留最终状态，避免页面切换与骨架动画引起眩晕。
+   --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

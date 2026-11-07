@@ -18,6 +18,7 @@ import { useAppStore } from '../../stores/app'
 import CodeEditor from '../../components/CodeEditor.vue'
 import Modal from '../../components/Modal.vue'
 import codeApi from '../../api/code.js'
+import { formatTime } from '../../utils/format'
 
 const app = useAppStore()
 const router = useRouter()
@@ -598,7 +599,7 @@ onMounted(() => {
               <div v-if="w.reason" class="mt-1 text-xs text-rose-600">{{ w.reason }}</div>
               <div class="mt-1 text-xs text-ink-400">
                 复习 {{ w.review_count }} 次
-                <span v-if="w.last_reviewed_at"> · 上次 {{ String(w.last_reviewed_at).slice(0, 16).replace('T', ' ') }}</span>
+                <span v-if="w.last_reviewed_at"> · 上次 {{ formatTime(w.last_reviewed_at) }}</span>
               </div>
             </div>
             <div class="flex shrink-0 gap-1.5">

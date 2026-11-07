@@ -46,6 +46,37 @@ export const notex = {
   // F578 选词存生词（对接学习区生词本，失败降级）
   addWord: (word) => request.post('/learning/school/words/wordbook/', { word }),
   listWords: () => request.get('/learning/school/words/wordbook/'),
+
+  // ===== F236–F260 笔记协作 / 素材 / 模板 / 推荐 =====
+  // F236 段落讨论
+  comments: (id) => request.get(`/notes/${id}/comments/`),
+  createComment: (id, data) => request.post(`/notes/${id}/comments/`, data),
+  updateComment: (id, cid, data) => request.patch(`/notes/${id}/comments/${cid}/`, data),
+  deleteComment: (id, cid) => request.delete(`/notes/${id}/comments/${cid}/`),
+  // F237 附件
+  attachments: (id) => request.get(`/notes/${id}/attachments/`),
+  bindAttachment: (id, data) => request.post(`/notes/${id}/attachments/`, data),
+  removeAttachment: (id, aid) => request.delete(`/notes/${id}/attachments/${aid}/`),
+  // F237/F239 选文件清单（仅本人未删除文件）
+  attachableFiles: (params = {}) => request.get('/notes/attachable-files/', { params }),
+  // F243 我的模板
+  myTemplates: (params = {}) => request.get('/notes/templates/mine/', { params }),
+  createMyTemplate: (data) => request.post('/notes/templates/mine/', data),
+  updateMyTemplate: (id, data) => request.patch(`/notes/templates/mine/${id}/`, data),
+  deleteMyTemplate: (id) => request.delete(`/notes/templates/mine/${id}/`),
+  fromMyTemplate: (id, data = {}) => request.post(`/notes/templates/mine/${id}/create/`, data),
+  // F245 相关笔记推荐
+  related: (id) => request.get(`/notes/${id}/related/`),
+  // F246 快速记录
+  quick: (data) => request.post('/notes/quick/', data),
+  // F256 标签合并
+  mergeTags: (data) => request.post('/notes/tags/merge/', data),
+  // F257 双链悬停预览
+  preview: (id) => request.get(`/notes/${id}/preview/`),
+  previewByTitle: (title, exclude) =>
+    request.get('/notes/preview/', { params: { title, exclude } }),
+  // F260 置顶区拖拽排序
+  pinOrder: (noteIds) => request.post('/notes/pin-order/', { note_ids: noteIds }),
 }
 
 export default notex

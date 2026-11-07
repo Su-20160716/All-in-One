@@ -13,9 +13,10 @@
 
     <div v-if="!ready" class="card grid h-64 place-items-center text-[13px] text-ink-400">目录加载中…</div>
 
-    <div v-else class="grid grid-cols-12 gap-4">
+    <!-- #183 窄屏单列堆叠，宽屏再回到 3/4/5 三栏 -->
+    <div v-else class="grid grid-cols-1 gap-4 lg:grid-cols-12">
       <!-- 子系统列 -->
-      <div class="col-span-3 max-h-[72vh] space-y-1 overflow-y-auto pr-1">
+      <div class="max-h-[40vh] space-y-1 overflow-y-auto pr-1 lg:col-span-3 lg:max-h-[72vh]">
         <button
           v-for="s in filteredSubs"
           :key="s.key"
@@ -30,7 +31,7 @@
       </div>
 
       <!-- 接口列 -->
-      <div class="col-span-4 card max-h-[72vh] overflow-y-auto p-2">
+      <div class="card max-h-[40vh] overflow-y-auto p-2 lg:col-span-4 lg:max-h-[72vh]">
         <div
           v-for="ep in curSub?.eps || []"
           :key="ep.path"
@@ -50,10 +51,14 @@
       </div>
 
       <!-- 执行器列 -->
-      <div class="col-span-5">
+      <div class="lg:col-span-5">
         <div class="card p-4" v-if="cur">
-          <div class="mb-2 flex items-center gap-2">
-            <h3 class="font-mono text-[13px] font-semibold text-ink-800">{{ domain }}/{{ cur.path }}</h3>
+          <!-- #183 执行按钮固定在结果区顶部，长响应滚动时仍可再次执行 -->
+          <div class="sticky top-0 z-10 -mx-4 -mt-4 mb-3 flex flex-wrap items-center gap-2 rounded-t-card border-b border-ink-100 bg-white px-4 py-2.5">
+            <h3 class="min-w-0 flex-1 truncate font-mono text-[13px] font-semibold text-ink-800">{{ domain }}/{{ cur.path }}</h3>
+            <button class="btn-primary" :disabled="running" @click="run">{{ running ? '请求中…' : '执 行' }}</button>
+            <button class="btn-outline" @click="resetBody">重置参数</button>
+            <button class="btn-ghost" @click="copyResult">复制响应</button>
           </div>
 
           <div class="mb-2 flex items-center gap-2">
@@ -71,12 +76,6 @@
           </label>
           <textarea v-model="bodyText" class="input h-36 resize-none font-mono text-[12px]" spellcheck="false"></textarea>
 
-          <div class="mt-3 flex items-center gap-2">
-            <button class="btn-primary" :disabled="running" @click="run">{{ running ? '请求中…' : '执 行' }}</button>
-            <button class="btn-outline" @click="resetBody">重置参数</button>
-            <button class="btn-ghost" @click="copyResult">复制响应</button>
-          </div>
-
           <div v-if="result !== null" class="mt-3">
             <div class="mb-1 flex items-center gap-2">
               <span class="text-[12px] font-medium text-ink-600">响应</span>
@@ -85,7 +84,16 @@
                 :class="result.ok ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'"
               >{{ result.ok ? '成功' : '失败' }}</span>
             </div>
-            <pre class="max-h-80 overflow-auto whitespace-pre-wrap rounded-control bg-ink-900 p-3 font-mono text-[12px] leading-relaxed text-ink-100">{{ prettyResult }}</pre>
+            <!-- #391–410 专用结果可视化（按 domain+path 匹配），其余接口 / 结构不符时回落原始 JSON -->
+            <ResultVisual
+              v-if="visualKind"
+              :kind="visualKind"
+              :data="visualData"
+              :raw="prettyResult"
+              :url="callUrl"
+              :params="lastParams || {}"
+            />
+            <pre v-else class="max-h-80 overflow-auto whitespace-pre-wrap rounded-control bg-ink-900 p-3 font-mono text-[12px] leading-relaxed text-ink-100">{{ prettyResult }}</pre>
           </div>
         </div>
         <div v-else class="card grid h-64 place-items-center text-[13px] text-ink-400">从左侧选择一个接口开始调试</div>
@@ -98,6 +106,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { suiteApi } from '../../api'
 import { useAppStore } from '../../stores/app'
+import ResultVisual from './ResultVisual.vue'
 
 const props = defineProps({
   domain: { type: String, required: true },
@@ -117,7 +126,53 @@ const pathInput = ref('')
 const bodyText = ref('{}')
 const result = ref(null)
 const running = ref(false)
+const lastParams = ref(null) // 最近一次实际发送的请求体，供可视化组件复用（如导出下载 URL）
 const methodOptions = ['GET', 'POST']
+
+// #391–410 专用结果可视化：domain/归一化 path → 可视化类型；未列出的接口保持原始 JSON
+const VISUAL_MAP = {
+  'devtools/code/complexity': 'complexity',
+  'devtools/code/import-graph': 'import-graph',
+  'devtools/regex/cases': 'regex-cases',
+  'devtools/diff/three-way': 'three-way',
+  'devtools/cron/next-runs': 'cron-runs',
+  'devtools/net/cidr-merge': 'cidr-merge',
+  'devtools/id/snowflake-parse': 'snowflake',
+  'devtools/db/sql-to-model': 'sql-to-model',
+  'minitools/work/gpa-calc': 'gpa',
+  'minitools/work/annual-leave': 'annual-leave',
+  'minitools/work/overtime-pay': 'overtime-pay',
+  'minitools/work/severance-pay': 'severance-pay',
+  'minitools/media/image-info': 'image-info',
+  'minitools/media/image-watermark': 'image-watermark',
+  'minitools/text/sensitive-words': 'sensitive-words',
+  'dataintel/transform/one-hot': 'transform',
+  'dataintel/transform/lag': 'transform',
+  'dataintel/transform/mask-pii': 'transform',
+  'dataintel/profile/unique-values': 'unique-values',
+}
+
+/** 后端结果可能是 {ok,data} 多层包装，可视化前逐层解包 */
+function unwrapPayload(v) {
+  let cur2 = v
+  let guard = 0
+  while (cur2 && typeof cur2 === 'object' && !Array.isArray(cur2) && 'ok' in cur2 && 'data' in cur2 && guard < 3) {
+    cur2 = cur2.data
+    guard++
+  }
+  return cur2
+}
+
+function matchVisual(domain, path) {
+  const p = String(path || '').split('?')[0].replace(/^\/+|\/+$/g, '')
+  const key = `${domain}/${p}`
+  if (/^dataintel\/dataset\/[^/]+\/export$/.test(key)) return 'dataset-export'
+  return VISUAL_MAP[key] || ''
+}
+
+const visualKind = computed(() => (result.value && result.value.ok ? matchVisual(props.domain, pathInput.value) : ''))
+const visualData = computed(() => (result.value ? unwrapPayload(result.value.data) : null))
+const callUrl = computed(() => `${props.domain}/${String(pathInput.value || '').replace(/^\/+/, '')}`)
 
 // officesuite 三个 URL 前缀与子系统 key 不同（form/ticket/todo），目录分组用别名归位
 const SUB_ALIAS = { todo: 'todobox', form: 'formcollect', ticket: 'helpdesk' }
@@ -213,6 +268,7 @@ async function run() {
   }
   running.value = true
   result.value = null
+  lastParams.value = payload
   try {
     const path_ = pathInput.value.replace(/^\/+/, '')
     const r = await suiteApi.call(props.domain, path_, method.value, payload)

@@ -30,11 +30,22 @@ export function saveBlob(blob, filename) {
 }
 
 /**
+ * /api 前缀归一化：request 实例的 baseURL 已经是 /api，
+ * 传入 apiUrl(...) 得到的 `/api/files/1/raw/` 会变成 `/api/api/...`。
+ * 绝对地址（生产 API_BASE）交给 axios 原样使用。
+ */
+export function normalizeApiUrl(url) {
+  if (!url) return url
+  if (/^https?:/i.test(url)) return url
+  return url.startsWith('/api/') ? url.slice(4) : url
+}
+
+/**
  * 带鉴权下载。url 为 /api 之后的相对路径（request 实例会补 baseURL）。
  * 返回实际使用的文件名。
  */
 export async function downloadWithAuth(url, filename = '') {
-  const data = await request.get(url, { responseType: 'blob' })
+  const data = await request.get(normalizeApiUrl(url), { responseType: 'blob' })
   const blob = toBlob(data)
   const name = filename || 'download'
   saveBlob(blob, name)
@@ -61,7 +72,7 @@ export async function describeDownloadError(e) {
  * 返回 { url, revoke }——组件卸载时必须调 revoke() 释放内存。
  */
 export async function loadMediaObjectUrl(url) {
-  const data = await request.get(url, { responseType: 'blob' })
+  const data = await request.get(normalizeApiUrl(url), { responseType: 'blob' })
   const blob = toBlob(data)
   const url2 = URL.createObjectURL(blob)
   return {

@@ -44,6 +44,31 @@ export const filesx = {
   favoritesExportUrl: apiUrl('/api/files/favorites/export/'),
   favoritesExport: () => request.get('/files/favorites/export/', { responseType: 'blob' }),
   favoritesImport: (payload) => request.post('/files/favorites/import/', { payload }),
+  // ---- S24 第三轮：211–235 ----
+  // 212 整包下载文件夹（走 axios 带 JWT，返回 blob）
+  folderDownloadUrl: (id) => apiUrl(`/api/files/folders/${id}/download/`),
+  // 218 空文件夹列表与批量清理
+  emptyFolders: () => request.get('/files/folders/empty/'),
+  cleanupEmptyFolders: (folderIds = []) =>
+    request.post('/files/folders/empty/cleanup/', { folder_ids: folderIds }),
+  // 219 文件夹占用排行
+  storageFolders: () => request.get('/files/storage/folders/'),
+  // 220 操作记录热力图
+  opsHeatmap: (days = 180) => request.get('/files/operations/heatmap/', { params: { days } }),
+  // 222 文件完整性校验
+  integrity: (fileIds = []) => request.post('/files/integrity/', { file_ids: fileIds }),
+  // 217 标签合并
+  tagMerge: (fromId, toId) =>
+    request.post('/files/tags/merge/', { from_id: fromId, to_id: toId }),
+  // 224 文本文件转为笔记
+  toNote: (id) => request.post(`/files/${id}/to-note/`, {}),
+  // 226 移除单条最近访问
+  removeRecent: (fileId) => request.delete(`/files/recent/${fileId}/`),
+  // 231 重复文件保留一份
+  resolveDuplicates: (sha1, keepId) =>
+    request.post('/files/duplicates/resolve/', { sha1, keep_id: keepId }),
+  // 232 回收站列表（支持 q / kind / deleted_after / deleted_before）
+  trashList: (params = {}) => request.get('/files/trash/', { params }),
 }
 
 export default filesx

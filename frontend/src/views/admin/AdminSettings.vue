@@ -50,8 +50,14 @@ async function load() {
   Object.keys(r.settings).forEach((k) => (settings[k] = r.settings[k]))
 }
 function addRow() {
-  if (!newKey.value) return
-  settings[newKey.value] = { value: newValue.value, label: '' }
+  const key = newKey.value.trim()
+  if (!key) return
+  // #163 新增前查重：已有配置项不允许被静默覆盖
+  if (Object.prototype.hasOwnProperty.call(settings, key)) {
+    app.toastMsg(`配置项「${key}」已存在，请直接修改原值`, 'error')
+    return
+  }
+  settings[key] = { value: newValue.value, label: '' }
   newKey.value = ''
   newValue.value = ''
 }

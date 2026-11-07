@@ -117,9 +117,17 @@ function toggleAllPerms(on) {
   editing.value.permission_ids = on ? permissions.value.map((p) => p.id) : []
 }
 async function saveRole() {
-  const payload = { name: editing.value.name, description: editing.value.description, permission_ids: editing.value.permission_ids, data_scope: editing.value.data_scope || 'self' }
+  // #164 提交前 trim 校验必填：角色名必填、新建时编码必填，非法编码直接阻止
+  const name = (editing.value.name || '').trim()
+  const code = (editing.value.code || '').trim()
+  if (!name) return app.toastMsg('请填写角色名称', 'error')
+  if (!editing.value.id && !code) return app.toastMsg('请填写角色编码', 'error')
+  if (code && !/^[A-Za-z][A-Za-z0-9_-]*$/.test(code)) {
+    return app.toastMsg('编码需以字母开头，只能包含字母、数字、下划线或连字符', 'error')
+  }
+  const payload = { name, description: (editing.value.description || '').trim(), permission_ids: editing.value.permission_ids, data_scope: editing.value.data_scope || 'self' }
   if (editing.value.id) await adminApi.updateRole(editing.value.id, payload)
-  else await adminApi.createRole({ ...payload, code: editing.value.code })
+  else await adminApi.createRole({ ...payload, code })
   app.toastMsg('已保存', 'success')
   editing.value = null
   load()

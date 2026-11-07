@@ -5,9 +5,11 @@
         <h2 class="text-[16px] font-semibold text-ink-800">我的学习</h2>
         <p class="text-[12px] text-ink-400">学习进度、代码收藏、专注打卡、学习计划与掌握度，全部云端保存</p>
       </div>
-      <div class="flex gap-1 rounded-control bg-ink-100 p-1">
-        <button v-for="t in tabs" :key="t.v" class="rounded-control px-3 py-1 text-[12px]"
-          :class="tab === t.v ? 'bg-white text-brand-700 shadow-sm' : 'text-ink-500'" @click="switchTab(t.v)">{{ t.label }}</button>
+      <div class="flex flex-wrap gap-1 rounded-control bg-ink-100 p-1" role="tablist" aria-label="我的学习分区">
+        <button v-for="(t, i) in tabs" :key="t.v" role="tab" :aria-selected="tab === t.v" :tabindex="tab === t.v ? 0 : -1"
+          class="rounded-control px-3 py-1 text-[12px]"
+          :class="tab === t.v ? 'bg-white text-brand-700 shadow-sm' : 'text-ink-500'"
+          @click="switchTab(t.v)" @keydown="onTabKey($event, i)">{{ t.label }}</button>
       </div>
     </div>
 
@@ -22,6 +24,67 @@
         <div class="card p-4 text-center"><div class="text-[22px] font-bold text-brand-700">{{ todayMin }}</div><div class="text-[12px] text-ink-400">今日(分钟)</div></div>
         <div class="card p-4 text-center"><div class="text-[22px] font-bold text-brand-700">{{ weekMin }}</div><div class="text-[12px] text-ink-400">本周(分钟)</div></div>
         <div class="card p-4 text-center"><div class="text-[22px] font-bold text-brand-700">{{ monthMin }}</div><div class="text-[12px] text-ink-400">本月(分钟)</div></div>
+      </div>
+
+      <!-- 378 考试倒计时 -->
+      <div class="card p-4">
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+          <h3 class="text-[14px] font-semibold text-ink-800">考试倒计时</h3>
+          <span v-if="exams.nearest" class="tag bg-rose-50 text-rose-600">最近：{{ exams.nearest.title }}</span>
+          <button class="btn-outline ml-auto px-2 py-0.5 text-[11px]" @click="loadExams">刷新</button>
+        </div>
+        <div v-if="exams.nearest" class="mb-2 flex flex-wrap items-center gap-4 rounded-control bg-brand-50 px-3 py-2">
+          <div class="text-center">
+            <div class="text-[24px] font-bold leading-none text-brand-700">{{ exams.nearest.days_left }}</div>
+            <div class="mt-0.5 text-[11px] text-ink-400">天后考试</div>
+          </div>
+          <div class="text-[12px] leading-6 text-ink-600">
+            <div class="text-[13px] font-medium text-ink-800">{{ exams.nearest.title }}<span class="text-ink-400"> · {{ exams.nearest.exam_date }}</span></div>
+            <div v-if="exams.nearest.daily_questions">按剩余天数摊分，每天约 <b class="text-brand-700">{{ exams.nearest.daily_questions }}</b> 题{{ exams.nearest.subject ? '（' + exams.nearest.subject + '）' : '' }}</div>
+            <div v-else class="text-ink-400">还没填目标题量：补一个数字就能算出每天要刷几题。</div>
+          </div>
+        </div>
+        <div v-if="exams.list && exams.list.length" class="space-y-1">
+          <div v-for="e in exams.list" :key="e.id" class="flex flex-wrap items-center gap-2 rounded-control bg-ink-50 px-2.5 py-1.5 text-[12px]">
+            <span class="tag">{{ e.subject || '未填学科' }}</span>
+            <span class="text-[13px] font-medium text-ink-800">{{ e.title }}</span>
+            <span class="text-ink-400">{{ e.exam_date }}</span>
+            <span :class="e.passed ? 'text-ink-400' : e.urgent ? 'font-medium text-rose-500' : 'text-brand-600'">
+              {{ e.passed ? '已考完' : '还剩 ' + e.days_left + ' 天' }}
+            </span>
+            <span v-if="e.daily_questions" class="text-ink-500">每日 {{ e.daily_questions }} 题</span>
+            <button class="btn-danger ml-auto px-2 py-0.5 text-[11px]" @click="delExam(e.id)">删除</button>
+          </div>
+        </div>
+        <div v-else class="text-[12px] leading-6 text-ink-400">
+          还没有考试：填名称和日期（可选学科、目标题量）点「添加」，卡片会按剩余天数摊出每天该刷多少题。
+        </div>
+        <div class="mt-2 grid grid-cols-12 gap-2">
+          <input v-model="exf.title" class="input col-span-12 h-8 text-[12px] sm:col-span-4" placeholder="考试名称，如 期中数学" />
+          <input v-model="exf.exam_date" type="date" class="input col-span-6 h-8 text-[12px] sm:col-span-3" />
+          <input v-model="exf.subject" class="input col-span-6 h-8 text-[12px] sm:col-span-2" placeholder="学科" />
+          <input v-model.number="exf.target_count" type="number" min="0" class="input col-span-4 h-8 text-[12px] sm:col-span-1" placeholder="题量" />
+          <button class="btn-primary col-span-4 h-8 text-[12px] sm:col-span-2" @click="addExam">添加</button>
+        </div>
+      </div>
+
+      <!-- 377 每日提醒 / 学习榜公开 -->
+      <div class="card p-4">
+        <div class="flex flex-wrap items-center gap-3">
+          <h3 class="text-[14px] font-semibold text-ink-800">每日提醒</h3>
+          <button class="tag cursor-pointer" :class="pref.daily_remind ? 'bg-brand-600 text-white' : ''" @click="togglePref('daily_remind')">
+            {{ pref.daily_remind ? '已开启' : '已关闭' }}
+          </button>
+          <span class="text-[12px] text-ink-400">目标未达成时每天最多提醒一次</span>
+          <div class="flex items-center gap-2 sm:ml-auto">
+            <span class="text-[12px] text-ink-500">学习榜公开</span>
+            <button class="tag cursor-pointer" :class="pref.leaderboard_public ? 'bg-brand-600 text-white' : ''" @click="togglePref('leaderboard_public')">
+              {{ pref.leaderboard_public ? '公开' : '不公开' }}
+            </button>
+            <button class="btn-outline px-2 py-0.5 text-[11px]" @click="checkRemind">立即检查提醒</button>
+          </div>
+        </div>
+        <p class="mt-1.5 text-[11px] leading-5 text-ink-400">提醒走站内通知，点「立即检查」可以看看今天还差多少分钟；不公开学习榜则不会出现在「小组 → 学习榜」里。</p>
       </div>
 
       <!-- F523 每日学习目标与达成率 -->
@@ -43,6 +106,16 @@
             <button class="btn-outline px-3 py-1.5" @click="saveGoal">设定目标</button>
           </div>
         </div>
+        <!-- 390 本周达成预测 -->
+        <div v-if="forecast.message" class="mt-2 flex flex-wrap items-center gap-2 rounded-control bg-ink-50 px-2.5 py-1.5 text-[11px] leading-5">
+          <span class="font-medium text-ink-600">达成预测</span>
+          <span class="text-ink-500">{{ forecast.message }}</span>
+          <span v-if="forecast.week_target" class="ml-auto text-ink-400">
+            本周目标 {{ forecast.week_target }} 分钟 · 近 7 天日均 {{ forecast.avg_7d || 0 }} 分钟
+            <template v-if="forecast.need_minutes"> · 需补 {{ forecast.need_minutes }} 分钟</template>
+          </span>
+        </div>
+        <div v-else class="mt-2 text-[11px] leading-5 text-ink-400">达成预测暂不可用：设好每日目标并打卡几天后，这里会给出本周达成概率与还需补的时长。</div>
       </div>
 
       <!-- F522 连续打卡 streak -->
@@ -76,6 +149,36 @@
           <div v-for="(d, i) in trend14" :key="i" class="flex-1 rounded-t bg-brand-400" :style="{ height: Math.max(4, d.minutes / (maxTrend || 1) * 76) + 'px' }" :title="d.date + ' ' + d.minutes + '分钟'"></div>
         </div>
         <div class="mt-1 flex justify-between text-[10px] text-ink-400"><span>14天前</span><span>今天</span></div>
+      </div>
+
+      <!-- 389 学习时长 × 工具使用双序列 -->
+      <div class="card p-4">
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+          <h3 class="text-[14px] font-semibold text-ink-800">学习时长 × 工具使用（近 {{ usage.days || usageDays }} 天）</h3>
+          <select v-model.number="usageDays" class="input ml-auto h-8 w-24 text-[12px]" @change="loadUsage">
+            <option :value="7">7 天</option>
+            <option :value="14">14 天</option>
+            <option :value="30">30 天</option>
+          </select>
+        </div>
+        <div v-if="usageSeries.length" class="space-y-2">
+          <div class="flex items-end gap-1" style="height: 66px">
+            <div v-for="d in usageSeries" :key="'m' + d.date" class="flex-1 rounded-t bg-brand-400"
+                 :style="{ height: Math.max(3, d.minutes / (usageMax || 1) * 62) + 'px' }" :title="d.date + '：' + d.minutes + ' 分钟'"></div>
+          </div>
+          <div class="flex items-end gap-1" style="height: 38px">
+            <div v-for="d in usageSeries" :key="'c' + d.date" class="flex-1 rounded-t bg-emerald-400"
+                 :style="{ height: Math.max(2, d.tool_calls / (usageCallsMax || 1) * 34) + 'px' }" :title="d.date + '：' + d.tool_calls + ' 次工具'"></div>
+          </div>
+          <div class="flex flex-wrap items-center gap-3 text-[11px] text-ink-400">
+            <span class="flex items-center gap-1"><i class="inline-block h-2 w-2 rounded-sm bg-brand-400"></i>学习分钟</span>
+            <span class="flex items-center gap-1"><i class="inline-block h-2 w-2 rounded-sm bg-emerald-400"></i>工具使用次数</span>
+            <span class="ml-auto">合计 {{ usage.totals?.minutes || 0 }} 分钟 / {{ usage.totals?.tool_calls || 0 }} 次 · 活跃 {{ usage.totals?.active_days || 0 }} 天</span>
+          </div>
+        </div>
+        <div v-else class="text-[12px] leading-6 text-ink-400">
+          还没有可对比的数据：去「专注记录」打卡，或使用学习工具（公式计算、单位换算、词典等），这里会叠出按日的两条走势。
+        </div>
       </div>
 
       <!-- F541 弱项雷达：按学科/题型的订正率，右侧给补弱顺序 -->
@@ -248,7 +351,7 @@
               <span class="ml-auto text-[12px] text-brand-600">{{ openP === p.id ? '收起 ▲' : '详情 ▼' }}</span>
             </button>
             <div class="mt-1.5 h-1.5 overflow-hidden rounded-pill bg-ink-100"><div class="h-full bg-brand-500" :style="{ width: p.percent + '%' }"></div></div>
-            <div class="mt-1 text-[11px] text-ink-400">{{ p.percent }}% · 更新于 {{ fmt(p.updated_at) }}</div>
+            <div class="mt-1 text-[11px] text-ink-400">{{ p.percent }}% · 更新于 {{ formatTime(p.updated_at) }}</div>
 
             <div v-if="openP === p.id" class="mt-2 space-y-2 border-t border-ink-100 pt-2">
               <div class="grid grid-cols-1 gap-x-4 gap-y-1 text-[12px] text-ink-600 md:grid-cols-2">
@@ -257,7 +360,7 @@
                 <div><span class="text-ink-400">领域：</span>{{ domainName(p.domain) }}</div>
                 <div><span class="text-ink-400">状态：</span>{{ p.status === 'finished' ? '已完成' : '学习中' }}</div>
                 <div><span class="text-ink-400">备注：</span>{{ p.note || '（无备注）' }}</div>
-                <div><span class="text-ink-400">更新时间：</span>{{ fmt(p.updated_at) }}　<span class="text-ink-400">创建于 {{ fmt(p.created_at) }}</span></div>
+                <div><span class="text-ink-400">更新时间：</span>{{ formatTime(p.updated_at) }}　<span class="text-ink-400">创建于 {{ formatTime(p.created_at) }}</span></div>
               </div>
               <div class="rounded-control bg-white p-2 text-[12px] leading-6 text-ink-500 ring-1 ring-ink-100">
                 <span class="font-semibold text-ink-600">相关说明：</span>{{ progressHint(p) }}
@@ -289,6 +392,57 @@
           <div v-if="!progress.length" class="grid h-32 place-items-center px-6 text-center text-[13px] leading-6 text-ink-400">
             还没有任何进度：在左侧选领域、填目标标识（如 python）、拖一下滑块点「保存进度」，这里就会长出第一根进度条。
           </div>
+        </div>
+      </div>
+
+      <!-- 384 学科 × 周 掌握度热力图 -->
+      <div class="card p-4">
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+          <h3 class="text-[14px] font-semibold text-ink-800">学科 × 周 掌握度热力图（近 {{ heatmap.days || 90 }} 天）</h3>
+          <button class="btn-outline ml-auto px-2 py-0.5 text-[11px]" @click="loadHeatmap">刷新</button>
+        </div>
+        <div v-if="heatmap.subjects && heatmap.subjects.length" class="overflow-x-auto">
+          <div class="min-w-[560px]">
+            <div class="flex items-center gap-1 text-[10px] text-ink-400">
+              <span class="w-16 shrink-0">学科</span>
+              <span v-for="w in heatmap.weeks" :key="w.start" class="flex-1 text-center">{{ w.label }}</span>
+              <span class="w-10 shrink-0 text-right">订正率</span>
+            </div>
+            <div v-for="s in heatmap.subjects" :key="s.subject" class="mt-1 flex items-center gap-1">
+              <span class="w-16 shrink-0 truncate text-[12px] text-ink-600" :title="s.subject_name">{{ s.subject_name }}</span>
+              <div v-for="c in s.cells" :key="c.week" class="h-4 flex-1 rounded-sm" :class="heatCls(c.rate)"
+                   :title="c.week + ' 那一周：订正 ' + c.mastered + '/' + c.total + (c.rate === null ? '（无错题）' : '（' + c.rate + '%）')"></div>
+              <span class="w-10 shrink-0 text-right text-[11px] text-ink-500">{{ s.rate }}%</span>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-ink-400">
+              <span>颜色越深订正率越高：</span>
+              <span v-for="lg in HEAT_LEGEND" :key="lg.cls" class="flex items-center gap-1">
+                <i class="inline-block h-3 w-4 rounded-sm" :class="lg.cls"></i>{{ lg.label }}
+              </span>
+              <span class="flex items-center gap-1"><i class="inline-block h-3 w-4 rounded-sm bg-ink-100"></i>该周无错题</span>
+            </div>
+          </div>
+        </div>
+        <div v-else class="text-[12px] leading-6 text-ink-400">
+          还没有可成图的错题：去「题库」做题并「收进错题本」，或在这里用「错题本」批量导入；之后每个学科每周的订正率会画成一行色块，断档一眼可见。
+        </div>
+      </div>
+
+      <!-- 376 薄弱错因聚类（前 5） -->
+      <div class="card p-4">
+        <h3 class="mb-2 text-[14px] font-semibold text-ink-800">薄弱错因聚类（前 5）</h3>
+        <div v-if="clusters.length" class="space-y-1.5">
+          <div v-for="c in clusters" :key="c.subject + c.cause" class="flex flex-wrap items-center gap-2 rounded-control bg-ink-50 px-2.5 py-1.5 text-[12px]">
+            <span class="w-4 text-ink-400">{{ c.rank }}</span>
+            <span class="tag">{{ c.subject_name }}</span>
+            <span class="text-[13px] font-medium text-ink-800">{{ c.cause_name }}</span>
+            <span class="text-ink-400">{{ c.total }} 题 · 订正 {{ c.mastered }} 题（{{ c.rate }}%）</span>
+            <span class="ml-auto text-[11px] text-rose-500">薄弱度 {{ c.weakness }}</span>
+          </div>
+          <p class="pt-1 text-[11px] leading-5 text-ink-400">薄弱度＝题量 × 未订正比例，越靠前越该先补；到「错题本」按同科筛出这些题集中订正，聚类会随订正率下降。</p>
+        </div>
+        <div v-else class="text-[12px] leading-6 text-ink-400">
+          还没有错因数据：在「题库 · 错题本」给每道题选一个「错因归类」（粗心 / 概念不清 / 方法不会…），这里会聚合出最该先补的 5 组。
         </div>
       </div>
     </template>
@@ -412,6 +566,30 @@
             <button class="btn-outline px-2 py-0.5" @click="bumpPlan(p, -1)">-</button>
             <button class="btn-outline px-2 py-0.5" @click="bumpPlan(p, 1)">+</button>
           </div>
+          <!-- 383 每日排程 -->
+          <div class="mt-2 flex flex-wrap items-center gap-2 text-[12px]">
+            <input v-model.number="schedMinutes[p.id]" type="number" min="5" max="600" step="5" class="input h-8 w-24 text-[12px]" placeholder="每日分钟" />
+            <button class="btn-outline px-2 py-0.5" :disabled="schedLoading[p.id]" @click="genSchedule(p)">{{ schedLoading[p.id] ? '排程中…' : '生成今日任务' }}</button>
+            <span v-if="schedules[p.id]" class="text-ink-400">共 {{ schedules[p.id].schedule.length }} 天 · 截止 {{ schedules[p.id].deadline }}</span>
+          </div>
+          <div v-if="schedules[p.id]" class="mt-2 rounded-control bg-ink-50 p-2 text-[11px] leading-5 text-ink-600">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-medium text-ink-700">今日任务：</span>
+              <template v-if="todayTask(p)">
+                <span>{{ todayTask(p).tasks }} 项 · 约 {{ todayTask(p).minutes }} 分钟</span>
+                <button class="btn-primary ml-auto px-2 py-0.5 text-[11px]" :disabled="writingSched[p.id]" @click="writeScheduleSession(p)">
+                  {{ writingSched[p.id] ? '写入中…' : '一键写入打卡' }}
+                </button>
+              </template>
+              <span v-else class="text-ink-400">今天不在排程范围内（计划已结束或尚未开始）</span>
+            </div>
+            <div class="mt-1 flex flex-wrap gap-1">
+              <span v-for="d in schedules[p.id].schedule.slice(0, 7)" :key="d.date" class="tag" :class="d.is_today ? 'bg-brand-600 text-white' : ''">
+                {{ d.date.slice(5) }} 周{{ d.weekday }} · {{ d.tasks }} 项
+              </span>
+            </div>
+            <div class="mt-1 text-ink-400">剩余 {{ schedules[p.id].remaining }} 项{{ schedules[p.id].truncated ? '（排程超 90 天已截断展示）' : '' }}</div>
+          </div>
           <details class="mt-2" @toggle="onPlanToggle(p)"><summary class="cursor-pointer text-[12px] text-brand-600">查看每日安排 / 排程说明</summary>
             <div v-if="planExplain[p.id]" class="mt-2 rounded-control bg-ink-50 p-2 text-[11px] leading-5 text-ink-600">
               <div class="font-medium text-ink-700">排程逻辑</div>
@@ -428,7 +606,7 @@
     </template>
 
     <!-- F520 错题重练 -->
-    <template v-else>
+    <template v-else-if="tab === 'redrill'">
       <p class="rounded-lg bg-ink-50 px-3 py-2 text-[12px] leading-5 text-ink-500">
         把错题本里未掌握的题再做一遍：判断题点「正确/错误」，填空题直接写，单选题填选项序号（0=A、1=B…）。
         提交即判分并记录二次正确率；答对可点「标记掌握」移出重练，答错会显示参考答案与解析。
@@ -470,25 +648,131 @@
         暂未掌握的错题是空的：先去「题库 · 智能组卷」或「刷题训练」，把做错的题收进错题本，这里就能重练。
       </div>
     </template>
+
+    <!-- 373/374/375/387/388 错题整理 -->
+    <template v-else-if="tab === 'mistake'">
+      <p class="rounded-lg bg-ink-50 px-3 py-2 text-[12px] leading-5 text-ink-500">
+        错题集中整理：CSV / JSON 批量导入（表头写「题干、正确答案、学科、题型、错因」等即可），也能导出成表格或 Anki 记忆卡；
+        每道题可以找「相似错题」横向巩固、存为笔记、按复习日期加入待办。订正完点「订正掌握」，热力图与聚类会随之变好。
+      </p>
+      <div class="card p-4">
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+          <h3 class="text-[14px] font-semibold text-ink-800">批量导入</h3>
+          <select v-model="impFmt" class="input h-8 w-24 text-[12px]">
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+          </select>
+          <button class="btn-primary px-3 py-1" :disabled="importing" @click="doImport">{{ importing ? '导入中…' : '导入' }}</button>
+          <span class="text-[11px] text-ink-400">CSV 需带表头；JSON 为对象数组或 {{ '{items: [...]}' }}</span>
+        </div>
+        <textarea v-model="impText" rows="4" class="input w-full font-mono text-[11px]"
+          :placeholder="impFmt === 'csv' ? '题干,正确答案,学科,题型,错因\n三角形内角和是多少?,180,数学,填空题,概念不清' : '[{&quot;stem&quot;:&quot;三角形内角和是多少?&quot;,&quot;answer&quot;:&quot;180&quot;,&quot;subject&quot;:&quot;数学&quot;,&quot;question_type&quot;:&quot;fill&quot;}]'"></textarea>
+        <div v-if="impResult" class="mt-2 rounded-control bg-ink-50 p-2 text-[12px] leading-6 text-ink-600">
+          <div>共 {{ impResult.total }} 行：新建 <b class="text-emerald-600">{{ impResult.created }}</b>、跳过 {{ impResult.skipped }}（重复 {{ impResult.duplicated || 0 }}、非法 {{ impResult.invalid || 0 }}）</div>
+          <div v-for="e in impResult.errors" :key="e.row" class="text-[11px] text-rose-500">第 {{ e.row }} 行：{{ e.error }}</div>
+          <div v-if="impResult.errors_truncated" class="text-[11px] text-ink-400">错误过多，仅展示前 20 条</div>
+        </div>
+        <div v-else class="mt-2 text-[11px] leading-5 text-ink-400">粘贴后点「导入」：按题干去重，非法行会在下面逐行报错，不影响其余行入库。</div>
+      </div>
+
+      <div class="card flex flex-wrap items-center gap-2 p-4">
+        <h3 class="text-[14px] font-semibold text-ink-800">错题清单</h3>
+        <span class="text-[12px] text-ink-400">共 {{ mistakeAll.length }} 道 · 未掌握 {{ mistakeUnmastered }} 道</span>
+        <button class="btn-outline px-2 py-0.5" @click="onlyMistakeUnmastered = !onlyMistakeUnmastered">{{ onlyMistakeUnmastered ? '显示全部' : '只看未掌握' }}</button>
+        <label class="flex items-center gap-1 text-[12px] text-ink-500 sm:ml-auto">待办截止
+          <input v-model="todoDue" type="date" class="input h-8 w-36 text-[12px]" />
+        </label>
+        <button class="btn-outline px-2 py-0.5" @click="downloadMistakes('csv')">导出 CSV</button>
+        <button class="btn-outline px-2 py-0.5" @click="downloadMistakes('anki')">导出 Anki</button>
+        <button class="btn-outline px-2 py-0.5" @click="loadMistakeAll">刷新</button>
+      </div>
+
+      <div v-for="m in mistakeShown" :key="m.id" class="card p-4" :class="m.mastered ? 'opacity-60' : ''">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="tag-brand">{{ SUBJECT_CN[m.subject] || m.subject }}</span>
+          <span class="tag">{{ typeName(m.question_type) }}</span>
+          <span class="tag">难度 {{ m.difficulty }}</span>
+          <span v-if="m.cause" class="tag">{{ MISTAKE_CAUSE[m.cause] || m.cause }}</span>
+          <span v-if="m.mastered" class="tag bg-emerald-50 text-emerald-600">已订正</span>
+        </div>
+        <p class="mt-2 text-[13px] leading-6 text-ink-800">{{ m.stem }}</p>
+        <div class="mt-1 text-[12px] text-ink-500">正确答案：{{ m.answer || '—' }}　我的答案：{{ m.user_answer || '—' }}</div>
+        <div v-if="m.analysis" class="text-[12px] text-ink-400">解析：{{ m.analysis }}</div>
+        <div class="mt-2 flex flex-wrap gap-2">
+          <button class="btn-outline px-2 py-1 text-[12px]" @click="loadSimilar(m.id)">{{ similarOf === m.id ? '收起相似题' : '相似错题' }}</button>
+          <button class="btn-outline px-2 py-1 text-[12px]" @click="toNote(m.id)">存为笔记</button>
+          <button class="btn-outline px-2 py-1 text-[12px]" @click="toTodo(m.id)">加入待办</button>
+          <button class="btn-outline px-2 py-1 text-[12px]" @click="toggleMistakeMastered(m.id)">{{ m.mastered ? '标为未掌握' : '订正掌握' }}</button>
+          <button class="btn-danger ml-auto px-2 py-1 text-[12px]" @click="removeMistakeRow(m.id)">删除</button>
+        </div>
+        <div v-if="similarOf === m.id" class="mt-2 rounded-control bg-ink-50 p-2 text-[12px] leading-6">
+          <div v-if="similarLoading" class="text-ink-400">正在按题干重合度找同科相似题…</div>
+          <template v-else-if="similarList.length">
+            <div class="mb-1 text-[12px] font-medium text-ink-600">找到 {{ similarList.length }} 道同科相似题</div>
+            <div v-for="s in similarList" :key="s.id" class="border-t border-ink-200/60 py-1 first:border-0">
+              <div class="flex flex-wrap items-center gap-1.5">
+                <span class="tag">{{ s.type_name }}</span>
+                <span class="tag">{{ s.cause_name }}</span>
+                <span v-if="s.mastered" class="tag bg-emerald-50 text-emerald-600">已订正</span>
+              </div>
+              <div class="mt-0.5 text-ink-700">{{ s.stem }}</div>
+              <div class="text-[11px] text-ink-400">
+                重合度 {{ Math.round((s.score || 0) * 100) }}%
+                <template v-if="s.matched_terms && s.matched_terms.length"> · 共同关键词 {{ s.matched_terms.join(' / ') }}</template>
+              </div>
+            </div>
+          </template>
+          <div v-else class="text-ink-400">还没找到相似题：同科且题干用词接近的错题至少要有 2 道；再多攒几道或换一道题试试。</div>
+        </div>
+      </div>
+      <div v-if="!mistakeShown.length" class="card grid h-32 place-items-center px-6 text-center text-[13px] leading-6 text-ink-400">
+        {{ onlyMistakeUnmastered && mistakeAll.length
+          ? '未掌握的错题都订正完了——点「显示全部」可以回看已掌握的题目。'
+          : '错题本还是空的：在上面用 CSV / JSON 批量导入，或去「题库 · 题库浏览」把做错的题收进错题本。' }}
+      </div>
+    </template>
+
+    <!-- 379 学习小组 + 380 学习榜 -->
+    <template v-else>
+      <StudyGroupPanel />
+    </template>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { learnApi } from '../../api'
 import { useAppStore } from '../../stores/app'
+import { formatTime } from '../../utils/format'
+import { saveBlob } from '../../utils/download'
+import StudyGroupPanel from './StudyGroupPanel.vue'
 
 const app = useAppStore()
+const router = useRouter()
 const tabs = [
   { v: 'overview', label: '学习概览' },
   { v: 'progress', label: '学习进度' }, { v: 'bookmark', label: '代码收藏' },
   { v: 'session', label: '专注记录' }, { v: 'plan', label: '学习计划' },
-  { v: 'redrill', label: '错题重练' },
+  { v: 'redrill', label: '错题重练' }, { v: 'mistake', label: '错题本' },
+  { v: 'group', label: '小组' },
 ]
 const tab = ref('overview')
 const today = new Date().toISOString().slice(0, 10)
 const domainName = (d) => ({ programming: '编程', school: '学科', tool: '工具' })[d] || d
-const fmt = (t) => (t || '').replace('T', ' ').slice(0, 16)
+// #192 tab 语义：左右方向键 / Home / End 在标签间切换焦点并激活
+function onTabKey(e, i) {
+  const n = tabs.length
+  let next = -1
+  if (e.key === 'ArrowRight') next = (i + 1) % n
+  else if (e.key === 'ArrowLeft') next = (i - 1 + n) % n
+  else if (e.key === 'Home') next = 0
+  else if (e.key === 'End') next = n - 1
+  if (next < 0) return
+  e.preventDefault()
+  switchTab(tabs[next].v)
+  e.currentTarget?.parentElement?.querySelectorAll('[role="tab"]')[next]?.focus()
+}
 
 const progress = ref([])
 const mastery = ref({})
@@ -505,7 +789,7 @@ async function toggleP(id) {
 }
 function histOf(p) {
   const api = Array.isArray(p.history)
-    ? p.history.map((h) => ({ at: fmt(h.updated_at || h.created_at || h.at || ''), percent: h.percent, note: h.note || h.message || '' }))
+    ? p.history.map((h) => ({ at: formatTime(h.updated_at || h.created_at || h.at || ''), percent: h.percent, note: h.note || h.message || '' }))
     : []
   const local = histMap.value[`${p.domain}:${p.target_key}`] || []
   return [...api, ...local]
@@ -528,7 +812,7 @@ async function saveProgress() {
   const saved = await learnApi.saveProgress({ ...pf })
   const key = `${pf.domain}:${pf.target_key}`
   const list = histMap.value[key] || (histMap.value[key] = [])
-  list.unshift({ at: fmt(saved?.updated_at) || fmt(new Date().toISOString()), percent: saved?.percent ?? pf.percent, note: pf.note || '保存进度' })
+  list.unshift({ at: formatTime(saved?.updated_at || new Date()), percent: saved?.percent ?? pf.percent, note: pf.note || '保存进度' })
   app.toastMsg('进度已保存', 'success')
   await loadProgress()
 }
@@ -561,6 +845,263 @@ async function addPlan() {
 }
 async function bumpPlan(p, delta) { await learnApi.updatePlan({ id: p.id, finished: Math.max(0, p.finished + delta) }); await loadPlans() }
 async function delPlan(id) { await learnApi.delPlan(id); await loadPlans() }
+
+// ===== 383 学习计划每日排程 =====
+const schedules = reactive({})
+const schedMinutes = reactive({})
+const schedLoading = reactive({})
+const writingSched = reactive({})
+async function genSchedule(p) {
+  const minutes = Number(schedMinutes[p.id]) || 60
+  schedLoading[p.id] = true
+  try {
+    schedules[p.id] = await learnApi.planSchedule(p.id, minutes)
+    if (!(schedules[p.id].schedule || []).length) app.toastMsg('该计划已没有剩余任务', 'warn')
+  } catch (e) {
+    schedules[p.id] = null
+    app.toastMsg('排程失败：' + (e?.message || '网络异常'), 'error')
+  } finally {
+    schedLoading[p.id] = false
+  }
+}
+function todayTask(p) {
+  const s = schedules[p.id]
+  return s ? (s.schedule || []).find((d) => d.is_today) || null : null
+}
+async function writeScheduleSession(p) {
+  const t = todayTask(p)
+  if (!t || !t.minutes) return app.toastMsg('今天没有可写入的任务', 'warn')
+  writingSched[p.id] = true
+  try {
+    await learnApi.addSession({ subject: p.subject || p.title, minutes: t.minutes, study_date: today })
+    app.toastMsg(`已写入打卡：${t.minutes} 分钟`, 'success')
+    await loadSessions()
+    await loadOverview()
+  } catch (e) {
+    app.toastMsg('写入打卡失败：' + (e?.message || '网络异常'), 'error')
+  } finally {
+    writingSched[p.id] = false
+  }
+}
+
+// ===== 378 考试倒计时 =====
+const exams = ref({ list: [] })
+const exf = reactive({ title: '', exam_date: '', subject: '', target_count: 0 })
+async function loadExams() {
+  try {
+    exams.value = await learnApi.exams()
+  } catch (e) {
+    exams.value = { list: [] }
+    app.toastMsg('考试倒计时加载失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+async function addExam() {
+  if (!exf.title.trim()) return app.toastMsg('请填写考试名称', 'warn')
+  if (!exf.exam_date) return app.toastMsg('请选择考试日期', 'warn')
+  try {
+    await learnApi.saveExam({ ...exf })
+    exf.title = ''; exf.exam_date = ''; exf.subject = ''; exf.target_count = 0
+    app.toastMsg('考试已添加', 'success')
+    await loadExams()
+  } catch (e) {
+    app.toastMsg('添加失败：' + (e?.message || '日期或题量不合法'), 'error')
+  }
+}
+async function delExam(id) {
+  try {
+    await learnApi.delExam(id)
+    app.toastMsg('已删除该考试', 'success')
+    await loadExams()
+  } catch (e) {
+    app.toastMsg('删除失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+
+// ===== 377 学习偏好（每日提醒 / 学习榜公开）=====
+const pref = ref({ daily_remind: false, leaderboard_public: false })
+const PREF_LABEL = { daily_remind: '每日提醒', leaderboard_public: '学习榜公开' }
+async function loadPref() {
+  try {
+    pref.value = await learnApi.studyPref()
+  } catch {
+    pref.value = { daily_remind: false, leaderboard_public: false }
+  }
+}
+async function togglePref(key) {
+  const next = !pref.value[key]
+  try {
+    pref.value = await learnApi.saveStudyPref({ [key]: next })
+    app.toastMsg(`${PREF_LABEL[key]}已${next ? '开启' : '关闭'}`, 'success')
+  } catch (e) {
+    app.toastMsg('设置失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+async function checkRemind() {
+  try {
+    const r = await learnApi.remindCheck()
+    if (r.sent) app.toastMsg(`已发出提醒：今日还差 ${r.gap} 分钟`, 'success')
+    else app.toastMsg(r.reason || '当前不需要提醒', 'info')
+  } catch (e) {
+    app.toastMsg('检查提醒失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+
+// ===== 390 每日目标达成预测 =====
+const forecast = ref({})
+async function loadForecast() {
+  try {
+    forecast.value = await learnApi.goalForecast()
+  } catch {
+    forecast.value = {}
+  }
+}
+
+// ===== 389 学习时长 × 工具使用 =====
+const usageDays = ref(30)
+const usage = ref({})
+const usageSeries = computed(() => usage.value.series || [])
+const usageMax = computed(() => Math.max(...usageSeries.value.map((d) => d.minutes), 1))
+const usageCallsMax = computed(() => Math.max(...usageSeries.value.map((d) => d.tool_calls), 1))
+async function loadUsage() {
+  try {
+    usage.value = await learnApi.usageReport(usageDays.value)
+  } catch (e) {
+    usage.value = {}
+    app.toastMsg('报表加载失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+
+// ===== 384 掌握度热力图 =====
+const heatmap = ref({})
+const HEAT_LEGEND = [
+  { cls: 'bg-rose-200', label: '0–39%' },
+  { cls: 'bg-amber-200', label: '40–69%' },
+  { cls: 'bg-emerald-300', label: '70–89%' },
+  { cls: 'bg-emerald-500', label: '90–100%' },
+]
+function heatCls(rate) {
+  if (rate === null || rate === undefined) return 'bg-ink-100'
+  if (rate < 40) return 'bg-rose-200'
+  if (rate < 70) return 'bg-amber-200'
+  if (rate < 90) return 'bg-emerald-300'
+  return 'bg-emerald-500'
+}
+async function loadHeatmap() {
+  try {
+    heatmap.value = await learnApi.masteryHeatmap(90)
+  } catch (e) {
+    heatmap.value = {}
+    app.toastMsg('热力图加载失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+
+// ===== 376 薄弱错因聚类 =====
+const clusterData = ref({ top: [] })
+const clusters = computed(() => (clusterData.value.top || []).map((c, i) => ({ ...c, rank: i + 1 })))
+async function loadClusters() {
+  try {
+    clusterData.value = await learnApi.mistakeClusters()
+  } catch {
+    clusterData.value = { top: [] }
+  }
+}
+
+// ===== 373/374/375/387/388 错题整理 =====
+const impFmt = ref('csv')
+const impText = ref('')
+const importing = ref(false)
+const impResult = ref(null)
+const mistakeAll = ref([])
+const onlyMistakeUnmastered = ref(false)
+const todoDue = ref('')
+const MISTAKE_CAUSE = { careless: '粗心失误', concept: '概念不清', review: '审题失误', method: '方法不会', memory: '记忆错误' }
+const mistakeUnmastered = computed(() => mistakeAll.value.filter((m) => !m.mastered).length)
+const mistakeShown = computed(() => (onlyMistakeUnmastered.value ? mistakeAll.value.filter((m) => !m.mastered) : mistakeAll.value))
+async function loadMistakeAll() {
+  try {
+    const d = await learnApi.mistakes()
+    mistakeAll.value = d.list || []
+  } catch (e) {
+    mistakeAll.value = []
+    app.toastMsg('错题本加载失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+async function doImport() {
+  if (!impText.value.trim()) return app.toastMsg('请先粘贴要导入的内容', 'warn')
+  importing.value = true
+  try {
+    impResult.value = await learnApi.importMistakes({ format: impFmt.value, text: impText.value })
+    app.toastMsg(`导入完成：新建 ${impResult.value.created} 道，跳过 ${impResult.value.skipped} 行`, 'success')
+    await loadMistakeAll()
+  } catch (e) {
+    impResult.value = null
+    app.toastMsg('导入失败：' + (e?.message || '格式或行内容有误'), 'error')
+  } finally {
+    importing.value = false
+  }
+}
+async function downloadMistakes(fmt) {
+  try {
+    const blob = await learnApi.exportMistakes(fmt)
+    saveBlob(blob, `mistakes_${today}.${fmt === 'anki' ? 'txt' : 'csv'}`)
+    app.toastMsg(fmt === 'anki' ? 'Anki 卡包已导出' : 'CSV 已导出', 'success')
+  } catch (e) {
+    app.toastMsg('导出失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+const similarOf = ref(null)
+const similarLoading = ref(false)
+const similarList = ref([])
+async function loadSimilar(id) {
+  if (similarOf.value === id) { similarOf.value = null; return }
+  similarOf.value = id
+  similarLoading.value = true
+  similarList.value = []
+  try {
+    const d = await learnApi.similarMistakes(id, 10)
+    similarList.value = d.list || []
+  } catch (e) {
+    similarList.value = []
+    app.toastMsg('相似错题加载失败：' + (e?.message || '网络异常'), 'error')
+  } finally {
+    similarLoading.value = false
+  }
+}
+async function toNote(id) {
+  try {
+    const r = await learnApi.mistakeToNote(id)
+    app.toastMsg('已存为笔记，正在打开…', 'success')
+    router.push({ path: '/notes', query: { id: r?.note_id } })
+  } catch (e) {
+    app.toastMsg('存笔记失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+async function toTodo(id) {
+  try {
+    const r = await learnApi.mistakeToTodo(id, todoDue.value || '')
+    app.toastMsg(`已加入待办${r?.due_date ? '（' + r.due_date + ' 到期）' : ''}`, 'success')
+  } catch (e) {
+    app.toastMsg('加入待办失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+async function toggleMistakeMastered(id) {
+  try {
+    await learnApi.toggleMistake(id)
+    await loadMistakeAll()
+    await loadClusters()
+  } catch (e) {
+    app.toastMsg('操作失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+async function removeMistakeRow(id) {
+  try {
+    await learnApi.delMistake(id)
+    app.toastMsg('已删除该错题', 'success')
+    await loadMistakeAll()
+  } catch (e) {
+    app.toastMsg('删除失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
 
 // ===== F523 每日学习目标 =====
 const goal = ref({})
@@ -845,15 +1386,23 @@ async function loadOverview() {
 
 async function switchTab(v) {
   tab.value = v
-  if (v === 'overview') { await loadOverview(); await loadGoal(); await loadBadges(); await loadWeakness(); await loadStreak(); await loadReviewQueue() }
-  if (v === 'progress') await loadProgress()
+  if (v === 'overview') {
+    await loadOverview(); await loadGoal(); await loadBadges(); await loadWeakness()
+    await loadStreak(); await loadReviewQueue()
+    await loadForecast(); await loadPref(); await loadExams(); await loadUsage()
+  }
+  if (v === 'progress') { await loadProgress(); await loadHeatmap(); await loadClusters() }
   if (v === 'bookmark') await loadBookmarks()
   if (v === 'session') { await loadSessions(); await loadPomoStat() }
   if (v === 'plan') await loadPlans()
   if (v === 'redrill') await loadReDrill()
+  if (v === 'mistake') await loadMistakeAll()
 }
 
-onMounted(() => { loadOverview(); loadGoal(); loadBadges(); loadWeakness(); loadStreak(); loadReviewQueue() })
+onMounted(() => {
+  loadOverview(); loadGoal(); loadBadges(); loadWeakness(); loadStreak(); loadReviewQueue()
+  loadForecast(); loadPref(); loadExams(); loadUsage()
+})
 
 onUnmounted(() => {
   pomoDisposed = true

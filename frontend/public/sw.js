@@ -1,9 +1,11 @@
 /* F59 PWA 离线壳
  * 策略：导航请求 network-first（成功回写壳缓存，失败用缓存的 index.html）；
  *       静态资源 cache-first；/api /ws /media 一律不拦截、不缓存，避免脏数据。
- * 换版本时改 CACHE 后缀即可让旧缓存整体失效。
+ * 版本：main.js 注册时带上构建号（/sw.js?v=BUILD），cache 名随构建号变化，
+ *       activate 会清掉所有旧版本缓存，发版后不会继续读旧 /assets。
  */
-const CACHE = 'aio-shell-v1'
+const BUILD = new URL(self.location.href).searchParams.get('v') || 'dev'
+const CACHE = `aio-shell-${BUILD}`
 const SHELL = ['/', '/manifest.webmanifest', '/icon.svg']
 
 const OFFLINE_HTML = `<!doctype html>
@@ -40,6 +42,11 @@ self.addEventListener('activate', (event) => {
       .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   )
+})
+
+// 新版本提示：页面确认后跳过等待，controllerchange 时刷新
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting()
 })
 
 function isBypassed(url) {

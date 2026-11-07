@@ -149,11 +149,28 @@
         沉淀区：词表里点「＋」进来的、或你在上面手动输入的词都收在这里；顶部统计总数与已掌握数。
         过完一遍觉得稳了点「已掌握」，卡片会变灰划上删除线，随时能删——它是听写和测验的复习底账。
       </p>
-      <div class="card flex items-center gap-2 p-4">
+      <div class="card flex flex-wrap items-center gap-2 p-4">
         <input v-model="newWord" class="input w-48" placeholder="输入单词加入生词本" @keyup.enter="addNew" />
         <button class="btn-primary" @click="addNew">添加</button>
         <button class="btn-outline" @click="loadBook">刷新</button>
+        <button class="btn-outline" @click="exportBook">导出 CSV</button>
+        <button class="btn-outline" @click="showImport = !showImport">{{ showImport ? '收起导入' : '导入' }}</button>
         <span class="text-[12px] text-ink-400">共 {{ book.length }} 个，已掌握 {{ masteredCount }} 个</span>
+      </div>
+      <div v-if="showImport" class="card p-4">
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+          <span class="text-[13px] font-medium text-ink-700">导入生词本</span>
+          <select v-model="impFmt" class="input h-8 w-24 text-[12px]">
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+          </select>
+          <button class="btn-primary px-3 py-1" :disabled="importing" @click="importBook">{{ importing ? '导入中…' : '开始导入' }}</button>
+          <span class="text-[11px] text-ink-400">CSV 表头：单词,音标,释义,已掌握；按单词去重</span>
+        </div>
+        <textarea v-model="impText" rows="4" class="input w-full font-mono text-[11px]"
+          :placeholder="impFmt === 'csv' ? '单词,音标,释义,已掌握\napple,/ˈæpl/,苹果,否' : '[{&quot;word&quot;:&quot;apple&quot;,&quot;meaning&quot;:&quot;苹果&quot;}]'"></textarea>
+        <div v-if="impMsg" class="mt-2 rounded-control bg-ink-50 p-2 text-[12px] leading-6 text-ink-600">{{ impMsg }}</div>
+        <div v-else class="mt-2 text-[11px] leading-5 text-ink-400">换设备或换端时把导出的 CSV 粘进来即可；已存在的单词会跳过，不会重复。</div>
       </div>
       <div class="grid gap-2 md:grid-cols-2">
         <div v-for="b in book" :key="b.id" class="card flex items-center gap-3 p-3" :class="b.mastered ? 'opacity-60' : ''">
@@ -170,11 +187,12 @@
       </div>
     </div>
 
-    <!-- 单词详情弹层（F508/S10：接通 learnApi.word） -->
+    <!-- 单词详情弹层（F508/S10：接通 learnApi.word · #187 无障碍对话框） -->
     <div v-if="wordDetail" class="fixed inset-0 z-50 grid place-items-center bg-ink-900/40 p-4" @click.self="closeWord">
-      <div class="card w-full max-w-lg p-5">
+      <div ref="wordDialogRef" class="card w-full max-w-lg p-5" role="dialog" aria-modal="true"
+        aria-labelledby="word-detail-title" tabindex="-1">
         <div class="flex flex-wrap items-center gap-2">
-          <h3 class="text-[18px] font-semibold text-ink-900">{{ wordDetail.word }}</h3>
+          <h3 id="word-detail-title" class="text-[18px] font-semibold text-ink-900">{{ wordDetail.word }}</h3>
           <span class="font-mono text-[12px] text-ink-400">{{ wordDetail.phonetic }}</span>
           <span v-if="wordDetail.pos" class="tag">{{ wordDetail.pos }}</span>
           <button class="btn-ghost ml-auto" @click="closeWord">关闭 ✕</button>
@@ -209,9 +227,10 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { learnApi } from '../../../api'
 import { useAppStore } from '../../../stores/app'
+import { saveBlob } from '../../../utils/download'
 
 const app = useAppStore()
 const tabs = [
@@ -233,6 +252,7 @@ async function loadWords() {
 // ===== 单词详情弹层（接通 learnApi.word，字段缺失时优雅隐藏）=====
 const wordDetail = ref(null)
 const wordLoading = ref(false)
+const wordDialogRef = ref(null)
 const stageLabel = (s) => ({ primary: '小学', junior: '初中', senior: '高中' }[s] || '全部学段')
 const asList = (v) => (Array.isArray(v) ? v : v ? [v] : [])
 const textOf = (v) => {
@@ -241,17 +261,57 @@ const textOf = (v) => {
   if (typeof v === 'object') return Object.entries(v).map(([k, x]) => `${k}：${x}`).join('；')
   return String(v)
 }
+// #154 竞态守卫：记录本次请求的单词，回包与当前选中不一致则丢弃
+let wordSeq = 0
 async function openWord(w) {
+  const seq = ++wordSeq
   wordLoading.value = true
   wordDetail.value = { word: w }
   try {
-    wordDetail.value = await learnApi.word(w)
+    const data = await learnApi.word(w)
+    if (seq !== wordSeq) return
+    wordDetail.value = data
   } catch (e) {
+    if (seq !== wordSeq) return
     app.toastMsg(e?.message || '该词详情暂未收录', 'warn')
     wordDetail.value = null
-  } finally { wordLoading.value = false }
+  } finally {
+    if (seq === wordSeq) wordLoading.value = false
+  }
 }
-function closeWord() { wordDetail.value = null; wordLoading.value = false }
+// #187 关闭时焦点归还原触发元素 + 解除滚动锁（由 watch 统一处理）
+function closeWord() {
+  wordSeq += 1  // 关闭后迟到的回包不再写入
+  wordDetail.value = null
+  wordLoading.value = false
+}
+// #187 滚动锁 + 焦点归还 + Esc 关闭
+let wordLastActive = null
+let wordPrevOverflow = ''
+function onWordDialogKeydown(e) {
+  if (e.key !== 'Escape') return
+  e.stopPropagation()
+  closeWord()
+}
+watch(() => !!wordDetail.value, async (open) => {
+  if (open) {
+    wordLastActive = document.activeElement
+    wordPrevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', onWordDialogKeydown)
+    await nextTick()
+    wordDialogRef.value?.focus()
+  } else {
+    document.body.style.overflow = wordPrevOverflow
+    document.removeEventListener('keydown', onWordDialogKeydown)
+    if (wordLastActive && typeof wordLastActive.focus === 'function') wordLastActive.focus()
+    wordLastActive = null
+  }
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onWordDialogKeydown)
+  if (wordDetail.value) document.body.style.overflow = wordPrevOverflow
+})
 
 const dictation = ref([])
 const dictAns = ref({})
@@ -336,6 +396,39 @@ async function addWord(w) { await learnApi.addWord(w); app.toastMsg(`已加入�
 async function addNew() { if (!newWord.value) return; await learnApi.addWord(newWord.value); newWord.value = ''; await loadBook() }
 async function toggleBook(id) { await learnApi.toggleWord(id); await loadBook() }
 async function removeBook(id) { await learnApi.delWord(id); await loadBook() }
+
+// 386 生词本导入 / 导出（换端不丢）
+const showImport = ref(false)
+const impFmt = ref('csv')
+const impText = ref('')
+const impMsg = ref('')
+const importing = ref(false)
+async function exportBook() {
+  try {
+    const blob = await learnApi.exportWordbook('csv')
+    saveBlob(blob, `wordbook_${new Date().toISOString().slice(0, 10)}.csv`)
+    app.toastMsg('生词本已导出为 CSV', 'success')
+  } catch (e) {
+    app.toastMsg('导出失败：' + (e?.message || '网络异常'), 'error')
+  }
+}
+async function importBook() {
+  if (!impText.value.trim()) return app.toastMsg('请先粘贴要导入的内容', 'warn')
+  importing.value = true
+  impMsg.value = ''
+  try {
+    const r = await learnApi.importWordbook({ format: impFmt.value, text: impText.value })
+    impMsg.value = `共 ${r.total} 行：新增 ${r.created} 个、跳过 ${r.skipped} 行（重复 ${r.duplicated || 0}）`
+    if (r.errors?.length) impMsg.value += '；有 ' + r.errors.length + ' 行格式不对：' + r.errors.map((x) => `第${x.row}行 ${x.error}`).join('，')
+    app.toastMsg(`导入完成：新增 ${r.created} 个单词`, 'success')
+    await loadBook()
+  } catch (e) {
+    impMsg.value = ''
+    app.toastMsg('导入失败：' + (e?.message || '格式或行内容有误'), 'error')
+  } finally {
+    importing.value = false
+  }
+}
 
 async function switchTab(v) {
   tab.value = v

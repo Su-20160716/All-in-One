@@ -10,17 +10,32 @@
 
       <div class="mx-1 h-5 w-px bg-slate-200"></div>
 
-      <!-- 工作区切换 -->
+      <!-- 工作区切换（活跃 / 已归档分组） -->
       <select v-model="activeWsId" class="input h-7 py-0 text-[12px]" style="width: 190px" @change="onSwitchWorkspace">
         <option :value="null">— 选择工作区 —</option>
-        <option v-for="w in workspaces" :key="w.id" :value="w.id">
-          {{ w.icon }} {{ w.name }}（{{ w.file_count }}）
-        </option>
+        <optgroup label="活跃">
+          <option v-for="w in activeWorkspaces" :key="w.id" :value="w.id">
+            {{ w.icon }} {{ w.name }}（{{ w.file_count }}）
+          </option>
+        </optgroup>
+        <optgroup v-if="archivedWorkspaces.length" label="已归档">
+          <option v-for="w in archivedWorkspaces" :key="w.id" :value="w.id">
+            {{ w.icon }} {{ w.name }}（已归档）
+          </option>
+        </optgroup>
       </select>
 
-      <button class="btn-outline h-7 px-2 text-[12px]" @click="showWsModal = true">＋ 新建</button>
+      <button class="btn-outline h-7 px-2 text-[12px]" @click="openWsModal">＋ 新建</button>
+      <input ref="zipInput" type="file" accept=".zip" class="hidden" @change="doImportZip" />
+      <button class="btn-ghost h-7 px-2 text-[12px]" title="把本地工程 zip 导入成工作区" @click="zipInput?.click()">⬆ 导入 zip</button>
       <button v-if="activeWs" class="btn-ghost h-7 px-2 text-[12px]" @click="openWsSettings">⚙ 设置</button>
       <button v-if="activeWs" class="btn-ghost h-7 px-2 text-[12px]" @click="doCloneWs">⧉ 克隆</button>
+      <button
+        v-if="activeWs"
+        class="btn-ghost h-7 px-2 text-[12px]"
+        :title="activeWs.is_archived ? '把该工作区恢复到活跃列表' : '归档后从活跃列表折叠'"
+        @click="toggleArchive"
+      >{{ activeWs.is_archived ? '📂 取消归档' : '📦 归档' }}</button>
       <button v-if="activeWs" class="btn-ghost h-7 px-2 text-[12px]" @click="doExportZip">⬇ 导出 zip</button>
 
       <div class="flex-1"></div>
@@ -72,6 +87,7 @@
       <aside class="flex w-56 shrink-0 flex-col border-r border-slate-200 bg-white">
         <div class="flex items-center gap-1 border-b border-slate-100 px-2 py-1.5">
           <input v-model="fileQuery" class="input h-6 flex-1 py-0 text-[11px]" placeholder="筛选文件…" />
+          <button class="btn-ghost h-6 w-5 px-0 text-[11px]" title="工作区全局搜索替换" @click="openGlobalSearch">🔎</button>
           <button class="btn-ghost h-6 w-6 px-0 text-[13px]" title="新建文件" @click="showFileModal = true">＋</button>
         </div>
 
@@ -82,9 +98,11 @@
               :key="node.path"
               :node="node"
               :active-id="activeFileId"
+              :selected-ids="selectedFileIds"
               :depth="0"
               @open="openFile"
               @ctx="onTreeCtx"
+              @select="toggleTreeSelect"
             />
             <div v-if="!filteredTree.length" class="px-3 py-6 text-center text-[11px] text-ink-400">
               {{ fileQuery ? '没有匹配的文件' : '工作区还是空的' }}
@@ -92,6 +110,19 @@
           </template>
           <div v-else class="px-3 py-6 text-center text-[11px] text-ink-400">
             先创建或选择一个工作区
+          </div>
+        </div>
+
+        <!-- 262 多选操作栏 -->
+        <div v-if="selectedFileIds.length" class="border-t border-slate-100 bg-brand-50/60 p-1.5">
+          <div class="mb-1 flex items-center gap-1 px-1 text-[10px] text-ink-500">
+            <span>已选 {{ selectedFileIds.length }} 个文件</span>
+            <button class="ml-auto hover:text-ink-700" @click="clearTreeSelect">取消</button>
+          </div>
+          <div class="flex gap-1">
+            <button class="btn-outline h-6 flex-1 text-[11px]" @click="openPathDialog('batch-move')">移动</button>
+            <button class="btn-ghost h-6 text-[11px]" @click="batchAction('favorite')">收藏</button>
+            <button class="btn-ghost h-6 text-[11px] text-rose-600" @click="batchAction('delete')">删除</button>
           </div>
         </div>
 
@@ -207,6 +238,7 @@
           </button>
           <button class="btn-ghost h-6 px-1.5 text-[11px]" @click="doComplexity">⏱ 复杂度</button>
           <button class="btn-ghost h-6 px-1.5 text-[11px]" @click="openTemplateMenu" title="插入常用代码模板">📋 模板</button>
+          <button class="btn-ghost h-6 px-1.5 text-[11px]" @click="formatCurrent" title="去行尾空格 / 统一缩进 / 压缩空行 / 补结尾换行">✨ 格式化</button>
           <button class="btn-ghost h-6 px-1.5 text-[11px]" @click="doAiReview" :disabled="reviewing" title="AI 代码评审">🤖 评审</button>
 
           <div class="mx-0.5 h-4 w-px bg-slate-200"></div>
@@ -512,6 +544,29 @@
               <button class="btn-outline h-6 text-[11px]" :disabled="!activeFile" @click="doComplexity">复杂度</button>
               <button class="btn-outline h-6 text-[11px]" :disabled="!activeFile" @click="loadQuality">质量评分</button>
               <button class="btn-outline h-6 text-[11px]" :disabled="!activeFile" @click="drawer = ''; doDuplicateCheck()">查重</button>
+              <button class="btn-outline h-6 text-[11px]" :disabled="!activeWsId || depBusy" @click="loadDependencyGraph">依赖图</button>
+            </div>
+
+            <!-- #271 工作区依赖图 -->
+            <div v-if="depGraph" class="mb-2 rounded border border-slate-200 p-2">
+              <div class="mb-1 flex items-center gap-2 text-[11px]">
+                <span class="font-medium text-ink-700">依赖关系</span>
+                <span class="text-ink-400">{{ depGraph.stats.files }} 文件 · {{ depGraph.stats.edges }} 条边 · 未解析 {{ depGraph.stats.unresolved }}</span>
+                <button class="ml-auto text-ink-400 hover:text-ink-700" @click="depGraph = null">×</button>
+              </div>
+              <div class="max-h-48 space-y-0.5 overflow-y-auto font-mono text-[10px] text-ink-600">
+                <button
+                  v-for="(e, i) in depGraph.edges"
+                  :key="i"
+                  class="block w-full truncate text-left hover:text-brand-700"
+                  :title="`${e.from_path} → ${e.to_path}`"
+                  @click="openFile({ id: e.from })"
+                >{{ e.from_path }} → {{ e.to_path }}</button>
+                <div v-if="!depGraph.edges.length" class="text-ink-400">文件之间没有引用</div>
+              </div>
+              <div v-if="depGraph.unresolved.length" class="mt-1 max-h-24 space-y-0.5 overflow-y-auto text-[10px] text-amber-700">
+                <div v-for="(u, i) in depGraph.unresolved.slice(0, 30)" :key="i">未解析 {{ u.path }} → {{ u.ref }}</div>
+              </div>
             </div>
 
             <div v-if="analysis" class="space-y-2">
@@ -592,6 +647,7 @@
           <template v-else-if="drawer === 'history'">
             <div class="mb-2 flex gap-1">
               <button class="btn-outline h-6 flex-1 text-[11px]" @click="loadHistory">刷新</button>
+              <button class="btn-outline h-6 text-[11px]" title="导出为 CSV（时间为本地时区）" @click="exportRunsCsv">⬇ CSV</button>
               <button class="btn-ghost h-6 text-[11px]" @click="clearHistory">清空</button>
             </div>
             <div v-if="runHistory.length" class="space-y-1">
@@ -606,7 +662,7 @@
                   <span class="font-mono text-ink-700">{{ r.language }}</span>
                   <span class="ml-auto text-ink-400">{{ r.duration_ms }}ms</span>
                 </div>
-                <div class="mt-0.5 text-ink-400">{{ fmtTime(r.created_at) }}</div>
+                <div class="mt-0.5 text-ink-400">{{ formatTime(r.created_at) }}</div>
                 <div v-if="r.stdout_preview" class="mt-0.5 truncate font-mono text-ink-500">{{ r.stdout_preview }}</div>
               </div>
             </div>
@@ -693,7 +749,7 @@
                 </div>
                 <div class="mt-0.5 truncate font-mono text-ink-500">{{ v.preview }}</div>
                 <div class="mt-1 flex items-center gap-1">
-                  <span class="text-ink-400">{{ fmtTime(v.created_at) }}</span>
+                  <span class="text-ink-400">{{ formatTime(v.created_at) }}</span>
                   <div class="flex-1"></div>
                   <button class="btn-ghost h-5 px-1 text-[11px]" @click="viewDiff(v.id)">比对当前</button>
                   <button class="btn-ghost h-5 px-1 text-[11px] text-amber-700" @click="doRollback(v)">回滚</button>
@@ -725,6 +781,14 @@
 
           <!-- ---- 评论抽屉 ---- -->
           <template v-else-if="commentDrawer">
+            <!-- #277 过滤 + 计数 -->
+            <div class="mb-2 flex items-center gap-2 text-[11px] text-ink-500">
+              <label class="flex items-center gap-1">
+                <input v-model="commentOnlyUnresolved" type="checkbox" @change="loadComments" />
+                仅未解决
+              </label>
+              <span class="ml-auto">未解决 {{ commentCounts.unresolved }} / 共 {{ commentCounts.total }} 条</span>
+            </div>
             <div class="mb-2 rounded border border-slate-200 p-2">
               <div class="mb-1 flex items-center gap-1.5 text-[11px] text-ink-600">
                 <span>针对第</span>
@@ -740,7 +804,7 @@
                 <div class="flex items-center gap-1.5">
                   <span class="tag">L{{ c.line }}</span>
                   <span class="font-medium text-ink-800">{{ c.author }}</span>
-                  <span class="ml-auto text-ink-400">{{ fmtTime(c.created_at) }}</span>
+                  <span class="ml-auto text-ink-400">{{ formatTime(c.created_at) }}</span>
                 </div>
                 <div class="mt-1 cursor-pointer text-ink-700" @click="editorRef?.goToLine(c.line)">{{ c.content }}</div>
                 <div v-for="r in c.replies" :key="r.id" class="mt-1 border-l-2 border-slate-200 pl-2 text-ink-600">
@@ -766,6 +830,24 @@
     <!-- ============ 模态框 ============ -->
     <Modal v-model="showWsModal" title="新建工作区">
       <div class="space-y-2">
+        <!-- #263 多文件模板 -->
+        <div>
+          <label class="mb-1 block text-[12px] text-ink-600">从模板创建（多文件结构，点一下即建）</label>
+          <div class="grid grid-cols-2 gap-1">
+            <button
+              v-for="t in wsTemplates"
+              :key="t.key"
+              class="rounded border border-slate-200 px-2 py-1.5 text-left text-[12px] hover:border-brand-400 hover:bg-brand-50/40"
+              :title="t.files.join('、')"
+              @click="createFromTemplate(t)"
+            >
+              <div class="font-medium text-ink-800">{{ t.name }}</div>
+              <div class="truncate text-[11px] text-ink-400">{{ t.description }}（{{ t.file_count }} 个文件）</div>
+            </button>
+          </div>
+          <div v-if="!wsTemplates.length" class="text-[11px] text-ink-400">模板加载中…</div>
+        </div>
+        <div class="border-t border-slate-100 pt-2"></div>
         <div>
           <label class="mb-1 block text-[12px] text-ink-600">工作区名</label>
           <input v-model="wsForm.name" class="input" placeholder="例如：算法练习" />
@@ -812,6 +894,16 @@
         <div>
           <label class="mb-1 block text-[12px] text-ink-600">题目名</label>
           <input v-model="judgeForm.title" class="input" />
+        </div>
+        <!-- #275 用例集：载入 / 保存 / 删除 -->
+        <div class="flex items-center gap-1">
+          <label class="shrink-0 text-[12px] text-ink-600">用例集</label>
+          <select v-model.number="caseSetId" class="input h-7 flex-1 py-0 text-[12px]" @change="loadCaseSet">
+            <option :value="0">— 不使用已保存用例集 —</option>
+            <option v-for="s in caseSets" :key="s.id" :value="s.id">{{ s.title }}（{{ s.case_count }} 条）</option>
+          </select>
+          <button class="btn-outline h-7 shrink-0 text-[11px]" @click="saveCaseSet">{{ caseSetId ? '更新用例集' : '保存用例集' }}</button>
+          <button v-if="caseSetId" class="btn-ghost h-7 shrink-0 text-[11px] text-rose-600" @click="removeCaseSet">删除</button>
         </div>
         <div>
           <div class="mb-1 flex items-center gap-2">
@@ -867,7 +959,18 @@
           <option value="__mine">我的收藏 ★</option>
           <option v-for="f in snippetFolders" :key="f.key" :value="f.key">{{ f.label }}（{{ f.count }}）</option>
         </select>
+        <!-- #280 排序（记忆选择） -->
+        <select v-model="snippetSort" class="input h-7 py-0 text-[12px]" style="width: 104px" title="排序方式" @change="loadSnippets">
+          <option value="updated">按更新</option>
+          <option value="popular">按使用量</option>
+          <option value="created">按创建时间</option>
+          <option value="title">按标题</option>
+        </select>
         <button class="btn-outline h-7 text-[12px]" @click="loadSnippets">搜索</button>
+        <!-- #267 片段库导出 / 导入 -->
+        <button class="btn-ghost h-7 text-[12px]" title="导出为 JSON" @click="exportSnippetsJson">导出</button>
+        <button class="btn-ghost h-7 text-[12px]" title="从 JSON 导入（按标题+语言去重）" @click="snippetFileInput?.click()">导入</button>
+        <input ref="snippetFileInput" type="file" accept=".json,application/json" class="hidden" @change="importSnippetsJson" />
         <button class="btn-primary h-7 text-[12px]" :disabled="!activeFile" @click="saveCurrentAsSnippet">存为片段</button>
       </div>
       <div class="mb-1.5 flex flex-wrap items-center gap-1 text-[11px] text-ink-400">
@@ -881,6 +984,8 @@
             <span class="tag">{{ s.language }}</span>
             <span v-if="s.folder" class="tag bg-brand-50 text-brand-700">📁 {{ s.folder }}</span>
             <span v-for="t in s.tags" :key="t" class="tag bg-brand-50 text-brand-700">{{ t }}</span>
+            <!-- #268 占位符变量数 -->
+            <span v-if="s.variable_count" class="tag bg-amber-50 text-amber-700" title="插入时逐个填写">变量 {{ s.variable_count }}</span>
             <div class="flex-1"></div>
             <button
               v-if="s.is_mine"
@@ -896,6 +1001,8 @@
           <div class="mt-1 flex gap-1">
             <button class="btn-ghost h-5 px-1 text-[11px]" @click="insertSnippet(s)">插入</button>
             <button class="btn-ghost h-5 px-1 text-[11px]" @click="copyText(s.code)">复制</button>
+            <!-- #265 片段生成工作区文件 -->
+            <button class="btn-ghost h-5 px-1 text-[11px]" :disabled="!workspaces.length" @click="openSnippetToFile(s)">生成文件</button>
             <button class="btn-ghost h-5 px-1 text-[11px]" @click="copySnippetInto(s)">存入我的库</button>
             <button v-if="s.is_mine" class="btn-ghost h-5 px-1 text-[11px]" @click="moveSnippetToFolder(s)">📁 归组</button>
             <button v-if="s.is_mine" class="btn-ghost h-5 px-1 text-[11px] text-rose-600" @click="removeSnippet(s)">删除</button>
@@ -998,6 +1105,14 @@
         <p class="text-[11px] text-ink-400">
           预设按语言保存在服务端（run/presets），换设备也能用；未保存的改动仅作用于当前语言。
         </p>
+        <!-- #279 预设导出 / 导入 -->
+        <div class="flex items-center gap-2 border-t border-slate-100 pt-2 text-[11px] text-ink-500">
+          <span>换设备 / 分享给同事</span>
+          <div class="flex-1"></div>
+          <button class="btn-ghost h-6 text-[11px]" @click="exportRunPresetsJson">导出 JSON</button>
+          <button class="btn-ghost h-6 text-[11px]" @click="presetFileInput?.click()">导入 JSON</button>
+          <input ref="presetFileInput" type="file" accept=".json,application/json" class="hidden" @change="importRunPresetsJson" />
+        </div>
         <div class="flex justify-end gap-2">
           <button v-if="activePreset" class="btn-danger" @click="removeRunPreset">删除预设</button>
           <button class="btn-outline" @click="choosePreset(null); showRunCfg = false">清空</button>
@@ -1244,20 +1359,284 @@
             </div>
           </div>
         </div>
+
+        <!-- #272 未被引用文件：一键归档 / 删除 -->
+        <div class="mt-4 rounded border border-ink-100 p-2.5">
+          <div class="mb-1.5 flex items-center gap-2">
+            <span class="text-[12px] font-semibold text-ink-900">未被引用文件</span>
+            <span v-if="orphans" class="tag bg-ink-100 text-ink-500">{{ orphans.total }} / {{ orphans.scanned }}</span>
+            <span v-if="orphansBusy" class="text-[11px] text-ink-400">扫描中…</span>
+            <div class="flex-1"></div>
+            <button class="btn-ghost h-5 px-1 text-[11px]" :disabled="orphansBusy" @click="loadOrphans">重新扫描</button>
+          </div>
+          <div v-if="!activeWsId" class="text-[11px] text-ink-400">先选择一个工作区</div>
+          <template v-else-if="orphans">
+            <div v-if="!orphans.total" class="text-[11px] text-emerald-600">✓ 所有文件都能从入口到达</div>
+            <div v-else class="max-h-40 space-y-1 overflow-y-auto">
+              <div
+                v-for="it in orphans.items"
+                :key="it.id"
+                class="flex items-center gap-2 rounded bg-ink-50 px-2 py-1 text-[11px]"
+              >
+                <button class="min-w-0 flex-1 truncate text-left font-mono text-ink-700 hover:text-brand-700" :title="it.path" @click="openFile({ id: it.id })">
+                  {{ it.path }}
+                </button>
+                <span class="shrink-0 text-ink-400">被引用 {{ it.refs }} 次</span>
+                <button class="btn-ghost h-5 px-1 text-[11px]" @click="archiveOrphan(it)">归档</button>
+                <button class="btn-ghost h-5 px-1 text-[11px] text-rose-600" @click="deleteOrphan(it)">删除</button>
+              </div>
+            </div>
+            <div v-if="orphans.entries.length" class="mt-1 truncate text-[10px] text-ink-400">
+              入口：{{ orphans.entries.map((e) => e.path).join('、') }}
+            </div>
+          </template>
+        </div>
       </template>
+    </Modal>
+
+    <!-- #169 保存运行预设（页内输入，替代 window.prompt） -->
+    <Modal v-model="presetDialog" title="保存运行预设" width="440px">
+      <div class="space-y-2">
+        <label class="block text-[12px] text-ink-600">预设名称（按语言保存 stdin / 参数 / 超时）</label>
+        <input v-model="presetName" class="input" placeholder="例如：Python 标准输入" @keyup.enter="confirmSavePreset" />
+      </div>
+      <div class="mt-3 flex justify-end gap-2">
+        <button class="btn-outline" @click="presetDialog = false">取消</button>
+        <button class="btn-primary" :disabled="!presetName.trim()" @click="confirmSavePreset">保存</button>
+      </div>
+    </Modal>
+
+    <!-- #169 片段归组（页内输入，替代 window.prompt） -->
+    <Modal v-model="folderDialog" title="片段归组" width="440px">
+      <div class="space-y-2">
+        <label class="block text-[12px] text-ink-600">收藏夹分组（留空 = 移出分组）</label>
+        <input v-model="folderInput" class="input" placeholder="例如：排序算法" @keyup.enter="confirmMoveSnippet" />
+      </div>
+      <div class="mt-3 flex justify-end gap-2">
+        <button class="btn-outline" @click="folderDialog = false">取消</button>
+        <button class="btn-primary" @click="confirmMoveSnippet">确定</button>
+      </div>
+    </Modal>
+
+    <!-- #169 版本回滚确认（页内确认，替代 window.confirm） -->
+    <Modal :show="!!rollbackTarget" title="确认回滚" width="440px" @close="rollbackTarget = null">
+      <div class="text-[13px] text-ink-700">
+        确认回滚到「{{ rollbackTarget ? rollbackTarget.message : '' }}」？当前内容会先存为快照。
+      </div>
+      <div class="mt-3 flex justify-end gap-2">
+        <button class="btn-outline" @click="rollbackTarget = null">取消</button>
+        <button class="btn-primary" @click="confirmRollback">回滚</button>
+      </div>
+    </Modal>
+
+    <!-- #261 文件树右键菜单 -->
+    <div v-if="ctxMenu" class="fixed inset-0 z-40" @click="ctxMenu = null" @contextmenu.prevent="ctxMenu = null"></div>
+    <div
+      v-if="ctxMenu"
+      class="fixed z-50 w-36 rounded border border-slate-200 bg-white py-1 text-[12px] shadow-lg"
+      :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+    >
+      <div class="truncate border-b border-slate-100 px-3 pb-1 text-[10px] text-ink-400">{{ ctxMenu.node.path }}</div>
+      <button
+        v-for="it in ctxMenuItems"
+        :key="it.key"
+        class="block w-full px-3 py-1 text-left hover:bg-slate-100"
+        :class="it.danger ? 'text-rose-600' : 'text-ink-700'"
+        @click="runCtx(it.key)"
+      >{{ it.label }}</button>
+    </div>
+
+    <!-- #261 重命名 -->
+    <Modal v-model="renameDialog" title="重命名文件" width="440px">
+      <div class="space-y-2">
+        <label class="block text-[12px] text-ink-600">新路径（可同时换目录）</label>
+        <input v-model="renameInput" class="input font-mono" placeholder="utils/helper.py" @keyup.enter="confirmRename" />
+        <div class="text-[11px] text-ink-400">改名会按新扩展名重新识别语言。</div>
+      </div>
+      <div class="mt-3 flex justify-end gap-2">
+        <button class="btn-outline" @click="renameDialog = false">取消</button>
+        <button class="btn-primary" :disabled="!renameInput.trim()" @click="confirmRename">确定</button>
+      </div>
+    </Modal>
+
+    <!-- #261 / #262 移动到目录 -->
+    <Modal v-model="moveDialog" :title="moveMode === 'batch' ? '批量移动文件' : '移动文件'" width="440px">
+      <div class="space-y-2">
+        <label class="block text-[12px] text-ink-600">目标目录（留空 = 根目录）</label>
+        <input v-model="moveDir" class="input font-mono" placeholder="例如 utils" @keyup.enter="confirmMove" />
+        <div class="text-[11px] text-ink-400">
+          <template v-if="moveMode === 'batch'">将移动已选的 {{ selectedFileIds.length }} 个文件，目标目录同名文件会冲突报错。</template>
+          <template v-else>只改所在目录，文件名保持不变。</template>
+        </div>
+      </div>
+      <div class="mt-3 flex justify-end gap-2">
+        <button class="btn-outline" @click="moveDialog = false">取消</button>
+        <button class="btn-primary" @click="confirmMove">移动</button>
+      </div>
+    </Modal>
+
+    <!-- #264 工作区全局搜索替换 -->
+    <Modal :show="globalSearch.open" title="🔎 工作区搜索替换" width="760px" @close="globalSearch.open = false">
+      <div class="space-y-2 text-[12px]">
+        <div class="flex items-center gap-1">
+          <input v-model="globalSearch.q" class="input h-7 flex-1 py-0 font-mono text-[12px]" placeholder="搜索内容（回车预览）" @keyup.enter="runGlobalSearch(true)" />
+          <label class="flex shrink-0 items-center gap-1 text-[11px] text-ink-500">
+            <input v-model="globalSearch.regex" type="checkbox" /> 正则
+          </label>
+          <button class="btn-outline h-7 shrink-0 text-[12px]" :disabled="globalSearch.busy || !globalSearch.q" @click="runGlobalSearch(true)">预览</button>
+        </div>
+        <div class="flex items-center gap-1">
+          <input v-model="globalSearch.replace" class="input h-7 flex-1 py-0 font-mono text-[12px]" placeholder="替换为（留空 = 删除匹配）" />
+          <button
+            class="btn-primary h-7 shrink-0 text-[12px]"
+            :disabled="globalSearch.busy || !globalSearch.result || !globalSearch.result.total_hits"
+            @click="runGlobalSearch(false)"
+          >全部替换</button>
+        </div>
+        <div v-if="globalSearch.fileIds.length" class="text-[11px] text-ink-500">仅搜索已选的 {{ globalSearch.fileIds.length }} 个文件</div>
+
+        <div v-if="globalSearch.busy" class="py-8 text-center text-[12px] text-ink-400">搜索中…</div>
+        <template v-else-if="globalSearch.result">
+          <div class="flex items-center gap-2 text-[11px]">
+            <span class="tag" :class="globalSearch.result.dry_run ? 'bg-sky-100 text-sky-700' : 'bg-emerald-100 text-emerald-700'">
+              {{ globalSearch.result.dry_run ? '预览' : '已替换' }}
+            </span>
+            <span class="text-ink-600">
+              命中 {{ globalSearch.result.total_hits }} 处 · {{ globalSearch.result.file_count }} 个文件
+              <template v-if="!globalSearch.result.dry_run"> · 写入 {{ globalSearch.result.changed_files }} 个</template>
+            </span>
+          </div>
+          <div class="max-h-[48vh] space-y-1.5 overflow-y-auto">
+            <div v-for="r in globalSearch.result.results" :key="r.file" class="rounded border border-slate-200 p-2">
+              <div class="flex items-center gap-1.5 text-[11px]">
+                <span class="truncate font-mono text-ink-800">{{ r.path }}</span>
+                <span class="tag bg-slate-100 text-ink-500">{{ r.hits }} 处</span>
+                <div class="flex-1"></div>
+                <button class="btn-ghost h-5 px-1 text-[11px]" @click="globalSearch.open = false; openFile({ id: r.file })">打开</button>
+              </div>
+              <div class="mt-1 space-y-0.5 font-mono text-[10px]">
+                <div v-for="(ln, i) in r.lines" :key="i" class="truncate">
+                  <span class="text-ink-400">L{{ ln.line }}</span>
+                  <span class="text-rose-600 line-through">{{ ln.before }}</span>
+                  <span class="mx-1 text-ink-300">→</span>
+                  <span class="text-emerald-700">{{ ln.after }}</span>
+                </div>
+              </div>
+            </div>
+            <div v-if="!globalSearch.result.results.length" class="py-6 text-center text-[12px] text-ink-400">
+              没有命中「{{ globalSearch.result.q }}」
+            </div>
+          </div>
+          <p class="text-[11px] text-ink-400">替换前会自动为每个文件创建快照，可在版本历史里回滚。</p>
+        </template>
+      </div>
+    </Modal>
+
+    <!-- #265 片段生成代码文件 -->
+    <Modal v-model="snippetFileDialog" title="片段生成代码文件" width="480px">
+      <div class="space-y-2 text-[12px]">
+        <div class="truncate text-[11px] text-ink-500">片段：{{ snippetFileTarget?.title }}</div>
+        <div>
+          <label class="mb-1 block text-[12px] text-ink-600">目标工作区</label>
+          <select v-model.number="stfForm.workspace" class="input">
+            <option v-for="w in activeWorkspaces" :key="w.id" :value="w.id">{{ w.icon }} {{ w.name }}（{{ w.file_count }}）</option>
+          </select>
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] text-ink-600">文件路径（留空 = 按片段标题自动命名）</label>
+          <input v-model="stfForm.path" class="input font-mono" placeholder="例如 snippets/quick_sort.py" @keyup.enter="confirmSnippetToFile" />
+        </div>
+      </div>
+      <div class="mt-3 flex justify-end gap-2">
+        <button class="btn-outline" @click="snippetFileDialog = false">取消</button>
+        <button class="btn-primary" :disabled="!stfForm.workspace" @click="confirmSnippetToFile">生成</button>
+      </div>
+    </Modal>
+
+    <!-- #268 片段变量填充 -->
+    <Modal v-model="varDialog" title="填充片段变量" width="440px">
+      <div class="space-y-2 text-[12px]">
+        <div class="text-[11px] text-ink-500">片段里的 ${name} 占位符，留空则保持原样。</div>
+        <div v-for="(val, name) in varValues" :key="name" class="flex items-center gap-2">
+          <span class="w-32 shrink-0 truncate font-mono text-[11px] text-ink-600">${{ '{' }}{{ name }}{{ '}' }}</span>
+          <input v-model="varValues[name]" class="input h-7 flex-1 py-0 text-[12px]" :placeholder="name" @keyup.enter="confirmInsertVars" />
+        </div>
+      </div>
+      <div class="mt-3 flex justify-end gap-2">
+        <button class="btn-outline" @click="varDialog = false">取消</button>
+        <button class="btn-primary" @click="confirmInsertVars">插入</button>
+      </div>
+    </Modal>
+
+    <!-- #269 分享链接 + 访问统计 -->
+    <Modal :show="!!shareInfo" title="🔗 分享链接" width="520px" @close="shareInfo = null">
+      <div v-if="shareInfo" class="space-y-2 text-[12px]">
+        <div class="flex items-center gap-1">
+          <input :value="shareInfo.full" readonly class="input h-7 flex-1 py-0 font-mono text-[11px]" />
+          <button class="btn-outline h-7 shrink-0 text-[11px]" @click="copyText(shareInfo.full)">复制</button>
+        </div>
+        <div class="flex items-center gap-2 text-[11px] text-ink-500">
+          <span v-if="shareInfo.allow_run" class="tag bg-emerald-100 text-emerald-700">允许运行</span>
+          <span v-else class="tag bg-slate-100 text-ink-500">只读</span>
+          <span v-if="shareInfo.allow_download" class="tag bg-sky-100 text-sky-700">可下载</span>
+        </div>
+        <div class="rounded border border-slate-200 p-2">
+          <div class="mb-1 flex items-center gap-2">
+            <span class="text-[11px] font-medium text-ink-700">访问统计</span>
+            <span v-if="shareVisitsBusy" class="text-[10px] text-ink-400">加载中…</span>
+            <div class="flex-1"></div>
+            <button class="btn-ghost h-5 px-1 text-[11px]" @click="loadShareVisits(shareInfo.token)">刷新</button>
+          </div>
+          <template v-if="shareVisitsData">
+            <div class="grid grid-cols-4 gap-1 text-center">
+              <div><div class="text-[15px] font-semibold text-ink-900">{{ shareVisitsData.total }}</div><div class="text-[10px] text-ink-400">总访问</div></div>
+              <div><div class="text-[15px] font-semibold text-ink-900">{{ shareVisitsData.unique_visitors }}</div><div class="text-[10px] text-ink-400">独立访客</div></div>
+              <div><div class="text-[15px] font-semibold text-ink-900">{{ shareVisitsData.last_30_days }}</div><div class="text-[10px] text-ink-400">近 30 天</div></div>
+              <div><div class="text-[15px] font-semibold text-ink-900">{{ shareVisitsData.view_count }}</div><div class="text-[10px] text-ink-400">浏览量</div></div>
+            </div>
+            <div class="mt-2 flex h-10 items-end gap-0.5">
+              <span
+                v-for="d in shareVisitsData.daily"
+                :key="d.date"
+                class="flex-1 rounded-sm bg-brand-400"
+                :style="{ height: Math.min(100, d.count * 12 + 3) + '%' }"
+                :title="`${d.date}：${d.count} 次`"
+              ></span>
+            </div>
+            <div class="mt-1 text-[10px] text-ink-400">
+              最近访问：{{ shareVisitsData.last_visit_at ? formatTime(shareVisitsData.last_visit_at) : '暂无' }}
+            </div>
+          </template>
+          <div v-else class="text-[11px] text-ink-400">访客打开链接后这里会出现统计（只存哈希，不记录明文 IP）</div>
+        </div>
+      </div>
+    </Modal>
+
+    <!-- 通用确认（删除文件 / 批量删除 / 删除用例集） -->
+    <Modal :show="!!confirmBox" :title="confirmBox ? confirmBox.title : ''" width="420px" @close="confirmBox = null">
+      <div v-if="confirmBox" class="text-[13px] text-ink-700">{{ confirmBox.text }}</div>
+      <div class="mt-3 flex justify-end gap-2">
+        <button class="btn-outline" @click="confirmBox = null">取消</button>
+        <button class="btn-primary" :class="{ 'bg-rose-600 hover:bg-rose-700': confirmBox && confirmBox.danger }" @click="runConfirm">
+          {{ confirmBox ? confirmBox.okText || '确定' : '确定' }}
+        </button>
+      </div>
     </Modal>
   </div>
 </template>
 
 <script setup>
-import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Compartment, StateEffect, StateField } from '@codemirror/state'
 import { EditorView, GutterMarker, gutter } from '@codemirror/view'
 import { codeApi } from '../../api/code'
 import { useAppStore } from '../../stores/app'
+// #198 时间展示统一走 utils/format（与其它页面一致）
+import { formatTime } from '../../utils/format'
 import Modal from '../../components/Modal.vue'
-import CodeEditor from '../../components/CodeEditor.vue'
+// #190 编辑器异步分包：首屏先渲染页面骨架，CodeMirror 模块单独加载
+const CodeEditor = defineAsyncComponent(() => import('../../components/CodeEditor.vue'))
 
 const router = useRouter()
 const app = useAppStore()
@@ -1265,8 +1644,13 @@ const app = useAppStore()
 // ===== 内部小组件 =====
 const TreeNode = {
   name: 'TreeNode',
-  props: { node: Object, activeId: Number, depth: Number },
-  emits: ['open', 'ctx'],
+  props: {
+    node: Object,
+    activeId: Number,
+    depth: Number,
+    selectedIds: { type: Array, default: () => [] },
+  },
+  emits: ['open', 'ctx', 'select'],
   setup(props, { emit }) {
     const collapsed = ref(false)
     return () => {
@@ -1288,22 +1672,33 @@ const TreeNode = {
               node: c,
               activeId: props.activeId,
               depth: props.depth + 1,
+              selectedIds: props.selectedIds,
               onOpen: (f) => emit('open', f),
               onCtx: (f, e) => emit('ctx', f, e),
+              onSelect: (f) => emit('select', f),
             })
           )),
         ])
       }
+      const picked = props.selectedIds.includes(n.id)
       return h('div', {
         class: [
           'group flex cursor-pointer items-center gap-1 rounded px-1 py-[3px] text-[12px]',
-          n.id === props.activeId ? 'bg-brand-50 text-brand-700' : 'text-ink-700 hover:bg-slate-100',
+          n.id === props.activeId
+            ? 'bg-brand-50 text-brand-700'
+            : picked
+              ? 'bg-sky-50 text-sky-700'
+              : 'text-ink-700 hover:bg-slate-100',
         ],
         style: pad,
-        onClick: () => emit('open', { id: n.id }),
+        // Ctrl / Cmd / Shift 点击 = 多选，普通点击 = 打开
+        onClick: (e) => {
+          if (e.ctrlKey || e.metaKey || e.shiftKey) emit('select', n)
+          else emit('open', { id: n.id })
+        },
         onContextmenu: (e) => { e.preventDefault(); emit('ctx', n, e) },
       }, [
-        h('span', {}, n.is_entry ? '⭐' : '📄'),
+        h('span', {}, picked ? '☑' : (n.is_entry ? '⭐' : '📄')),
         h('span', { class: 'truncate' }, n.name),
         n.is_favorite ? h('span', { class: 'ml-auto text-[10px]' }, '★') : null,
       ])
@@ -1471,11 +1866,87 @@ const showStatsCard = ref(false)
 const statsCard = ref(null)
 const statsLoading = ref(false)
 
+// ===== #169 页内输入/确认对话框（替代 window.prompt / confirm，避免打断编辑流） =====
+const presetDialog = ref(false)
+const presetName = ref('')
+const folderDialog = ref(false)
+const folderTarget = ref(null)
+const folderInput = ref('')
+const rollbackTarget = ref(null)
+
 // ===== F678 控制台风格输出 =====
 const consoleMode = ref(localStorage.getItem('code-console') !== '0')
 
 // ===== F680 每日一题站内提醒 =====
 const dailyInfo = ref(null)
+
+// ===== 第三轮 261–280 =====
+const zipInput = ref(null)
+const wsTemplates = ref([])
+const selectedFileIds = ref([])
+const ctxMenu = ref(null)
+const ctxMenuItems = [
+  { key: 'open', label: '打开' },
+  { key: 'rename', label: '重命名' },
+  { key: 'move', label: '移动到…' },
+  { key: 'copy', label: '复制文件' },
+  { key: 'download', label: '下载' },
+  { key: 'delete', label: '删除', danger: true },
+]
+const renameDialog = ref(false)
+const renameTarget = ref(null)
+const renameInput = ref('')
+const moveDialog = ref(false)
+const moveMode = ref('single')      // single | batch
+const moveTarget = ref(null)
+const moveDir = ref('')
+const confirmBox = ref(null)        // {title,text,okText,danger,run}
+const globalSearch = reactive({ open: false, q: '', replace: '', regex: false, fileIds: [], busy: false, result: null })
+const formatBusy = ref(false)
+
+// #265 片段生成文件
+const snippetFileDialog = ref(false)
+const snippetFileTarget = ref(null)
+const stfForm = reactive({ workspace: null, path: '' })
+
+// #267 片段导入
+const snippetFileInput = ref(null)
+
+// #268 片段变量
+const varDialog = ref(false)
+const varTarget = ref(null)
+const varValues = ref({})
+
+// #269 分享访问统计
+const shareInfo = ref(null)
+const shareVisitsData = ref(null)
+const shareVisitsBusy = ref(false)
+
+// #271 依赖图
+const depGraph = ref(null)
+const depBusy = ref(false)
+
+// #272 孤儿文件
+const orphans = ref(null)
+const orphansBusy = ref(false)
+
+// #275 判题用例集
+const caseSets = ref([])
+const caseSetId = ref(0)
+let caseSetBaseline = ''
+
+// #277 评论过滤与计数
+const commentOnlyUnresolved = ref(false)
+const commentCounts = reactive({ total: 0, resolved: 0, unresolved: 0 })
+
+// #279 运行预设导入
+const presetFileInput = ref(null)
+
+// #280 片段排序（记忆选择）
+const snippetSort = ref(localStorage.getItem('code-snippet-sort') || 'updated')
+
+const activeWorkspaces = computed(() => workspaces.value.filter((w) => !w.is_archived))
+const archivedWorkspaces = computed(() => workspaces.value.filter((w) => w.is_archived))
 
 function loadJson(key, fallback) {
   try {
@@ -1582,7 +2053,6 @@ const outSegs = computed(() =>
 
 // ===== 方法 =====
 function pct(v) { return ((v || 0) * 100).toFixed(1) + '%' }
-function fmtTime(s) { return s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '' }
 
 function statusColor(s) {
   return s === 'ok' ? 'text-emerald-600' : s === 'timeout' ? 'text-amber-600' : s === 'unavailable' ? 'text-sky-600' : 'text-rose-600'
@@ -1948,12 +2418,19 @@ function choosePresetById(id) {
   choosePreset(runPresets.value.find((p) => p.id === id) || null)
 }
 
-async function saveRunPreset() {
+// #169 打开页内预设命名对话框（原 window.prompt）
+function saveRunPreset() {
   if (!activeFile.value) return
   const fallback = `${langKey.value} 预设`
-  const name = window.prompt('预设名称（按语言保存 stdin / 参数 / 超时）',
-    activePreset.value && activePreset.value.language === langKey.value ? activePreset.value.name : fallback)
-  if (!name) return
+  presetName.value = activePreset.value && activePreset.value.language === langKey.value
+    ? activePreset.value.name
+    : fallback
+  presetDialog.value = true
+}
+
+async function confirmSavePreset() {
+  const name = (presetName.value || '').trim()
+  if (!name) { app.toastMsg?.('请填写预设名称', 'error'); return }
   const cfg = ensureRunCfg()
   const payload = {
     language: langKey.value,
@@ -1969,6 +2446,7 @@ async function saveRunPreset() {
     await loadRunPresets()
     activePresetId.value = res.id
     localStorage.setItem('code-preset', String(res.id))
+    presetDialog.value = false
     app.toastMsg?.('预设已保存', 'success')
   } catch (e) {
     app.toastMsg?.(e?.message || '保存预设失败', 'error')
@@ -2074,13 +2552,22 @@ async function toggleSnippetFav(s) {
   }
 }
 
-async function moveSnippetToFolder(s) {
-  const cur = window.prompt('归入收藏夹分组（留空 = 移出分组）', s.folder || '')
-  if (cur === null) return
-  const folder = cur.trim().slice(0, 60)
+// #169 页内对话框（原 window.prompt）
+function moveSnippetToFolder(s) {
+  folderTarget.value = s
+  folderInput.value = s.folder || ''
+  folderDialog.value = true
+}
+
+async function confirmMoveSnippet() {
+  const s = folderTarget.value
+  if (!s) return
+  const folder = (folderInput.value || '').trim().slice(0, 60)
   try {
     await codeApi.updateSnippet(s.id, { folder })
     await loadSnippets()
+    folderDialog.value = false
+    folderTarget.value = null
     app.toastMsg?.(folder ? `已归入「${folder}」` : '已移出分组', 'success')
   } catch (e) {
     app.toastMsg?.(e?.message || '操作失败', 'error')
@@ -2146,6 +2633,7 @@ async function openInsights() {
   } finally {
     insightsBusy.value = false
   }
+  loadOrphans()   // 第 272 条：顺带扫描未被引用文件
 }
 
 // ---- 初始化 ----
@@ -2487,6 +2975,10 @@ function setAllCases(on) {
 function doJudge() {
   if (!activeFileId.value) return
   judgeResult.value = null
+  caseSetId.value = 0
+  caseSetBaseline = ''
+  caseSets.value = []
+  loadCaseSets()
   showJudgeModal.value = true
 }
 
@@ -2497,12 +2989,15 @@ async function runJudge() {
   output.open = true
   output.tab = 'judge'
   try {
+    const currentCases = judgeForm.testcases.filter((c) => c.expected !== '' || c.stdin !== '')
+    // 第 275 条：用例集未被改动时只传 set_id，避免后端合并后重复执行
+    const useSet = Boolean(caseSetId.value) && JSON.stringify(judgeForm.testcases) === caseSetBaseline
     const res = await codeApi.judge({
       language: activeFile.value?.language || 'python',
       code: editorRef.value?.getValue() ?? code.value,
       title: judgeForm.title,
       ignore_whitespace: judgeForm.ignore_whitespace,
-      testcases: judgeForm.testcases.filter((c) => c.expected !== '' || c.stdin !== ''),
+      ...(useSet ? { set_id: caseSetId.value } : { testcases: currentCases }),
     })
     judgeResult.value = res
     await loadLeaderboard()
@@ -2569,8 +3064,15 @@ async function viewDiff(vid) {
   }
 }
 
-async function doRollback(v) {
-  if (!window.confirm(`确认回滚到「${v.message}」？当前内容会先存为快照。`)) return
+// #169 页内确认对话框（原 window.confirm）
+function doRollback(v) {
+  rollbackTarget.value = v
+}
+
+async function confirmRollback() {
+  const v = rollbackTarget.value
+  if (!v) return
+  rollbackTarget.value = null
   try {
     const res = await codeApi.rollback(activeFileId.value, v.id)
     code.value = res.content || ''
@@ -2585,9 +3087,14 @@ async function doRollback(v) {
 async function loadComments() {
   if (!activeFileId.value) return
   try {
-    const res = await codeApi.comments(activeFileId.value)
+    // 第 277 条：仅未解决过滤（计数始终按全部评论）
+    const params = commentOnlyUnresolved.value ? { resolved: 0 } : {}
+    const res = await codeApi.comments(activeFileId.value, params)
     comments.value = res.items || []
     unresolvedComments.value = res.unresolved || 0
+    commentCounts.total = res.total || 0
+    commentCounts.resolved = res.resolved || 0
+    commentCounts.unresolved = res.unresolved || 0
   } catch (e) { /* ignore */ }
 }
 
@@ -2885,7 +3392,7 @@ async function loadRunDetail(id) {
     output.stdout = r.stdout || ''
     output.stderr = r.stderr || ''
     output.status = r.status
-    output.meta = `${statusLabel(r.status)} · ${r.duration_ms}ms · ${fmtTime(r.created_at)}`
+    output.meta = `${statusLabel(r.status)} · ${r.duration_ms}ms · ${formatTime(r.created_at)}`
     diagnostics.value = r.diagnostics || []
     output.tab = r.stdout ? 'stdout' : 'stderr'
   } catch (e) {
@@ -2918,6 +3425,8 @@ async function loadSnippets() {
     // F669 按收藏夹分组筛选
     if (snippetFolderFilter.value === '__mine') params.favorite = true
     else if (snippetFolderFilter.value) params.folder = snippetFolderFilter.value
+    // 第 280 条：排序（popular 按引用 + 复制次数）
+    if (snippetSort.value) params.sort = snippetSort.value
     const [res, tg, fo] = await Promise.all([
       codeApi.snippets(params), codeApi.snippetTags(), codeApi.snippetFolders(),
     ])
@@ -2952,9 +3461,14 @@ function insertSnippet(s) {
     app.toastMsg?.('请先打开一个文件')
     return
   }
-  editorRef.value?.insertText(s.code)
-  codeApi.copySnippet(s.id).catch(() => {})
-  app.toastMsg?.('已插入')
+  // 第 268 条：含 ${name} 占位符时先弹窗收集变量
+  if (s.variables?.length) {
+    varTarget.value = s
+    varValues.value = Object.fromEntries(s.variables.map((v) => [v, '']))
+    varDialog.value = true
+    return
+  }
+  doInsertSnippet(s.code, s)
 }
 
 async function copySnippetInto(s) {
@@ -2980,11 +3494,530 @@ async function doShare() {
   try {
     const res = await codeApi.createShare({ file: activeFileId.value, allow_run: allowRun })
     const full = `${location.origin}${res.url}`
+    shareInfo.value = { ...res, full }
+    shareVisitsData.value = null
     await copyText(full)
-    app.toastMsg?.('分享链接已复制到剪贴板')
+    loadShareVisits(res.token)
   } catch (e) {
     app.toastMsg?.('创建分享失败')
   }
+}
+
+// ===== 第三轮 261–280 =====
+
+/** 刷新文件树 / 工作区详情，并同步标签与当前文件元信息 */
+async function refreshTree() {
+  if (!activeWsId.value) return
+  try {
+    const detail = await codeApi.workspace(activeWsId.value)
+    activeWs.value = detail
+    const byId = Object.fromEntries((detail.files || []).map((f) => [f.id, f]))
+    tabs.value = tabs.value
+      .filter((t) => byId[t.id])
+      .map((t) => ({ ...t, name: byId[t.id].name, path: byId[t.id].path, language: byId[t.id].language }))
+    if (activeFile.value) {
+      const cur = byId[activeFile.value.id]
+      if (!cur) {
+        activeFile.value = null
+        activeFileId.value = null
+        code.value = ''
+      } else {
+        activeFile.value = { ...activeFile.value, ...cur }
+      }
+    }
+    selectedFileIds.value = selectedFileIds.value.filter((id) => byId[id])
+    const treeRes = await codeApi.fileTree(activeWsId.value)
+    tree.value = treeRes.tree || []
+  } catch (e) { /* ignore */ }
+}
+
+// ---- #261 文件树右键菜单 ----
+function onTreeCtx(node, event) {
+  if (!node || node.type === 'dir' || typeof node.id !== 'number') return
+  const x = Math.min(event.clientX, window.innerWidth - 160)
+  const y = Math.min(event.clientY, window.innerHeight - 200)
+  ctxMenu.value = { x, y, node }
+}
+
+function runCtx(key) {
+  const m = ctxMenu.value
+  if (!m) return
+  ctxMenu.value = null
+  const node = m.node
+  if (key === 'open') openFile({ id: node.id })
+  else if (key === 'rename') openRename(node)
+  else if (key === 'move') openPathDialog('single', node)
+  else if (key === 'copy') copyFileNode(node)
+  else if (key === 'download') downloadFileNode(node)
+  else if (key === 'delete') askDeleteFile(node)
+}
+
+function openRename(node) {
+  renameTarget.value = node
+  renameInput.value = node.path
+  renameDialog.value = true
+}
+
+async function confirmRename() {
+  const node = renameTarget.value
+  const path = renameInput.value.trim().replace(/^\/+/, '')
+  if (!node || !path || path === node.path) { renameDialog.value = false; return }
+  try {
+    await codeApi.moveFile(node.id, path)
+    renameDialog.value = false
+    await refreshTree()
+    app.toastMsg?.(`已重命名为 ${path}`)
+  } catch (e) { app.toastMsg?.(e?.message || '重命名失败', 'error') }
+}
+
+// ---- #262 批量移动 ----
+function openPathDialog(mode = 'single', node = null) {
+  moveMode.value = mode === 'batch-move' ? 'batch' : 'single'
+  moveTarget.value = node
+  moveDir.value = node && node.path.includes('/') ? node.path.split('/').slice(0, -1).join('/') : ''
+  moveDialog.value = true
+}
+
+async function confirmMove() {
+  const dir = moveDir.value.trim().replace(/^\/+|\/+$/g, '')
+  if (dir.split('/').includes('..')) { app.toastMsg?.('目标目录不能包含 ..'); return }
+  try {
+    if (moveMode.value === 'batch') {
+      if (!selectedFileIds.value.length) return
+      const res = await codeApi.batchFiles({ ids: [...selectedFileIds.value], action: 'move', target: dir })
+      selectedFileIds.value = []
+      app.toastMsg?.(`已移动 ${res.affected} 个文件`)
+    } else {
+      const node = moveTarget.value
+      if (!node) return
+      const name = node.path.split('/').pop()
+      await codeApi.moveFile(node.id, dir ? `${dir}/${name}` : name)
+      app.toastMsg?.('已移动')
+    }
+    moveDialog.value = false
+    await refreshTree()
+  } catch (e) { app.toastMsg?.(e?.message || '移动失败', 'error') }
+}
+
+function toggleTreeSelect(node) {
+  const id = node?.id
+  if (!id) return
+  if (selectedFileIds.value.includes(id)) selectedFileIds.value = selectedFileIds.value.filter((x) => x !== id)
+  else selectedFileIds.value = [...selectedFileIds.value, id]
+}
+
+function clearTreeSelect() { selectedFileIds.value = [] }
+
+function batchAction(kind) {
+  const ids = [...selectedFileIds.value]
+  if (!ids.length) return
+  if (kind === 'favorite') {
+    codeApi.batchFiles({ ids, action: 'favorite' })
+      .then(() => { app.toastMsg?.(`已收藏 ${ids.length} 个文件`); return refreshTree() })
+      .catch((e) => app.toastMsg?.(e?.message || '收藏失败', 'error'))
+    return
+  }
+  if (kind === 'delete') {
+    confirmBox.value = {
+      title: '批量删除文件',
+      text: `确认删除已选的 ${ids.length} 个文件？该操作不可恢复。`,
+      okText: '删除',
+      danger: true,
+      run: async () => {
+        await codeApi.batchFiles({ ids, action: 'delete' })
+        selectedFileIds.value = []
+        await refreshTree()
+        app.toastMsg?.('已删除')
+      },
+    }
+  }
+}
+
+// ---- #276 复制 / 下载 / 删除文件 ----
+async function copyFileNode(node) {
+  try {
+    const res = await codeApi.copyFile(node.id)
+    await refreshTree()
+    app.toastMsg?.(`已复制为 ${res.name}`)
+  } catch (e) { app.toastMsg?.(e?.message || '复制失败', 'error') }
+}
+
+async function downloadFileNode(node) {
+  try {
+    const f = await codeApi.file(node.id)
+    const blob = new Blob([f.content || ''], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = f.name
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) { app.toastMsg?.('下载失败', 'error') }
+}
+
+function askDeleteFile(node) {
+  confirmBox.value = {
+    title: '删除文件',
+    text: `确认删除「${node.path}」？该操作不可恢复。`,
+    okText: '删除',
+    danger: true,
+    run: async () => {
+      await codeApi.deleteFile(node.id)
+      await refreshTree()
+      app.toastMsg?.('已删除')
+    },
+  }
+}
+
+async function runConfirm() {
+  const box = confirmBox.value
+  confirmBox.value = null
+  if (!box?.run) return
+  try {
+    await box.run()
+  } catch (e) { app.toastMsg?.(e?.message || '操作失败', 'error') }
+}
+
+// ---- #264 全局搜索替换 ----
+function openGlobalSearch() {
+  if (!activeWs.value) { app.toastMsg?.('先选择一个工作区'); return }
+  globalSearch.open = true
+  globalSearch.fileIds = [...selectedFileIds.value]
+}
+
+async function runGlobalSearch(dryRun) {
+  if (!activeWs.value || !globalSearch.q) return
+  globalSearch.busy = true
+  try {
+    const res = await codeApi.replaceInWorkspace(activeWs.value.id, {
+      q: globalSearch.q,
+      replace: globalSearch.replace,
+      regex: globalSearch.regex,
+      dry_run: dryRun,
+      ...(globalSearch.fileIds.length ? { file_ids: globalSearch.fileIds } : {}),
+    })
+    globalSearch.result = res
+    if (dryRun) {
+      app.toastMsg?.(res.total_hits ? `命中 ${res.total_hits} 处 / ${res.file_count} 个文件` : '没有命中')
+    } else {
+      app.toastMsg?.(`已替换 ${res.changed_files} 个文件，共 ${res.total_hits} 处`)
+      await refreshTree()
+      if (activeFileId.value && (res.results || []).some((r) => r.file === activeFileId.value)) {
+        await openFile({ id: activeFileId.value })
+      }
+    }
+  } catch (e) { app.toastMsg?.(e?.message || '搜索失败', 'error') } finally {
+    globalSearch.busy = false
+  }
+}
+
+// ---- #273 格式化 ----
+async function formatCurrent() {
+  if (!activeFile.value) { app.toastMsg?.('先打开一个文件'); return }
+  if (formatBusy.value) return
+  formatBusy.value = true
+  try {
+    const res = await codeApi.formatCode({
+      language: activeFile.value.language,
+      code: editorRef.value?.getValue() ?? code.value,
+      indent: tabSize.value,
+    })
+    if (!res.changed) { app.toastMsg?.('格式已经很整齐'); return }
+    const view = editorRef.value?.raw?.()
+    if (view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: res.formatted } })
+    else code.value = res.formatted
+    const c = res.changes
+    app.toastMsg?.(`已格式化：行尾空格 ${c.trailing_spaces} 行 · Tab ${c.tabs} 行 · 压缩空行 ${c.blank_lines} 处`, 'success')
+  } catch (e) { app.toastMsg?.(e?.message || '格式化失败', 'error') } finally {
+    formatBusy.value = false
+  }
+}
+
+// ---- #274 运行历史导出 ----
+async function exportRunsCsv() {
+  try {
+    const blob = await codeApi.exportRuns({})
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `运行历史_${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+    app.toastMsg?.('已导出 CSV')
+  } catch (e) { app.toastMsg?.(e?.message || '导出失败', 'error') }
+}
+
+// ---- #263 工作区模板 / #266 导入 zip / #278 归档 ----
+function openWsModal() {
+  showWsModal.value = true
+  if (!wsTemplates.value.length) loadWsTemplates()
+}
+
+async function loadWsTemplates() {
+  try {
+    const res = await codeApi.workspaceTemplates()
+    wsTemplates.value = res.items || []
+  } catch (e) { /* ignore */ }
+}
+
+async function createFromTemplate(t) {
+  try {
+    const res = await codeApi.createWorkspaceFromTemplate({ template: t.key })
+    showWsModal.value = false
+    await loadWorkspaces()
+    activeWsId.value = res.id
+    await onSwitchWorkspace()
+    app.toastMsg?.(`已按「${t.name}」创建，共 ${(res.created || []).length} 个文件`)
+  } catch (e) { app.toastMsg?.(e?.message || '按模板创建失败', 'error') }
+}
+
+async function doImportZip(event) {
+  const file = event?.target?.files?.[0]
+  if (event?.target) event.target.value = ''
+  if (!file) return
+  if (!/\.zip$/i.test(file.name)) { app.toastMsg?.('请选择 .zip 文件'); return }
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('name', file.name.replace(/\.zip$/i, '').slice(0, 100))
+  try {
+    app.toastMsg?.('正在导入 zip…')
+    const res = await codeApi.importWorkspace(fd)
+    await loadWorkspaces()
+    activeWsId.value = res.id
+    await onSwitchWorkspace()
+    app.toastMsg?.(`导入完成：新增 ${res.imported} 个文件，跳过 ${res.skipped} 个`)
+  } catch (e) { app.toastMsg?.(e?.message || '导入失败', 'error') }
+}
+
+async function toggleArchive() {
+  const ws = activeWs.value
+  if (!ws) return
+  const next = !ws.is_archived
+  try {
+    await codeApi.updateWorkspace(ws.id, { is_archived: next })
+    await loadWorkspaces()
+    await loadWorkspace(ws.id)
+    app.toastMsg?.(next ? '已归档，列表里折叠到已归档分组' : '已取消归档')
+  } catch (e) { app.toastMsg?.(e?.message || '操作失败', 'error') }
+}
+
+// ---- #265 片段生成文件 ----
+function openSnippetToFile(s) {
+  snippetFileTarget.value = s
+  stfForm.workspace = activeWsId.value || activeWorkspaces.value[0]?.id || null
+  stfForm.path = ''
+  snippetFileDialog.value = true
+}
+
+async function confirmSnippetToFile() {
+  const s = snippetFileTarget.value
+  if (!s || !stfForm.workspace) return
+  try {
+    const res = await codeApi.snippetToFile(s.id, {
+      workspace: stfForm.workspace,
+      ...(stfForm.path.trim() ? { path: stfForm.path.trim() } : {}),
+    })
+    snippetFileDialog.value = false
+    if (stfForm.workspace !== activeWsId.value) {
+      activeWsId.value = stfForm.workspace
+      await onSwitchWorkspace()
+    } else {
+      await refreshTree()
+    }
+    await openFile({ id: res.file.id })
+    app.toastMsg?.(`已生成 ${res.path}`)
+  } catch (e) { app.toastMsg?.(e?.message || '生成失败', 'error') }
+}
+
+// ---- #267 片段导出 / 导入 ----
+function downloadJson(obj, filename) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+async function exportSnippetsJson() {
+  try {
+    const res = await codeApi.exportSnippets()
+    downloadJson(res, `代码片段_${new Date().toISOString().slice(0, 10)}.json`)
+    app.toastMsg?.(`已导出 ${res.count} 条片段`)
+  } catch (e) { app.toastMsg?.(e?.message || '导出失败', 'error') }
+}
+
+async function importSnippetsJson(event) {
+  const file = event?.target?.files?.[0]
+  if (event?.target) event.target.value = ''
+  if (!file) return
+  try {
+    const parsed = JSON.parse(await file.text())
+    const items = Array.isArray(parsed) ? parsed : (parsed.items || parsed.data?.items || [])
+    if (!items.length) { app.toastMsg?.('文件里没有片段'); return }
+    const res = await codeApi.importSnippets(items)
+    await loadSnippets()
+    app.toastMsg?.(`导入 ${res.created} 条，跳过 ${res.skipped} 条重复`)
+  } catch (e) { app.toastMsg?.(e?.message || '导入失败', 'error') }
+}
+
+// ---- #268 片段变量 ----
+function fillVars(text, values) {
+  return (text || '').replace(/\$\{([A-Za-z_][A-Za-z0-9_]{0,39})\}/g, (m, name) => {
+    const v = values[name]
+    return v !== undefined && v !== '' ? v : m
+  })
+}
+
+function doInsertSnippet(text, s) {
+  if (!activeFile.value) { app.toastMsg?.('请先打开一个文件'); return }
+  editorRef.value?.insertText(text)
+  if (s) codeApi.copySnippet(s.id).catch(() => {})
+  app.toastMsg?.('已插入')
+}
+
+function confirmInsertVars() {
+  const s = varTarget.value
+  if (!s) return
+  varDialog.value = false
+  doInsertSnippet(fillVars(s.code, varValues.value), s)
+}
+
+// ---- #269 分享访问统计 ----
+async function loadShareVisits(token) {
+  shareVisitsBusy.value = true
+  try {
+    shareVisitsData.value = await codeApi.shareVisits(token)
+  } catch (e) { /* ignore */ } finally {
+    shareVisitsBusy.value = false
+  }
+}
+
+// ---- #271 依赖图 ----
+async function loadDependencyGraph() {
+  if (!activeWsId.value) return
+  depBusy.value = true
+  try {
+    depGraph.value = await codeApi.dependencyGraph(activeWsId.value)
+    drawer.value = 'analysis'
+  } catch (e) { app.toastMsg?.(e?.message || '依赖分析失败', 'error') } finally {
+    depBusy.value = false
+  }
+}
+
+// ---- #272 孤儿文件 ----
+async function loadOrphans() {
+  if (!activeWsId.value) { orphans.value = null; return }
+  orphansBusy.value = true
+  try {
+    orphans.value = await codeApi.fileOrphans(activeWsId.value)
+  } catch (e) { orphans.value = null } finally {
+    orphansBusy.value = false
+  }
+}
+
+async function archiveOrphan(item) {
+  const name = item.path.split('/').pop()
+  try {
+    await codeApi.moveFile(item.id, `archive/${name}`)
+    await refreshTree()
+    await loadOrphans()
+    app.toastMsg?.(`已归档到 archive/${name}`)
+  } catch (e) { app.toastMsg?.(e?.message || '归档失败', 'error') }
+}
+
+function deleteOrphan(item) {
+  confirmBox.value = {
+    title: '删除孤儿文件',
+    text: `「${item.path}」没有被任何文件引用，确认删除？`,
+    okText: '删除',
+    danger: true,
+    run: async () => {
+      await codeApi.deleteFile(item.id)
+      await refreshTree()
+      await loadOrphans()
+      app.toastMsg?.('已删除')
+    },
+  }
+}
+
+// ---- #275 判题用例集 ----
+async function loadCaseSets() {
+  try {
+    const res = await codeApi.judgeCaseSets({ language: activeFile.value?.language || 'python' })
+    caseSets.value = res.items || []
+  } catch (e) { /* ignore */ }
+}
+
+function loadCaseSet() {
+  const s = caseSets.value.find((x) => x.id === caseSetId.value)
+  if (!s) return
+  judgeForm.title = s.title
+  judgeForm.testcases = (s.cases || []).map((c) => ({
+    stdin: c.stdin || '', expected: c.expected || '', enabled: c.enabled !== false,
+  }))
+  caseSetBaseline = JSON.stringify(judgeForm.testcases)
+}
+
+async function saveCaseSet() {
+  const cases = judgeForm.testcases.filter((c) => c.stdin !== '' || c.expected !== '')
+  if (!cases.length) { app.toastMsg?.('先填写至少一条测试用例'); return }
+  const payload = {
+    title: judgeForm.title?.trim() || '未命名用例集',
+    language: activeFile.value?.language || 'python',
+    cases,
+  }
+  try {
+    const res = caseSetId.value
+      ? await codeApi.updateJudgeCaseSet(caseSetId.value, payload)
+      : await codeApi.createJudgeCaseSet(payload)
+    caseSetId.value = res.id
+    caseSetBaseline = JSON.stringify(judgeForm.testcases)
+    await loadCaseSets()
+    app.toastMsg?.('用例集已保存')
+  } catch (e) { app.toastMsg?.(e?.message || '保存用例集失败', 'error') }
+}
+
+function removeCaseSet() {
+  const id = caseSetId.value
+  if (!id) return
+  confirmBox.value = {
+    title: '删除用例集',
+    text: '删除后不可恢复，已判题的历史记录不受影响。',
+    okText: '删除',
+    danger: true,
+    run: async () => {
+      await codeApi.deleteJudgeCaseSet(id)
+      caseSetId.value = 0
+      caseSetBaseline = ''
+      await loadCaseSets()
+      app.toastMsg?.('用例集已删除')
+    },
+  }
+}
+
+// ---- #279 运行预设导出 / 导入 ----
+async function exportRunPresetsJson() {
+  try {
+    const res = await codeApi.exportRunPresets(activeFile.value?.language || '')
+    downloadJson(res, `运行预设_${new Date().toISOString().slice(0, 10)}.json`)
+    app.toastMsg?.(`已导出 ${res.count} 条预设`)
+  } catch (e) { app.toastMsg?.(e?.message || '导出失败', 'error') }
+}
+
+async function importRunPresetsJson(event) {
+  const file = event?.target?.files?.[0]
+  if (event?.target) event.target.value = ''
+  if (!file) return
+  try {
+    const parsed = JSON.parse(await file.text())
+    const items = Array.isArray(parsed) ? parsed : (parsed.items || parsed.data?.items || [])
+    if (!items.length) { app.toastMsg?.('文件里没有预设'); return }
+    const res = await codeApi.importRunPresets(items)
+    await loadRunPresets()
+    app.toastMsg?.(`导入 ${res.created} 条，跳过 ${res.skipped} 条重复`)
+  } catch (e) { app.toastMsg?.(e?.message || '导入失败', 'error') }
 }
 
 // ---- 生命周期 ----
@@ -3009,6 +4042,8 @@ watch(graphDrawer, (v) => { if (v) { drawer.value = ''; commentDrawer.value = fa
 watch(commentDrawer, (v) => { if (v) { drawer.value = ''; graphDrawer.value = false } })
 watch(fontSize, (v) => localStorage.setItem('code-font', String(v)))
 watch(tabSize, (v) => localStorage.setItem('code-tab', String(v)))
+// 第 280 条：排序选择记忆
+watch(snippetSort, (v) => localStorage.setItem('code-snippet-sort', String(v)))
 </script>
 
 <style scoped>

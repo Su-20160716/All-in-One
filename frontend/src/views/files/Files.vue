@@ -7,20 +7,27 @@
         <button class="btn-ghost px-1.5 text-[12px]" @click="newFolderDialog">＋ 新建</button>
       </div>
       <div class="space-y-0.5">
-        <div class="flex cursor-pointer items-center justify-between rounded-control px-2 py-1.5 text-[13px]" :class="!currentFolder && !quickFilter ? 'bg-brand-50 text-brand-700' : 'hover:bg-ink-50'" @click="openFolder(null)">
+        <div class="flex cursor-pointer items-center justify-between rounded-control px-2 py-1.5 text-[13px]"
+             :class="[!currentFolder && !quickFilter ? 'bg-brand-50 text-brand-700' : 'hover:bg-ink-50', dragOverFolder === 0 ? 'ring-2 ring-brand-400 bg-brand-50' : '']"
+             @click="openFolder(null)" @dragover.prevent="onFolderDragOver(0)" @dragleave="onFolderDragLeave(0)" @drop.prevent="onFolderDrop(0, $event)">
           <span>📁 全部文件</span>
           <span v-if="keyword && folderHits[0] !== undefined" class="rounded-pill bg-brand-50 px-1.5 text-[10px] text-brand-700">{{ folderHits[0] }}</span>
         </div>
-        <div v-for="f in folders" :key="f.id" class="group flex cursor-pointer items-center gap-1.5 rounded-control px-2 py-1.5 text-[13px]" :class="currentFolder === f.id ? 'bg-brand-50 text-brand-700' : 'hover:bg-ink-50'" @click="openFolder(f.id)">
+        <div v-for="f in folders" :key="f.id" class="group flex cursor-pointer items-center gap-1.5 rounded-control px-2 py-1.5 text-[13px]"
+             :class="[currentFolder === f.id ? 'bg-brand-50 text-brand-700' : 'hover:bg-ink-50', dragOverFolder === f.id ? 'ring-2 ring-brand-400 bg-brand-50' : '']"
+             @click="openFolder(f.id)" @dragover.prevent="onFolderDragOver(f.id)" @dragleave="onFolderDragLeave(f.id)" @drop.prevent="onFolderDrop(f.id, $event)">
           <span class="h-2.5 w-2.5 shrink-0 rounded-sm" :style="{ background: f.color || '#94a3b8' }"></span>
           <span class="flex-1 truncate">{{ f.name }}</span>
           <span v-if="keyword && folderHits[f.id] !== undefined" class="rounded-pill bg-brand-50 px-1.5 text-[10px] text-brand-700">{{ folderHits[f.id] }}</span>
-          <button class="text-[11px] text-ink-300 opacity-0 group-hover:opacity-100" @click.stop="colorFolder(f)">🎨</button>
+          <button class="text-[11px] text-ink-300 opacity-0 group-hover:opacity-100" title="下载文件夹" @click.stop="downloadFolder(f)">⬇</button>
+          <button class="text-[11px] text-ink-300 opacity-0 group-hover:opacity-100" title="分享文件夹" @click.stop="shareFolder(f)">🔗</button>
+          <button class="text-[11px] text-ink-300 opacity-0 group-hover:opacity-100" title="换颜色" @click.stop="colorFolder(f)">🎨</button>
         </div>
       </div>
       <div class="mt-3 space-y-0.5 border-t border-ink-100 pt-2">
         <div v-for="q in quickFilters" :key="q.v" class="cursor-pointer rounded-control px-2 py-1.5 text-[12px]" :class="quickFilter === q.v ? 'bg-brand-50 text-brand-700' : 'text-ink-500 hover:bg-ink-50'" @click="useQuick(q.v)">{{ q.label }}</div>
         <button class="block w-full rounded-control px-2 py-1.5 text-left text-[12px] text-ink-500 hover:bg-ink-50" @click="showTemplates = true">🗂 文件夹模板</button>
+        <button class="block w-full rounded-control px-2 py-1.5 text-left text-[12px] text-ink-500 hover:bg-ink-50" @click="cleanupEmpty">🧹 清理空文件夹</button>
         <RouterLink to="/files/analysis" class="block rounded-control px-2 py-1.5 text-[12px] text-ink-500 hover:bg-ink-50">📊 存储分析</RouterLink>
         <RouterLink to="/files/trash" class="block rounded-control px-2 py-1.5 text-[12px] text-ink-500 hover:bg-ink-50">🗑 回收站</RouterLink>
         <RouterLink to="/files/shares" class="block rounded-control px-2 py-1.5 text-[12px] text-ink-500 hover:bg-ink-50">🔗 共享链接</RouterLink>
@@ -43,12 +50,24 @@
     <!-- 右侧 -->
     <div class="min-w-0 flex-1 space-y-3">
       <div class="card flex flex-wrap items-center gap-2 p-3">
-        <input v-model="keyword" class="input w-48" placeholder="搜索文件…" @keyup.enter="doSearch" />
-        <select v-model="kindFilter" class="input w-28" @change="loadFiles">
+        <div class="relative">
+          <input v-model="keyword" class="input w-48" placeholder="搜索文件…" @keyup.enter="doSearch"
+                 @focus="showSearchHistory = true" @blur="showSearchHistory = false" />
+          <!-- S24-227 搜索历史下拉（localStorage 保留 10 条） -->
+          <div v-if="showSearchHistory && searchHistory.length"
+               class="absolute left-0 top-full z-20 mt-1 w-64 rounded-card border border-ink-100 bg-white p-1 shadow-lg">
+            <div class="px-2 py-1 text-[11px] text-ink-400">搜索历史</div>
+            <div v-for="h in searchHistory" :key="h" class="flex items-center gap-1 rounded-control px-2 py-1 text-[12px] hover:bg-ink-50">
+              <button class="min-w-0 flex-1 truncate text-left" @mousedown.prevent="applyHistory(h)">{{ h }}</button>
+              <button class="px-1 text-ink-300 hover:text-rose-500" title="删除该记录" @mousedown.prevent="removeHistory(h)">×</button>
+            </div>
+          </div>
+        </div>
+        <select v-model="kindFilter" class="input w-28" @change="loadFiles()">
           <option value="">全部类型</option>
           <option v-for="(label, k) in KIND_NAMES" :key="k" :value="k">{{ label }}</option>
         </select>
-        <select v-model="ordering" class="input w-36" @change="loadFiles; savePrefs">
+        <select v-model="ordering" class="input w-36" @change="loadFiles(); savePrefs()">
           <option value="-created_at">最新优先</option>
           <option value="created_at">最早优先</option>
           <option value="-size">体积最大</option>
@@ -63,6 +82,13 @@
           <button class="btn-outline" @click="exportFavJson">⭐ 导出收藏</button>
           <button class="btn-outline" @click="pickFavJson">📥 导入收藏</button>
           <button class="btn-outline" @click="showText = true">＋ 新建文本</button>
+          <!-- S24-216 上传重名策略 -->
+          <select v-model="uploadConflict" class="input w-24 text-[12px]" title="重名文件处理方式"
+                  @change="saveUploadConflict">
+            <option value="rename">重名改名</option>
+            <option value="skip">重名跳过</option>
+            <option value="overwrite">重名覆盖</option>
+          </select>
           <button class="btn-primary" @click="pickFiles">⬆ 上传</button>
         </div>
       </div>
@@ -83,6 +109,8 @@
         <button class="btn-outline px-2 text-[12px]" @click="showBatchTag = true">打标签</button>
         <button class="btn-outline px-2 text-[12px]" @click="showBatchRename = true">批量重命名</button>
         <button class="btn-outline px-2 text-[12px]" @click="batchMove">移动到…</button>
+        <button class="btn-outline px-2 text-[12px]" @click="openBatchCopy">复制到…</button>
+        <button class="btn-outline px-2 text-[12px]" @click="openBatchGroup">分组</button>
         <button class="btn-outline px-2 text-[12px]" @click="batchDownload">打包下载</button>
         <button class="btn-danger px-2 text-[12px]" @click="batch('trash')">删除</button>
         <button class="btn-ghost px-2 text-[12px]" @click="selected.clear()">取消选择</button>
@@ -96,13 +124,24 @@
         </div>
       </div>
 
+      <!-- S24-233 断点续传：上次未完成的上传 -->
+      <div v-if="pendingUploads.length" class="card flex flex-wrap items-center gap-2 p-3 text-[12px]">
+        <span class="text-ink-600">检测到未完成的上传 {{ pendingUploads.length }} 个</span>
+        <span v-for="p in pendingUploads" :key="p.upload_id" class="tag">
+          {{ p.name }}（{{ p.done }}/{{ p.total }} 片）
+          <button class="ml-1 text-brand-600" @click="resumeUpload(p)">继续上传</button>
+          <button class="ml-1 text-ink-400 hover:text-rose-500" title="忽略该记录" @click="dropResume(p.upload_id)">×</button>
+        </span>
+      </div>
+
       <div class="card overflow-hidden">
         <div class="flex items-center justify-between border-b border-ink-100 px-4 py-2.5">
           <span class="text-[13px] font-medium text-ink-700">{{ listTitle }}（{{ files.length }}）</span>
           <label class="flex items-center gap-1 text-[12px] text-ink-500"><input type="checkbox" :checked="allChecked" @change="toggleAll" /> 全选</label>
         </div>
         <div v-if="files.length" class="divide-y divide-ink-50">
-          <div v-for="f in files" :key="f.id" class="group flex cursor-pointer items-center gap-3 px-4 py-2.5 hover:bg-ink-50/60" :class="focusedId === f.id ? 'bg-brand-50/40' : ''" @click="focusRow(f)">
+          <div v-for="f in files" :key="f.id" class="group flex cursor-pointer flex-wrap items-center gap-3 px-4 py-2.5 hover:bg-ink-50/60" :class="focusedId === f.id ? 'bg-brand-50/40' : ''"
+               draggable="true" @dragstart="onRowDragStart(f, $event)" @click="focusRow(f)">
             <input type="checkbox" :checked="selected.has(f.id)" @click.stop @change="toggleOne(f.id)" />
             <button class="text-[16px]" @click.stop="toggleStar(f)">{{ f.is_star ? '⭐' : '☆' }}</button>
             <img v-if="f.thumbnail_url" :src="f.thumbnail_url" class="h-8 w-8 rounded-control object-cover" />
@@ -114,7 +153,8 @@
                 <span v-for="tg in f.tag_names" :key="tg" class="rounded-control bg-ink-50 px-1 py-0.5 text-[10px] text-ink-500">#{{ tg }}</span>
               </div>
             </div>
-            <div class="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100" @click.stop>
+            <!-- #175 行内操作：移动端常显，桌面 hover / 键盘聚焦时才显示 -->
+            <div class="flex shrink-0 flex-wrap items-center justify-end gap-1 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100" @click.stop>
               <button v-if="f.kind === 'text'" class="btn-ghost px-2 text-[12px]" @click="editText(f)">编辑</button>
               <button v-if="f.previewable" class="btn-ghost px-2 text-[12px]" @click="openPreview(f)">
                 {{ f.kind === 'text' ? '预览' : '查看' }}
@@ -123,6 +163,10 @@
               <button class="btn-ghost px-2 text-[12px]" @click="openShare(f)">分享</button>
               <button class="btn-ghost px-2 text-[12px]" @click="openVisibility(f)">可见性</button>
               <button class="btn-ghost px-2 text-[12px]" @click="editDesc(f)">备注</button>
+              <!-- S24-224 文本沉淀为笔记 -->
+              <button v-if="f.kind === 'text'" class="btn-ghost px-2 text-[12px]" @click="toNote(f)">转为笔记</button>
+              <!-- S24-226 最近访问单条移除 -->
+              <button v-if="quickFilter === 'recent'" class="btn-ghost px-2 text-[12px]" @click="removeRecent(f)">移除</button>
               <template v-if="quickFilter === 'starred'">
                 <button class="btn-ghost px-1.5 text-[12px]" title="上移" @click="moveStar(f, -1)">↑</button>
                 <button class="btn-ghost px-1.5 text-[12px]" title="下移" @click="moveStar(f, 1)">↓</button>
@@ -198,6 +242,43 @@
       <div class="mt-4 flex justify-end gap-2"><button class="btn-ghost" @click="showMove = false">取消</button><button class="btn-primary" @click="confirmMove">移动</button></div>
     </Modal>
 
+    <!-- S24-228 批量复制到 -->
+    <Modal :show="showCopy" title="复制到文件夹" @close="showCopy = false">
+      <select v-model="copyTarget" class="input">
+        <option :value="null">根目录</option>
+        <option v-for="f in folders" :key="f.id" :value="f.id">{{ f.name }}</option>
+      </select>
+      <div class="mt-2 text-[11px] text-ink-400">复制出的文件命名为「原名(副本)」，原文件保持不变。</div>
+      <div class="mt-4 flex justify-end gap-2"><button class="btn-ghost" @click="showCopy = false">取消</button><button class="btn-primary" @click="confirmCopy">复制</button></div>
+    </Modal>
+
+    <!-- S24-235 批量归入收藏分组 -->
+    <Modal :show="showBatchGroup" title="归入收藏分组" @close="showBatchGroup = false">
+      <input v-model="batchGroupValue" class="input" list="file-groups" placeholder="分组名（留空表示取消分组）" />
+      <datalist id="file-groups">
+        <option v-for="g in starGroups" :key="g.name" :value="g.name" />
+      </datalist>
+      <div class="mt-2 flex flex-wrap gap-1">
+        <button v-for="g in starGroups" :key="'p' + g.name" class="tag" @click="batchGroupValue = g.name">#{{ g.name }} {{ g.count }}</button>
+      </div>
+      <div class="mt-4 flex justify-end gap-2"><button class="btn-ghost" @click="showBatchGroup = false">取消</button><button class="btn-primary" @click="confirmGroup">确定</button></div>
+    </Modal>
+
+    <!-- S24-215 移动冲突预检 -->
+    <Modal :show="!!moveConflicts" title="目标目录存在同名文件" width="560px" @close="moveConflicts = null">
+      <div class="space-y-2 text-[12px]">
+        <div class="text-ink-600">移动到「{{ moveConflicts?.target?.name || '根目录' }}」有 {{ moveConflicts?.conflicts?.length || 0 }} 个同名文件，请选择处理方式：</div>
+        <div class="max-h-40 space-y-0.5 overflow-y-auto">
+          <div v-for="c in moveConflicts?.conflicts || []" :key="c.id" class="truncate rounded-control bg-ink-50 px-2 py-1">{{ c.name }}</div>
+        </div>
+      </div>
+      <div class="mt-4 flex justify-end gap-2">
+        <button class="btn-ghost" @click="moveConflicts = null">取消</button>
+        <button class="btn-outline" @click="runMove('skip')">跳过同名</button>
+        <button class="btn-primary" @click="runMove('rename')">自动改名</button>
+      </div>
+    </Modal>
+
     <!-- 新建/编辑文本 -->
     <Modal :show="showText || !!editingText" :title="editingText ? '编辑：' + editingText.name : '新建文本文件'" width="680px" @close="closeText">
       <input v-if="!editingText" v-model="textName" class="input mb-2" placeholder="文件名（不含扩展名）" />
@@ -214,8 +295,8 @@
       <div class="mt-4 flex justify-end gap-2"><button class="btn-ghost" @click="descTarget = null">取消</button><button class="btn-primary" @click="saveDesc">保存</button></div>
     </Modal>
 
-    <!-- 分享 -->
-    <Modal :show="!!sharing" title="生成共享链接" @close="sharing = null">
+    <!-- 分享（S24-223：文件夹分享支持允许访客上传） -->
+    <Modal :show="!!sharing" :title="shareIsFolder ? '文件夹共享链接' : '生成共享链接'" @close="sharing = null">
       <div class="space-y-3 text-[13px]">
         <div class="flex items-center gap-3"><span class="w-20 text-ink-500">权限</span>
           <select v-model="shareForm.permission" class="input w-40"><option value="view">仅预览</option><option value="download">可下载</option></select></div>
@@ -223,8 +304,16 @@
           <select v-model="shareForm.expire_hours" class="input w-40"><option :value="null">永久</option><option :value="1">1 小时</option><option :value="24">24 小时</option><option :value="168">7 天</option></select></div>
         <div class="flex items-center gap-3"><span class="w-20 text-ink-500">访问密码</span><input v-model="shareForm.password" class="input w-40" placeholder="可选" /></div>
         <div class="flex items-center gap-3"><span class="w-20 text-ink-500">下载上限</span><input v-model.number="shareForm.max_downloads" type="number" class="input w-40" placeholder="不限" /></div>
-        <div v-if="shareResult" class="rounded-control bg-ink-50 p-3">
+        <label v-if="shareIsFolder" class="flex items-center gap-2"><input v-model="shareForm.allow_upload" type="checkbox" /> 允许上传（访客可把文件投递进来）</label>
+        <div v-if="shareResult" class="space-y-2 rounded-control bg-ink-50 p-3">
           <div class="truncate font-mono text-[12px] text-brand-700">{{ shareUrl() }}</div>
+          <div class="flex flex-wrap gap-2">
+            <button class="btn-outline px-2 text-[12px]" @click="copyText(shareUrl(), '链接已复制')">复制链接</button>
+            <button class="btn-outline px-2 text-[12px]" @click="copyMarkdown">复制 Markdown</button>
+            <button class="btn-outline px-2 text-[12px]" @click="copyHtml">复制 HTML</button>
+            <button v-if="shareResult.allow_upload" class="btn-outline px-2 text-[12px]" @click="copyText(shareUrl(), '收集链接已复制，访客可在分享页直接上传')">复制收集链接</button>
+          </div>
+          <div v-if="shareResult.allow_upload" class="text-[11px] text-ink-500">访客打开该链接即可把文件上传到共享文件夹（单个 ≤50MB，后端校验扩展名）。</div>
         </div>
         <div class="flex justify-end gap-2"><button class="btn-ghost" @click="sharing = null">关闭</button><button v-if="!shareResult" class="btn-primary" @click="createShare">生成链接</button></div>
       </div>
@@ -274,9 +363,19 @@
                 :src="previewState.preview_url || mediaUrl"
                 class="h-[55vh] w-full rounded-control border border-ink-100"></iframe>
 
-        <pre v-else-if="previewing.preview_type === 'text'"
-             class="max-h-[55vh] overflow-auto rounded-control bg-ink-50 p-3 leading-relaxed text-ink-700"
-             :style="{ fontSize: (12 * zoom / 100) + 'px' }">{{ previewContent }}</pre>
+        <div v-else-if="previewing.preview_type === 'text'" class="space-y-2">
+          <!-- S24-221 预览内查找：高亮全部命中并支持上下跳转（不请求后端） -->
+          <div class="flex flex-wrap items-center gap-2 text-[12px]">
+            <input ref="findInput" v-model="findText" class="input w-52 py-1" placeholder="查找文本…（Enter 下一个）"
+                   @keyup.enter.exact="nextMatch(1)" @keyup.shift.enter="nextMatch(-1)" />
+            <span class="text-ink-400">{{ findText ? `${findCount ? findPos + 1 : 0}/${findCount}` : '输入关键词查找' }}</span>
+            <button class="btn-ghost px-2 text-[12px]" :disabled="!findCount" @click="nextMatch(-1)">上一个</button>
+            <button class="btn-ghost px-2 text-[12px]" :disabled="!findCount" @click="nextMatch(1)">下一个</button>
+          </div>
+          <pre ref="findPre"
+               class="max-h-[55vh] overflow-auto rounded-control bg-ink-50 p-3 leading-relaxed text-ink-700"
+               :style="{ fontSize: (12 * zoom / 100) + 'px' }" v-html="highlightContent"></pre>
+        </div>
 
         <div v-else-if="previewing.preview_type === 'office'" class="rounded-control bg-ink-50 p-4 text-[13px] text-ink-600">
           <div v-if="previewState.needs_convert">
@@ -315,9 +414,21 @@
           <option value="upload">上传</option>
         </select>
         <span class="text-ink-400">共 {{ opsList.length }} 条</span>
-        <button class="btn-ghost ml-auto px-2 text-[12px]" @click="loadOps">刷新</button>
+        <button class="btn-ghost ml-auto px-2 text-[12px]" @click="toggleHeatmap">{{ showHeatmap ? '列表' : '热力图' }}</button>
+        <button class="btn-ghost px-2 text-[12px]" @click="loadOps">刷新</button>
       </div>
-      <div class="max-h-[50vh] space-y-1 overflow-y-auto">
+      <!-- S24-220 操作热力图：按日期 × 动作聚合，色深表示操作量 -->
+      <div v-if="showHeatmap" class="mb-2 rounded-control bg-ink-50 p-2">
+        <div class="mb-1 flex flex-wrap items-center gap-2 text-[11px] text-ink-500">
+          <span>近 {{ heatmap.days || 180 }} 天 · 共 {{ heatmap.total || 0 }} 次操作</span>
+          <span v-for="a in heatmap.by_action || []" :key="a.action">{{ a.label }} {{ a.count }}</span>
+        </div>
+        <div class="flex flex-wrap gap-[3px]">
+          <span v-for="d in heatmap.days_list || []" :key="d.date" :title="`${d.date}：${d.count} 次`"
+                class="h-3 w-3 rounded-sm" :style="{ background: heatColor(d.count) }"></span>
+        </div>
+      </div>
+      <div v-if="!showHeatmap" class="max-h-[50vh] space-y-1 overflow-y-auto">
         <div v-for="o in opsList" :key="o.id" class="rounded-control bg-ink-50 px-3 py-2 text-[12px]">
           <div class="flex justify-between"><span class="font-medium text-ink-700">{{ o.action_label }} · {{ o.file_name }}</span><span class="text-ink-400">{{ formatTime(o.created_at) }}</span></div>
           <div class="text-ink-500">
@@ -383,7 +494,22 @@
         </button>
         <div v-if="!(tagStats.list || []).length" class="py-8 text-center text-[12px] text-ink-400">还没有标签</div>
       </div>
-      <div class="mt-3 text-[11px] text-ink-400">点击标签即可按它过滤文件列表。</div>
+      <!-- S24-217 标签合并：把 from 的文件关系整体并入 to -->
+      <div class="mt-3 flex flex-wrap items-center gap-2 border-t border-ink-100 pt-3 text-[12px]">
+        <span class="text-ink-500">合并标签</span>
+        <select v-model="mergeFrom" class="input w-32">
+          <option :value="null">来源标签</option>
+          <option v-for="t in tagStats.list || []" :key="'f' + t.id" :value="t.id">#{{ t.name }}</option>
+        </select>
+        <span class="text-ink-400">→</span>
+        <select v-model="mergeTo" class="input w-32">
+          <option :value="null">目标标签</option>
+          <option v-for="t in tagStats.list || []" :key="'t' + t.id" :value="t.id">#{{ t.name }}</option>
+        </select>
+        <button class="btn-outline px-2 text-[12px]" :disabled="!mergeFrom || !mergeTo || mergeFrom === mergeTo" @click="doTagMerge">合并到</button>
+        <span class="text-[11px] text-ink-400">合并后来源标签会被删除，文件关系全部转到目标标签。</span>
+      </div>
+      <div class="mt-2 text-[11px] text-ink-400">点击标签即可按它过滤文件列表。</div>
     </Modal>
 
     <input ref="fileInput" type="file" multiple class="hidden" @change="onFilePicked" />
@@ -392,7 +518,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { fileApi } from '../../api'
 import request from '../../api/request'
@@ -470,6 +596,29 @@ const uploadName = ref('')
 const uploadQueue = ref([])
 const CHUNK_SIZE = 5 * 1024 * 1024
 
+// ---- S24-211–235 前端状态 ----
+const searchHistory = ref([])          // 227 搜索历史
+const showSearchHistory = ref(false)
+const dragOverFolder = ref(null)       // 213 拖拽高亮目标目录（0 = 根目录）
+const dragFileId = ref(null)
+const uploadConflict = ref('rename')   // 216 重名策略
+const pendingUploads = ref([])         // 233 未完成上传
+const resumeTarget = ref(null)
+const showCopy = ref(false)            // 228 批量复制
+const copyTarget = ref(null)
+const showBatchGroup = ref(false)      // 235 收藏分组
+const batchGroupValue = ref('')
+const starGroups = ref([])
+const moveConflicts = ref(null)        // 215 移动冲突预检结果
+const mergeFrom = ref(null)            // 217 标签合并
+const mergeTo = ref(null)
+const shareIsFolder = ref(false)       // 223 文件夹分享
+const findText = ref('')               // 221 预览内查找
+const findPos = ref(0)
+const findPre = ref(null)
+const showHeatmap = ref(false)         // 220 操作热力图
+const heatmap = ref({})
+
 // 预览兜底提示只应在「确实没有可用渲染器」时出现；
 // 之前 v-else 挂在 EXIF 块后面，导致 txt/pdf 等都显示"不支持预览"
 const PREVIEW_TYPES = ['image', 'video', 'audio', 'pdf', 'text', 'office']
@@ -534,14 +683,20 @@ async function loadFileTags() {
 async function loadFolderTemplates() {
   try { folderTemplates.value = (await fileApi.folderTemplates()).list || [] } catch (e) { folderTemplates.value = [] }
 }
-async function loadFiles() {
+let loadSeq = 0
+// #142 保留模式：实时事件触发的刷新不清空选区，仅按 id 交集裁剪
+async function loadFiles(preserveSelection = false) {
+  const seq = ++loadSeq
   loading.value = true
+  // 用户主动切目录/筛选后旧选中项不可见，必须清空，避免批量操作误伤
+  if (!preserveSelection) selected.value = new Set()
   try {
     const params = { kind: kindFilter.value, ordering: ordering.value }
+    let next = []
     if (quickFilter.value === 'starred') {
-      files.value = (await fileApi.starred()).list || []
+      next = (await fileApi.starred()).list || []
     } else if (quickFilter.value === 'recent') {
-      files.value = (await fileApi.recent()).list || []
+      next = (await fileApi.recent()).list || []
     } else if (keyword.value) {
       let list = ((await fileApi.search({ q: keyword.value, kind: kindFilter.value })).list) || []
       // F556 按命中文件夹过滤搜索结果
@@ -549,14 +704,25 @@ async function loadFiles() {
         const ids = new Set(folderHitIds.value[hitFilterFolder.value] || [])
         list = list.filter((f) => ids.has(f.id))
       }
-      files.value = list
+      next = list
     } else {
       params.folder = currentFolder.value ?? ''
       if (activeFileTag.value) params.tag = activeFileTag.value
-      files.value = ((await fileApi.list(params)).list) || []
+      next = ((await fileApi.list(params)).list) || []
+    }
+    if (seq !== loadSeq) return
+    files.value = next
+    if (preserveSelection && selected.value.size) {
+      const ids = new Set(next.map((f) => f.id))
+      const kept = new Set([...selected.value].filter((id) => ids.has(id)))
+      if (kept.size !== selected.value.size) selected.value = kept
     }
     loadDims()
-  } catch (e) { app.toastMsg(e.message, 'error') } finally { loading.value = false }
+  } catch (e) {
+    if (seq === loadSeq) app.toastMsg(e.message, 'error')
+  } finally {
+    if (seq === loadSeq) loading.value = false
+  }
 }
 function openFolder(id) {
   currentFolder.value = id
@@ -580,8 +746,87 @@ function filterByTag(name) {
 function doSearch() {
   quickFilter.value = ''
   hitFilterFolder.value = undefined
+  pushHistory(keyword.value)
+  showSearchHistory.value = false
   loadFiles()
   loadFolderHits()
+}
+
+// S24-227 搜索历史（localStorage，10 条去重）
+function loadSearchHistory() {
+  try {
+    const raw = JSON.parse(localStorage.getItem('files.searchHistory') || '[]')
+    searchHistory.value = Array.isArray(raw) ? raw.slice(0, 10) : []
+  } catch (e) { searchHistory.value = [] }
+}
+function saveSearchHistory() {
+  try { localStorage.setItem('files.searchHistory', JSON.stringify(searchHistory.value.slice(0, 10))) } catch (e) { /* ignore */ }
+}
+function pushHistory(q) {
+  const k = String(q || '').trim()
+  if (!k) return
+  searchHistory.value = [k, ...searchHistory.value.filter((x) => x !== k)].slice(0, 10)
+  saveSearchHistory()
+}
+function applyHistory(h) {
+  keyword.value = h
+  showSearchHistory.value = false
+  doSearch()
+}
+function removeHistory(h) {
+  searchHistory.value = searchHistory.value.filter((x) => x !== h)
+  saveSearchHistory()
+}
+
+// ---- S24-213 HTML5 拖拽：文件行 → 文件夹行 = 移动；本地文件 → 文件夹 = 上传 ----
+function onRowDragStart(f, e) {
+  dragFileId.value = f.id
+  try {
+    e.dataTransfer.setData('application/x-file-id', String(f.id))
+    e.dataTransfer.effectAllowed = 'move'
+  } catch (err) { /* 部分浏览器不允许自定义类型 */ }
+}
+function onFolderDragOver(id) { dragOverFolder.value = id }
+function onFolderDragLeave(id) { if (dragOverFolder.value === id) dragOverFolder.value = null }
+async function onFolderDrop(folderId, e) {
+  dragOverFolder.value = null
+  const dropped = Array.from(e?.dataTransfer?.files || [])
+  const rawId = Number(e?.dataTransfer?.getData('application/x-file-id') || 0)
+  dragFileId.value = null
+  if (dropped.length) {
+    // 本地文件拖入 → 直接上传到该目录（0 视为根目录）
+    const target = folderId || null
+    const batch = dropped.map((f) => ({ name: f.name, progress: 0, status: 'uploading' }))
+    uploadQueue.value = batch
+    dropped.forEach((f, i) => uploadOne(f, i, batch, target))
+    return
+  }
+  if (rawId) {
+    // 已多选且拖拽的是其中一员时，整批移动
+    if (!selected.value.has(rawId)) selected.value = new Set([rawId])
+    moveTarget.value = folderId || null
+    await confirmMove()
+  }
+}
+
+// S24-212 文件夹整包下载
+async function downloadFolder(f) {
+  try {
+    await downloadWithAuth(filesx.folderDownloadUrl(f.id), `${f.name}.zip`)
+  } catch (e) { app.toastMsg(await describeDownloadError(e), 'error') }
+}
+
+// S24-218 一键清理空文件夹
+async function cleanupEmpty() {
+  try {
+    const r = await filesx.emptyFolders()
+    const list = r.list || []
+    if (!list.length) return app.toastMsg('没有空文件夹', 'info')
+    if (!confirm(`发现 ${list.length} 个空文件夹（无文件且无子目录），是否全部删除？`)) return
+    const res = await filesx.cleanupEmptyFolders(list.map((x) => x.id))
+    app.toastMsg(res.message || `已删除 ${res.deleted} 个空文件夹`, 'success')
+    loadFolders()
+  } catch (e) { app.toastMsg(e.message || '清理失败', 'error') }
 }
 function newFolderDialog() { showNewFolder.value = true; newFolderName.value = '' }
 async function createFolder() {
@@ -670,18 +915,80 @@ function toggleAll() {
   else selected.value = new Set(files.value.map((f) => f.id))
 }
 async function batch(action) {
+  if (!selected.value.size) { app.toastMsg('请先选择文件', 'error'); return }
+  if (action === 'trash' && !confirm(`将选中的 ${selected.value.size} 个文件移入回收站？`)) return
   await fileApi.batch({ file_ids: [...selected.value], action })
   selected.value = new Set()
   app.toastMsg('批量操作完成', 'success')
   loadFiles()
 }
 function batchMove() { showMove.value = true; moveTarget.value = null }
+// S24-215 先 dry_run 预检，有冲突时让用户选择跳过 / 改名
 async function confirmMove() {
-  await fileApi.batch({ file_ids: [...selected.value], action: 'move', folder: moveTarget.value })
-  showMove.value = false
-  selected.value = new Set()
-  app.toastMsg('已移动', 'success')
-  loadFiles()
+  if (!selected.value.size) return app.toastMsg('请先选择文件', 'error')
+  try {
+    const pre = await fileApi.batch({
+      file_ids: [...selected.value], action: 'move', folder: moveTarget.value, dry_run: true,
+    })
+    if (pre.conflict_count) {
+      moveConflicts.value = pre
+      return
+    }
+    await runMove('')
+  } catch (e) { app.toastMsg(e.message || '移动失败', 'error') }
+}
+async function runMove(onConflict) {
+  const folder = moveConflicts.value ? (moveConflicts.value.target?.id || null) : moveTarget.value
+  try {
+    const data = { file_ids: [...selected.value], action: 'move', folder }
+    if (onConflict) data.on_conflict = onConflict
+    const r = await fileApi.batch(data)
+    app.toastMsg(r.message || '已移动', 'success')
+    moveConflicts.value = null
+    showMove.value = false
+    selected.value = new Set()
+    loadFiles()
+  } catch (e) { app.toastMsg(e.message || '移动失败', 'error') }
+}
+// S24-228 批量复制到目标目录
+function openBatchCopy() {
+  if (!selected.value.size) return app.toastMsg('请先选择文件', 'error')
+  showCopy.value = true
+  copyTarget.value = null
+}
+async function confirmCopy() {
+  try {
+    const r = await fileApi.batch({ file_ids: [...selected.value], action: 'copy', folder: copyTarget.value })
+    app.toastMsg(r.message || '已复制', 'success')
+    if ((r.failed || []).length) app.toastMsg(`${r.failed.length} 个文件复制失败`, 'warn')
+    showCopy.value = false
+    selected.value = new Set()
+    loadFiles()
+  } catch (e) { app.toastMsg(e.message || '复制失败', 'error') }
+}
+// S24-235 批量归入收藏分组（分组候选复用 StarredFileView 聚合）
+async function openBatchGroup() {
+  if (!selected.value.size) return app.toastMsg('请先选择文件', 'error')
+  showBatchGroup.value = true
+  batchGroupValue.value = ''
+  try {
+    const r = await fileApi.starred()
+    // 后端 groups 为 [{ favorite_group, c }]，这里统一成 name/count
+    starGroups.value = (r.groups || [])
+      .filter((g) => g.favorite_group)
+      .map((g) => ({ name: g.favorite_group, count: g.c }))
+  } catch (e) { starGroups.value = [] }
+}
+async function confirmGroup() {
+  try {
+    const r = await fileApi.batch({
+      file_ids: [...selected.value], action: 'group', group: batchGroupValue.value.trim(),
+    })
+    app.toastMsg(r.message || '已更新分组', 'success')
+    showBatchGroup.value = false
+    selected.value = new Set()
+    loadFiles()
+  } catch (e) { app.toastMsg(e.message || '分组失败', 'error') }
 }
 async function batchDownload() {
   try {
@@ -748,34 +1055,41 @@ async function parseExif(rawUrl) {
 }
 
 async function openPreview(f) {
+  const seq = ++previewSeq
   releaseMedia()
   previewing.value = f
   previewState.value = { preview_url: '' }
   previewContent.value = ''
   exifInfo.value = null
+  findText.value = ''
+  findPos.value = 0
   // F2：图片/视频/音频/PDF 的直链都要 JWT，改走 blob objectURL
   if (['image', 'video', 'audio', 'pdf'].includes(f.preview_type)) {
     try {
       const m = await loadMediaObjectUrl(
         f.preview_type === 'pdf' ? fileApi.pdfUrl(f.id) : fileApi.rawUrl(f.id),
       )
+      if (seq !== previewSeq) { m.revoke(); return }
       mediaUrl.value = m.url
       mediaRevoke = m.revoke
     } catch (e) {
-      app.toastMsg(await describeDownloadError(e), 'error')
+      if (seq === previewSeq) app.toastMsg(await describeDownloadError(e), 'error')
     }
   }
   if (f.preview_type === 'text') {
     const r = await fileApi.preview(f.id)
+    if (seq !== previewSeq) return
     previewContent.value = r.content || ''
   } else if (f.preview_type === 'office') {
     const r = await fileApi.preview(f.id)
+    if (seq !== previewSeq) return
     previewState.value = r
     if (!r.office_available) officeHint.value = r.office_hint || ''
   } else if (f.preview_type === 'image') {
     parseExif(mediaUrl.value)
   }
 }
+let previewSeq = 0
 
 // F2：objectURL 生命周期管理——切换/关闭/卸载都必须释放
 let mediaRevoke = null
@@ -796,7 +1110,53 @@ function closePreview() {
   previewState.value = {}
   previewContent.value = ''
   exifInfo.value = null
+  findText.value = ''
+  findPos.value = 0
 }
+
+// S24-221 预览内查找：命中全部高亮、n/total、Enter/Shift+Enter 跳转
+const findCount = computed(() => {
+  const q = findText.value.trim().toLowerCase()
+  if (!q) return 0
+  const hay = (previewContent.value || '').toLowerCase()
+  let i = 0
+  let n = 0
+  while ((i = hay.indexOf(q, i)) !== -1) { n += 1; i += q.length }
+  return n
+})
+const highlightContent = computed(() => {
+  const text = previewContent.value || ''
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const q = findText.value.trim().toLowerCase()
+  if (!q) return esc(text)
+  const lower = text.toLowerCase()
+  const total = findCount.value || 1
+  const current = findPos.value % total
+  let out = ''
+  let i = 0
+  let n = 0
+  while (true) {
+    const at = lower.indexOf(q, i)
+    if (at === -1) { out += esc(text.slice(i)); break }
+    out += esc(text.slice(i, at))
+    const hit = esc(text.slice(at, at + q.length))
+    out += n === current
+      ? `<mark id="find-hit" style="background:#fb923c;color:#fff">${hit}</mark>`
+      : `<mark style="background:#fde68a">${hit}</mark>`
+    n += 1
+    i = at + q.length
+  }
+  return out
+})
+function nextMatch(step) {
+  if (!findCount.value) return
+  findPos.value = (findPos.value + step + findCount.value) % findCount.value
+  nextTick(() => findPre.value?.querySelector('#find-hit')?.scrollIntoView({ block: 'center' }))
+}
+watch(findText, () => {
+  findPos.value = 0
+  nextTick(() => findPre.value?.querySelector('#find-hit')?.scrollIntoView({ block: 'center' }))
+})
 
 // F2：带 JWT 下载（裸 <a href> 不带令牌会 401）
 async function downloadOne(f) {
@@ -829,6 +1189,9 @@ async function convertToPdf() {
 
 async function editText(f) {
   const r = await fileApi.preview(f.id)
+  if (r.truncated) {
+    return app.toastMsg('文件超过 256KB，暂不支持在线编辑（避免截断后覆盖原文件）', 'error')
+  }
   editingText.value = f
   textContent.value = r.content || ''
 }
@@ -844,13 +1207,27 @@ async function saveText() {
   closeText()
   loadFiles()
 }
-function openShare(f) { sharing.value = f; shareResult.value = null; shareForm.value = { permission: 'view', expire_hours: null, password: '', max_downloads: null } }
+function openShare(f) {
+  sharing.value = f
+  shareIsFolder.value = false
+  shareResult.value = null
+  shareForm.value = { permission: 'view', expire_hours: null, password: '', max_downloads: null, allow_upload: false }
+}
+// S24-223 文件夹分享（可开启访客上传，形成收集链接）
+function shareFolder(f) {
+  sharing.value = f
+  shareIsFolder.value = true
+  shareResult.value = null
+  shareForm.value = { permission: 'download', expire_hours: null, password: '', max_downloads: null, allow_upload: true }
+}
 async function createShare() {
   if (creatingShare.value) return  // 防双击生成两条链接
   creatingShare.value = true
   try {
-    const payload = { file_id: sharing.value.id, ...shareForm.value }
-    Object.keys(payload).forEach((k) => (payload[k] === '' || payload[k] === null) && delete payload[k])
+    const payload = shareIsFolder.value
+      ? { folder_id: sharing.value.id, ...shareForm.value }
+      : { file_id: sharing.value.id, ...shareForm.value }
+    Object.keys(payload).forEach((k) => (payload[k] === '' || payload[k] === null || payload[k] === false) && delete payload[k])
     shareResult.value = await fileApi.createShare(payload)
     let copied = false
     try {
@@ -866,6 +1243,19 @@ async function createShare() {
     creatingShare.value = false
   }
 }
+// S24-230 分享结果可复制 Markdown / HTML（带可读文件名）
+async function copyText(text, okMsg = '已复制') {
+  try {
+    await navigator.clipboard.writeText(text)
+    app.toastMsg(okMsg, 'success')
+  } catch (e) { app.toastMsg('剪贴板不可用，请手动复制', 'warn') }
+}
+function shareTitle() {
+  const n = sharing.value?.name || '文件'
+  return n.replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]))
+}
+function copyMarkdown() { copyText(`[${shareTitle()}](${shareUrl()})`, 'Markdown 已复制') }
+function copyHtml() { copyText(`<a href="${shareUrl()}">${shareTitle()}</a>`, 'HTML 已复制') }
 // F4：对外链接统一走 base.js 的 shareUrl()（VITE_PUBLIC_BASE + /share/:token），
 // 不再本地拼 location.origin，部署到 CF Pages 时也能给出正确地址
 const shareUrl = () => shareResult.value ? buildShareUrl(shareResult.value.token) : ''
@@ -873,33 +1263,109 @@ function pickFiles() { fileInput.value?.click() }
 async function onFilePicked(e) {
   const list = Array.from(e.target.files || [])
   e.target.value = ''
-  // #2 多文件队列
-  uploadQueue.value = list.map((f) => ({ name: f.name, progress: 0, status: 'uploading' }))
-  list.forEach((f, i) => uploadOne(f, i))
+  // S24-233 续传：必须重新选择本地同名文件（浏览器不允许持久化 File 对象）
+  if (resumeTarget.value) {
+    const target = resumeTarget.value
+    resumeTarget.value = null
+    const picked = list.find((f) => f.name === target.name)
+    if (!picked) return app.toastMsg('请选择与记录同名的文件以继续上传', 'error')
+    const batch = [{ name: picked.name, progress: 0, status: 'uploading' }]
+    uploadQueue.value = batch
+    await uploadOne(picked, 0, batch, target.folder ?? null, target.upload_id)
+    return
+  }
+  // #2 多文件队列（batch 引用固定，避免新一批覆盖后旧批次写错行）
+  const batch = list.map((f) => ({ name: f.name, progress: 0, status: 'uploading' }))
+  uploadQueue.value = batch
+  list.forEach((f, i) => uploadOne(f, i, batch))
 }
-async function uploadOne(file, idx) {
+
+// S24-216 上传重名策略记忆
+function loadUploadConflict() {
+  try { uploadConflict.value = localStorage.getItem('files.uploadConflict') || 'rename' } catch (e) { /* ignore */ }
+}
+function saveUploadConflict() {
+  try { localStorage.setItem('files.uploadConflict', uploadConflict.value) } catch (e) { /* ignore */ }
+}
+
+// S24-233 断点续传：upload_id / 文件名 / 已完成分片数落 localStorage
+const RESUME_KEY = 'files.uploads'
+function loadResumeMap() {
+  try { return JSON.parse(localStorage.getItem(RESUME_KEY) || '{}') || {} } catch (e) { return {} }
+}
+function saveResumeMap(map) {
+  try { localStorage.setItem(RESUME_KEY, JSON.stringify(map)) } catch (e) { /* ignore */ }
+}
+function setResume(uploadId, patch) {
+  const map = loadResumeMap()
+  map[uploadId] = { ...(map[uploadId] || {}), ...patch }
+  saveResumeMap(map)
+}
+function clearResume(uploadId) {
+  const map = loadResumeMap()
+  if (!(uploadId in map)) return
+  delete map[uploadId]
+  saveResumeMap(map)
+  pendingUploads.value = pendingUploads.value.filter((p) => p.upload_id !== uploadId)
+}
+async function validateResume() {
+  const map = loadResumeMap()
+  const rows = []
+  for (const [uploadId, info] of Object.entries(map)) {
+    try {
+      const s = await fileApi.uploadStatus(uploadId)
+      if (s.status !== 'uploading') { clearResume(uploadId); continue }
+      rows.push({
+        upload_id: uploadId, name: s.filename || info.name,
+        total: s.total_chunks || info.total || 0, done: (s.uploaded || []).length,
+        folder: info.folder ?? null,
+      })
+    } catch (e) { clearResume(uploadId) }
+  }
+  pendingUploads.value = rows
+}
+function dropResume(uploadId) { clearResume(uploadId) }
+function resumeUpload(p) { resumeTarget.value = p; fileInput.value?.click() }
+
+async function uploadOne(file, idx, batch, targetFolderId, resumeId) {
   // 单文件才用全局进度条；多文件并行时进度以 uploadQueue 各自为准，避免数值乱跳
   const single = uploadQueue.value.length <= 1
+  // 进入上传即快照目录：await sha1 期间用户切目录不应改变目标位置
+  const folderId = targetFolderId !== undefined ? targetFolderId : currentFolder.value
+  const updateRow = (patch) => {
+    if (idx != null && uploadQueue.value === batch && batch[idx]) {
+      uploadQueue.value[idx] = { ...uploadQueue.value[idx], ...patch }
+    }
+  }
   uploading.value = true
   if (single) {
     uploadName.value = file.name
     uploadProgress.value = 0
   }
   try {
-    // F14：先算真实 sha1 让秒传真正生效（后端 uploadInit 按 sha1+owner 命中已存在文件）。
-    // 计算失败（极端环境）降级为空串——后端按无秒传处理，只是少一个优化。
-    let sha1 = ''
-    try {
-      sha1 = await sha1File(file)
-    } catch {
-      sha1 = ''
+    let init
+    if (resumeId) {
+      // 续传：沿用已有 upload_id 与已上传分片
+      const st = await fileApi.uploadStatus(resumeId)
+      init = { sec_pass: false, upload_id: resumeId, uploaded: st.uploaded || [] }
+    } else {
+      // F14：先算真实 sha1 让秒传真正生效（后端 uploadInit 按 sha1+owner 命中已存在文件）。
+      // 计算失败（极端环境）降级为空串——后端按无秒传处理，只是少一个优化。
+      let sha1 = ''
+      try {
+        sha1 = await sha1File(file)
+      } catch {
+        sha1 = ''
+      }
+      const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE))
+      init = await fileApi.uploadInit({ filename: file.name, folder_id: folderId, file_size: file.size, chunk_size: CHUNK_SIZE, total_chunks: totalChunks, sha1 })
+      if (init.sec_pass) {
+        updateRow({ progress: 100, status: 'done' })
+        app.toastMsg('秒传成功', 'success'); return
+      }
     }
     const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE))
-    const init = await fileApi.uploadInit({ filename: file.name, folder_id: currentFolder.value, file_size: file.size, chunk_size: CHUNK_SIZE, total_chunks: totalChunks, sha1 })
-    if (init.sec_pass) {
-      if (idx != null) uploadQueue.value[idx] = { ...uploadQueue.value[idx], progress: 100, status: 'done' }
-      app.toastMsg('秒传成功', 'success'); return
-    }
+    setResume(init.upload_id, { name: file.name, total: totalChunks, size: file.size, folder: folderId })
     for (let i = 0; i < totalChunks; i++) {
       if (init.uploaded?.includes(i)) continue
       const blob = file.slice(i * CHUNK_SIZE, i * CHUNK_SIZE + CHUNK_SIZE)
@@ -908,22 +1374,30 @@ async function uploadOne(file, idx) {
       fd.append('index', i)
       fd.append('chunk', blob, `${file.name}.part${i}`)
       await fileApi.uploadChunk(fd)
+      setResume(init.upload_id, { done: i + 1 })
       const pct = Math.round(((i + 1) / totalChunks) * 90)
       if (single) uploadProgress.value = pct
-      if (idx != null) uploadQueue.value[idx] = { ...uploadQueue.value[idx], progress: pct, status: 'uploading' }
+      updateRow({ progress: pct, status: 'uploading' })
     }
-    const done = await fileApi.uploadComplete(init.upload_id)
+    // S24-216 完成时按上传设置处理重名
+    const done = await request.post('/files/upload/complete/', {
+      upload_id: init.upload_id, on_conflict: uploadConflict.value,
+    })
+    clearResume(init.upload_id)
     if (single) uploadProgress.value = 100
-    // F557 重名自动改名提示
-    if (done && done.renamed) {
-      app.toastMsg(`重名，已自动改名为「${done.renamed.final}」`, 'info')
+    if (done?.skipped?.length) {
+      updateRow({ progress: 100, status: 'done' })
+      app.toastMsg(`「${file.name}」同名已跳过`, 'info')
+      return
     }
-    if (idx != null) uploadQueue.value[idx] = { ...uploadQueue.value[idx], progress: 100, status: 'done' }
+    if (done?.overwritten) app.toastMsg(`已覆盖同名文件「${file.name}」`, 'info')
+    else if (done && done.renamed) app.toastMsg(`重名，已自动改名为「${done.renamed.final}」`, 'info')
+    updateRow({ progress: 100, status: 'done' })
     app.toastMsg(`${file.name} 上传完成`, 'success')
     loadFiles()
   } catch (e) {
     app.toastMsg(`${file.name} 上传失败：${e.message}`, 'error')
-    if (idx != null) uploadQueue.value[idx] = { ...uploadQueue.value[idx], status: 'error' }
+    updateRow({ status: 'error' })
   } finally {
     // 并行上传时，任何一个结束都不能把整体状态置为「已完成」
     uploading.value = uploadQueue.value.some((q) => q.status === 'uploading')
@@ -1037,6 +1511,21 @@ async function loadOps() {
     opsList.value = r.list || []
   } catch (e) { opsList.value = [] }
 }
+// S24-220 操作热力图
+async function toggleHeatmap() {
+  showHeatmap.value = !showHeatmap.value
+  if (showHeatmap.value && !(heatmap.value.days_list || []).length) {
+    try { heatmap.value = await filesx.opsHeatmap(180) } catch (e) { heatmap.value = {} }
+  }
+}
+function heatColor(n) {
+  if (!n) return '#eef2f6'
+  const ratio = n / (heatmap.value.max || 1)
+  if (ratio > 0.75) return '#0369a1'
+  if (ratio > 0.5) return '#0ea5e9'
+  if (ratio > 0.25) return '#7dd3fc'
+  return '#bae6fd'
+}
 
 // F561 文件可见性快照
 async function openVisibility(f) {
@@ -1061,7 +1550,36 @@ async function takeSnapshot() {
 // F563 标签统计与点击过滤
 async function openTagStats() {
   showTagStats.value = true
+  mergeFrom.value = null
+  mergeTo.value = null
   try { tagStats.value = await filesx.tagsStats() } catch (e) { tagStats.value = {} }
+}
+// S24-217 合并标签
+async function doTagMerge() {
+  if (!mergeFrom.value || !mergeTo.value || mergeFrom.value === mergeTo.value) return
+  if (!confirm('合并后来源标签会被删除，确认合并？')) return
+  try {
+    const r = await filesx.tagMerge(mergeFrom.value, mergeTo.value)
+    app.toastMsg(r.message || '已合并标签', 'success')
+    await openTagStats()
+    loadFileTags()
+    loadFiles()
+  } catch (e) { app.toastMsg(e.message || '合并失败', 'error') }
+}
+// S24-224 文本文件转为笔记
+async function toNote(f) {
+  try {
+    const r = await filesx.toNote(f.id)
+    app.toastMsg(`已转为笔记「${r.title}」（${r.words} 字）`, 'success')
+  } catch (e) { app.toastMsg(e.message || '转为笔记失败', 'error') }
+}
+// S24-226 移除单条最近访问
+async function removeRecent(f) {
+  try {
+    await filesx.removeRecent(f.id)
+    files.value = files.value.filter((x) => x.id !== f.id)
+    app.toastMsg('已移除该记录', 'success')
+  } catch (e) { app.toastMsg(e.message || '移除失败', 'error') }
 }
 
 // F564 收藏/标签导出导入 JSON
@@ -1103,6 +1621,9 @@ function onKeydown(e) {
 onMounted(() => {
   loadPrefs()
   loadZoom()
+  loadSearchHistory()
+  loadUploadConflict()
+  validateResume()
   loadFolders(); loadFileTags(); loadFolderTemplates()
   // F23：从全局搜索带 ?q= 跳入时填充关键词并直接搜索（原来只落模块首页，不定位）
   const q = route.query.q
@@ -1116,7 +1637,8 @@ onMounted(() => {
   // S2-B1：订阅文件实时事件（多标签页/多端同步）——上传/删除/更新后静默刷新
   offFileEvent = app.onFileEvent((type, data) => {
     if (data?.action === 'uploaded' || data?.action === 'deleted' || data?.action === 'updated') {
-      loadFiles()
+      // #142 实时刷新保留已选文件，批量操作不中断
+      loadFiles(true)
     }
   })
 })

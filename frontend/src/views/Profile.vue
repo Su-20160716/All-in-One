@@ -289,6 +289,34 @@
       </div>
     </div>
 
+    <!-- #171 立即注销：密码确认对话框（掩码输入 + 冷静期说明），替代 prompt -->
+    <Modal :show="!!deactModal" title="确认立即注销" width="440px" @close="deactModal = null">
+      <div v-if="deactModal" class="space-y-3">
+        <p class="rounded-control bg-rose-50 px-3 py-2 text-[12px] text-rose-600">
+          注销后账号立即停用，所有登录会话失效。此操作不可撤销。
+        </p>
+        <p class="text-[12px] text-ink-500">
+          当前冷静期：{{ deact.cooldown_days || 7 }} 天<template v-if="deact.status === 'pending'">，申请后还剩约 {{ deact.days_left }} 天</template>。
+          若希望保留反悔机会，请改用「申请注销」。
+        </p>
+        <label class="block">
+          <span class="mb-1 block text-[12px] font-medium text-ink-600">登录密码</span>
+          <input
+            v-model="deactModal.pwd"
+            type="password"
+            class="input"
+            autocomplete="current-password"
+            placeholder="请输入当前登录密码"
+            @keyup.enter="submitDeactivate"
+          />
+        </label>
+        <div class="flex justify-end gap-2">
+          <button class="btn-ghost" @click="deactModal = null">取消</button>
+          <button class="btn-danger" @click="submitDeactivate">确认注销</button>
+        </div>
+      </div>
+    </Modal>
+
     <!-- ================= F616 安全评分卡 ================= -->
     <div class="card p-5">
       <div class="flex items-center justify-between">
@@ -480,20 +508,95 @@
         </div>
       </div>
       <div class="mt-3 space-y-2">
-        <div v-for="t in pat.list" :key="t.id" class="flex items-center justify-between rounded-control border border-ink-100 px-3 py-2">
-          <div>
-            <div class="text-[13px]">{{ t.name }} <span class="font-mono text-[11px] text-ink-400">{{ t.prefix }}</span></div>
-            <div class="text-[11px] text-ink-400">
-              {{ t.expires_at ? '到期 ' + formatTime(t.expires_at) : '长期有效' }}
-              <span v-if="t.last_used_at">· 最近使用 {{ formatTime(t.last_used_at) }}</span>
+        <div v-for="t in pat.list" :key="t.id" class="rounded-control border border-ink-100 px-3 py-2">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="min-w-0">
+              <div class="text-[13px]">{{ t.name }} <span class="font-mono text-[11px] text-ink-400">{{ t.prefix }}</span></div>
+              <div class="text-[11px] text-ink-400">
+                {{ t.expires_at ? '到期 ' + formatTime(t.expires_at) : '长期有效' }}
+                <span v-if="t.last_used_at">· 最近使用 {{ formatTime(t.last_used_at) }}</span>
+              </div>
+              <!-- #414 作用域：空 = 全权 -->
+              <div class="mt-1 flex flex-wrap items-center gap-1">
+                <span class="text-[10px] text-ink-400">作用域</span>
+                <span v-if="!(t.scopes || []).length" class="tag tag-brand">全权</span>
+                <span v-for="s in t.scopes || []" :key="s" class="tag font-mono">{{ s }}</span>
+              </div>
+            </div>
+            <div class="flex shrink-0 items-center gap-1">
+              <!-- #415 每行「用量」：展开近 30 天统计 -->
+              <button class="btn-ghost text-[12px] text-brand-600" @click="toggleTokenUsage(t)">
+                {{ usageOf(t.id)?.data ? '收起用量' : '用量' }}
+              </button>
+              <button v-if="t.is_valid" class="btn-ghost text-[12px] text-rose-500" @click="revokeToken(t)">吊销</button>
+              <span v-else class="text-[11px] text-ink-400">已吊销/过期</span>
             </div>
           </div>
-          <button v-if="t.is_valid" class="btn-ghost text-[12px] text-rose-500" @click="revokeToken(t)">吊销</button>
-          <span v-else class="text-[11px] text-ink-400">已吊销/过期</span>
+          <div v-if="usageOf(t.id)" class="mt-2 rounded-control bg-ink-50/60 px-3 py-2">
+            <div v-if="usageOf(t.id).loading" class="text-[11px] text-ink-400">用量加载中…</div>
+            <div v-else-if="usageOf(t.id).error" class="flex items-center justify-between text-[11px] text-rose-500">
+              <span>{{ usageOf(t.id).error }}</span>
+              <button class="font-medium underline" @click="toggleTokenUsage(t)">重试</button>
+            </div>
+            <template v-else-if="usageOf(t.id).data">
+              <div class="grid grid-cols-3 gap-2 text-center">
+                <div>
+                  <div class="text-[15px] font-bold">{{ usageOf(t.id).data.total }}</div>
+                  <div class="text-[10px] text-ink-400">近 30 天总量</div>
+                </div>
+                <div>
+                  <div class="text-[15px] font-bold">{{ usageOf(t.id).data.avg }}</div>
+                  <div class="text-[10px] text-ink-400">日均</div>
+                </div>
+                <div>
+                  <div class="text-[15px] font-bold">{{ usageOf(t.id).data.peak?.count ?? 0 }}</div>
+                  <div class="text-[10px] text-ink-400">峰值 {{ usageOf(t.id).data.peak?.date || '-' }}</div>
+                </div>
+              </div>
+              <div class="mt-2 flex items-end gap-px" style="height: 36px">
+                <div v-for="p in last7(usageOf(t.id).data)" :key="p.date" class="flex-1 rounded-t bg-brand-400"
+                     :style="{ height: barHeight(p.count, usageOf(t.id).data) }"
+                     :title="`${p.date}: ${p.count} 次`"></div>
+              </div>
+              <div class="mt-1 flex justify-between text-[10px] text-ink-400">
+                <span>最近 7 天调用</span>
+                <span>{{ last7Range(usageOf(t.id).data) }}</span>
+              </div>
+            </template>
+          </div>
         </div>
         <div v-if="!pat.list.length" class="py-3 text-center text-[12px] text-ink-400">暂无令牌</div>
       </div>
     </div>
+
+    <!-- #414/#415 令牌创建对话框：名称 + 有效期 + 作用域 -->
+    <Modal :show="tokenModal" title="新建访问令牌" width="440px" @close="tokenModal = false">
+      <div class="space-y-3">
+        <label class="block">
+          <span class="mb-1 block text-[12px] font-medium text-ink-600">令牌名称</span>
+          <input v-model="tokenForm.name" class="input" placeholder="如 ci-script / local-dev" @keyup.enter="submitToken" />
+        </label>
+        <label class="block">
+          <span class="mb-1 block text-[12px] font-medium text-ink-600">有效期</span>
+          <select v-model.number="tokenForm.expires_days" class="input">
+            <option :value="30">30 天</option>
+            <option :value="90">90 天</option>
+            <option :value="180">180 天</option>
+            <option :value="365">365 天</option>
+            <option :value="0">长期有效</option>
+          </select>
+        </label>
+        <label class="block">
+          <span class="mb-1 block text-[12px] font-medium text-ink-600">作用域 scopes</span>
+          <input v-model="tokenForm.scopes" class="input font-mono" placeholder="files:read,notes:write" @keyup.enter="submitToken" />
+          <span class="mt-1 block text-[11px] text-ink-400">留空 = 全权；示例：files:read,notes:write</span>
+        </label>
+        <div class="flex justify-end gap-2">
+          <button class="btn-ghost" @click="tokenModal = false">取消</button>
+          <button class="btn-primary" :disabled="tokenBusy" @click="submitToken">{{ tokenBusy ? '创建中…' : '创建令牌' }}</button>
+        </div>
+      </div>
+    </Modal>
 
     <!-- ================= F624 通讯录备注名（仅自己可见） ================= -->
     <div class="card p-5">
@@ -584,10 +687,12 @@ import { useRoute, useRouter } from 'vue-router'
 import { authApi } from '../api'
 import { authxApi } from '../api/authx'
 import { corexApi, reportLatencySamples } from '../api/corex'
+import { developerxApi } from '../api/developerx'
 import { useUserStore } from '../stores/user'
 import { useAppStore } from '../stores/app'
 import { formatTime } from '../utils/format'
 import { ACCENTS, THEMES, applyTheme, getAccent, getTheme } from '../utils/theme'
+import Modal from '../components/Modal.vue'
 
 const user = useUserStore()
 const app = useAppStore()
@@ -775,17 +880,26 @@ async function exportData() {
 // F13：模块数改为动态获取（与导出同一接口/公式，初始 null 显示 "--"，失败静默）
 async function loadExportCount() {
   try {
-    const data = await authApi.exportData()
-    exportCount.value = Math.max(1, Object.keys(data || {}).length - 3)
+    exportCount.value = (await authApi.exportCount()).count ?? 1
   } catch { /* 接口失败时保持 null，按钮显示 -- */ }
 }
 async function deactivate() {
-  const pw = prompt('注销后账号将被禁用，如需继续请输入登录密码：')
-  if (pw === null) return
-  await authApi.deactivate(pw)
-  app.toastMsg('账号已注销', 'success')
-  await user.logout()
-  router.push('/login')
+  // #171 改为密码确认对话框：掩码输入 + 冷静期说明，不再用 prompt 明文收集
+  deactModal.value = { pwd: '' }
+}
+async function submitDeactivate() {
+  const m = deactModal.value
+  if (!m) return
+  if (!m.pwd) return app.toastMsg('请输入登录密码', 'error')
+  try {
+    await authApi.deactivate(m.pwd)
+    deactModal.value = null
+    app.toastMsg('账号已注销', 'success')
+    await user.logout()
+    router.push('/login')
+  } catch (e) {
+    app.toastMsg(e?.message || '注销失败', 'error')
+  }
 }
 
 // ===========================================================================
@@ -949,26 +1063,81 @@ async function loadFollows(type = 'following') {
 // ---------------- F621 PAT ----------------
 const pat = ref({ list: [] })
 const newToken = ref('')
+// #414 创建对话框：名称 + 有效期 + scopes（空 = 全权）
+const tokenModal = ref(false)
+const tokenBusy = ref(false)
+const tokenForm = reactive({ name: '', expires_days: 90, scopes: '' })
+// #415 每行「用量」展开：id -> { loading, error, data }
+const tokenUsage = ref({})
+
 async function loadTokens() {
   try { pat.value = await authxApi.tokens() } catch (e) { pat.value = { list: [] } }
 }
-async function createToken() {
-  const name = prompt('令牌名称（如 ci-script / local-dev）：', 'script')
-  if (!name) return
+function createToken() {
+  tokenForm.name = ''
+  tokenForm.expires_days = 90
+  tokenForm.scopes = ''
+  tokenModal.value = true
+}
+async function submitToken() {
+  const name = tokenForm.name.trim()
+  if (!name) return app.toastMsg('请填写令牌名称', 'error')
+  tokenBusy.value = true
   try {
-    const r = await authxApi.createToken({ name, expires_days: 90 })
+    const r = await authxApi.createToken({
+      name,
+      expires_days: Number(tokenForm.expires_days) || 0,
+      scopes: tokenForm.scopes.trim(),
+    })
     newToken.value = r.token
+    tokenModal.value = false
     await loadTokens()
     app.toastMsg('令牌已创建，请立即复制', 'success')
-  } catch (e) { app.toastMsg(e.message || '创建失败', 'error') }
+  } catch (e) {
+    app.toastMsg(e?.message || '创建失败', 'error')
+  } finally {
+    tokenBusy.value = false
+  }
+}
+function usageOf(id) {
+  return tokenUsage.value[id]
+}
+async function toggleTokenUsage(t) {
+  // 已展开且拿到数据：再次点击收起；加载失败则重试
+  if (usageOf(t.id)?.data) {
+    delete tokenUsage.value[t.id]
+    return
+  }
+  tokenUsage.value[t.id] = { loading: true, error: '', data: null }
+  try {
+    const data = await developerxApi.tokenUsage(t.id, 30)
+    tokenUsage.value[t.id] = { loading: false, error: '', data }
+  } catch (e) {
+    tokenUsage.value[t.id] = { loading: false, error: e?.message || '用量加载失败', data: null }
+  }
+}
+function last7(data) {
+  return (data?.series || []).slice(-7)
+}
+function last7Max(data) {
+  return Math.max(1, ...last7(data).map((p) => p.count))
+}
+function barHeight(count, data) {
+  return Math.max(2, Math.round((count / last7Max(data)) * 32)) + 'px'
+}
+function last7Range(data) {
+  const rows = last7(data)
+  if (!rows.length) return ''
+  return `${rows[0].date.slice(5)} ~ ${rows[rows.length - 1].date.slice(5)}`
 }
 async function revokeToken(t) {
   if (!confirm(`确定吊销令牌「${t.name}」？吊销后脚本将立即失效。`)) return
   try {
     await authxApi.revokeToken(t.id)
+    delete tokenUsage.value[t.id]
     await loadTokens()
     app.toastMsg('令牌已吊销', 'success')
-  } catch (e) { app.toastMsg(e.message || '吊销失败', 'error') }
+  } catch (e) { app.toastMsg(e?.message || '吊销失败', 'error') }
 }
 
 // ---------------- F624 通讯录备注名 ----------------
@@ -1016,6 +1185,8 @@ async function loadNicknameHistory() {
 
 // ---------------- F614 注销冷静期 ----------------
 const deact = ref({ status: 'none', cooldown_days: 7 })
+// #171 立即注销的密码确认对话框
+const deactModal = ref(null)
 async function loadDeactivate() {
   try { deact.value = await authxApi.deactivateState() } catch (e) { deact.value = { status: 'none' } }
 }

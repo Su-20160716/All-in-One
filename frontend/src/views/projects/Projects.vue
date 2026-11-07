@@ -6,7 +6,7 @@
         <p class="mt-0.5 text-[12px] text-ink-500">看板管理任务，支持收藏、克隆与成员协作。</p>
       </div>
       <div class="ml-auto flex items-center gap-2">
-        <input v-model="kw" class="input w-44" placeholder="搜索项目…" @input="load" />
+        <input v-model="kw" class="input w-44" placeholder="搜索项目…" @input="onKwInput" />
         <select v-model="scope" class="input w-32" @change="load">
           <option value="">全部</option><option value="starred">仅收藏</option><option value="archived">已归档</option>
         </select>
@@ -19,7 +19,7 @@
       <div v-for="p in shown" :key="p.id" class="card group cursor-pointer p-4 transition-shadow hover:shadow-pop" @click="openBoard(p.id)">
         <div class="flex items-start justify-between">
           <div class="h-2 w-10 rounded-pill" :style="{ background: p.color }"></div>
-          <div class="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100" @click.stop>
+          <div class="flex gap-1 transition-opacity group-focus-within:opacity-100 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100" @click.stop>
             <button class="btn-ghost px-1.5 text-[13px]" :class="p.is_star ? 'text-amber-500' : ''" title="收藏" @click="star(p)">{{ p.is_star ? '★' : '☆' }}</button>
             <button class="btn-ghost px-1.5 text-[12px]" title="克隆" @click="clone(p)">⧉</button>
             <button class="btn-ghost px-1.5 text-[12px]" :title="p.is_archived ? '取消归档' : '归档'" @click="toggleArchive(p)">{{ p.is_archived ? '↺' : '🗄' }}</button>
@@ -94,8 +94,18 @@ const shown = computed(() => {
   return arr
 })
 
+// #152 搜索防抖 300ms + 自增 seq 丢弃过期响应，避免慢响应覆盖新结果
+let loadSeq = 0
+let kwTimer = null
+function onKwInput() {
+  clearTimeout(kwTimer)
+  kwTimer = setTimeout(load, 300)
+}
 async function load() {
-  projects.value = (await projectApi.list()).list || []
+  const seq = ++loadSeq
+  const list = (await projectApi.list()).list || []
+  if (seq !== loadSeq) return
+  projects.value = list
 }
 async function createProject() {
   if (!form.name.trim()) return

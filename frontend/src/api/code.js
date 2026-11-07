@@ -95,7 +95,7 @@ export const codeApi = {
   aiApply: (fileId, data) => request.post(`/code/ai/apply/${fileId}/`, data),
 
   // ===== 协作 =====
-  comments: (fileId) => request.get(`/code/files/${fileId}/comments/`),
+  comments: (fileId, params) => request.get(`/code/files/${fileId}/comments/`, { params }),
   createComment: (fileId, data) => request.post(`/code/files/${fileId}/comments/create/`, data),
   resolveComment: (fileId, cid) => request.post(`/code/files/${fileId}/comments/${cid}/resolve/`, {}),
   deleteComment: (fileId, cid) => request.post(`/code/files/${fileId}/comments/${cid}/delete/`, {}),
@@ -105,6 +105,10 @@ export const codeApi = {
   createShare: (data) => request.post('/code/shares/create/', data),
   updateShare: (token, data) => request.post(`/code/shares/${token}/`, data),
   revokeShare: (token) => request.post(`/code/shares/${token}/revoke/`),
+  /** #269 分享访问统计：总数 / 独立访客 / 近 30 天 */
+  shareVisits: (token) => request.get(`/code/shares/${token}/visits/`),
+  /** #270 把分享内容保存到自己的片段库（可同时写入工作区文件） */
+  cloneShare: (token, data = {}) => request.post(`/code/share/code/${token}/clone/`, data),
 
   /**
    * 公开分享页数据：免登录只读。
@@ -191,6 +195,46 @@ export const codeApi = {
   dailyReminder: () => request.get('/code/daily/reminder/'),
   /** F680 立即发一条站内提醒（幂等） */
   notifyDailyReminder: () => request.post('/code/daily/reminder/', {}),
+
+  // ===== 第三轮 261–280：模板 / 导入 / 全局替换 / 复制 / 依赖图 / 格式化 =====
+  /** #263 多文件工作区模板 */
+  workspaceTemplates: () => request.get('/code/workspaces/templates/'),
+  /** #263 按模板批量建目录与文件 */
+  createWorkspaceFromTemplate: (data) => request.post('/code/workspaces/from-template/', data),
+  /** #266 导入 zip 为工作区（FormData，字段名 file） */
+  importWorkspace: (formData, onProgress) =>
+    request.post('/code/workspaces/import/', formData, {
+      timeout: 120000,
+      headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: onProgress,
+    }),
+  /** #264 工作区全局搜索替换（dry_run 预览，确认后写回） */
+  replaceInWorkspace: (id, data) => request.post(`/code/workspaces/${id}/replace/`, data),
+  /** #276 复制文件为「name(副本).ext」 */
+  copyFile: (id, dir = '') => request.post(`/code/files/${id}/copy/`, dir ? { dir } : {}),
+  /** #272 未被引用文件检测 */
+  fileOrphans: (workspace) => request.get('/code/files/orphans/', { params: { workspace } }),
+  /** #271 工作区依赖图 */
+  dependencyGraph: (workspace) => request.get('/code/dependencies/graph/', { params: { workspace } }),
+  /** #273 本地格式化 */
+  formatCode: (data) => request.post('/code/format/', data),
+  /** #274 运行历史导出 CSV */
+  exportRuns: (params = {}) =>
+    request.get('/code/run/export/', { params, responseType: 'blob', timeout: 120000 }),
+  /** #279 运行预设导出 / 导入 */
+  exportRunPresets: (language) =>
+    request.get('/code/run/presets/export/', { params: language ? { language } : {} }),
+  importRunPresets: (items) => request.post('/code/run/presets/import/', { items }),
+  /** #275 判题用例集 */
+  judgeCaseSets: (params = {}) => request.get('/code/judge/testcases/', { params }),
+  createJudgeCaseSet: (data) => request.post('/code/judge/testcases/', data),
+  updateJudgeCaseSet: (id, data) => request.post(`/code/judge/testcases/${id}/`, data),
+  deleteJudgeCaseSet: (id) => request.delete(`/code/judge/testcases/${id}/`),
+  /** #267 片段库导出 / 导入 */
+  exportSnippets: () => request.get('/code/snippets/export/'),
+  importSnippets: (items) => request.post('/code/snippets/import/', { items }),
+  /** #265 片段生成工作区文件 */
+  snippetToFile: (id, data) => request.post(`/code/snippets/${id}/to-file/`, data),
 }
 
 export default codeApi

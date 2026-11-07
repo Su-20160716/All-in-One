@@ -67,17 +67,26 @@ const grouped = computed(() => {
 async function load() {
   const r = await projectApi.myTasks({ status: status.value, priority: priority.value })
   list.value = r.list || []
-  // counts 为 dict {all, open, overdue, today, week, done}；进行中/待办近似用 open/done 填充
+  // counts 为 dict {all, open, overdue, today, week, done}；必须使用后端明确计数，
+  // 不能用当前筛选列表长度兜底（切换 tab 后角标会变成另一组数字）
   const c = r.counts || {}
-  count.todo = c.todo ?? list.value.length
-  count.doing = c.open ?? list.value.length
+  count.todo = c.todo ?? c.open ?? 0
+  count.doing = c.open ?? 0
   count.done = c.done ?? 0
 }
 function changeStatus(v) { status.value = v; load() }
 async function move(c, value) {
-  await projectApi.updateCard(c.id, { status: value })
-  app.toastMsg('已更新', 'success')
-  load()
+  // #158 乐观更新 + 失败回滚：catch 里还原原状态并提示，界面不再与后端不一致
+  const prev = c.status
+  c.status = value
+  try {
+    await projectApi.updateCard(c.id, { status: value })
+    app.toastMsg('已更新', 'success')
+    await load()
+  } catch (e) {
+    c.status = prev
+    app.toastMsg(e?.message || '更新状态失败，已还原', 'error')
+  }
 }
 onMounted(load)
 </script>

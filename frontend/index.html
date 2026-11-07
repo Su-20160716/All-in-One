@@ -12,6 +12,21 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="协作平台" />
     <title>全能协作平台 All-in-One</title>
+    <!-- 首帧前恢复主题（#192）：避免暗色用户刷新时先闪一帧白屏。
+         键名与 utils/theme.js 保持一致：theme / accent。 -->
+    <script>
+      (function () {
+        try {
+          var mode = localStorage.getItem('theme') || 'system'
+          var accent = localStorage.getItem('accent') || 'sky'
+          var dark = mode === 'dark' || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          var root = document.documentElement
+          root.classList.toggle('dark', dark)
+          root.dataset.accent = accent
+          root.style.colorScheme = dark ? 'dark' : 'light'
+        } catch (e) { /* localStorage 被禁用时保持默认亮色 */ }
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>

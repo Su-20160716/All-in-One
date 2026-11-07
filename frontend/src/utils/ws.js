@@ -11,7 +11,8 @@
  *  2. 被 4001 拒绝时，刷新一次再重试；仍失败则停止重连、清理登录态并回到登录页
  *  3. 普通断线按指数退避重连（3s → 6s → … → 上限 30s），连上后立即复位
  */
-import { API_BASE, API_URL } from '../api/base'
+import { API_BASE } from '../api/base'
+import { refreshAccessToken } from '../api/refresh'
 
 const REFRESH_SKEW_MS = 60 * 1000 // 提前 60 秒视为过期，避免握手瞬间失效
 const BASE_RETRY_MS = 3000
@@ -23,7 +24,6 @@ let heartbeatTimer = null
 let reconnectTimer = null
 let retryDelay = BASE_RETRY_MS
 let stopped = false
-let refreshing = null
 
 const handlers = { onOpen: () => {}, onClose: () => {}, onMessage: () => {} }
 
@@ -63,23 +63,11 @@ export async function ensureFreshToken() {
   if (!refresh) return current
 
   try {
-      refreshing =
-        refreshing ||
-        fetch(`${API_URL}/auth/refresh/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh }),
-      }).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`refresh ${r.status}`))))
-    const data = await refreshing
-    refreshing = null
-    if (data && data.access) {
-      localStorage.setItem('access_token', data.access)
-      return data.access
-    }
+    return await refreshAccessToken()
   } catch (e) {
-    refreshing = null
+    /* 刷新失败：返回旧 token，交给服务端 4001 处理 */
   }
-  return localStorage.getItem('access_token') || ''
+  return localStorage.getItem('access_token') || current
 }
 
 /**
@@ -96,10 +84,20 @@ export function buildWsUrl(path, token) {
   return `${base}${path}${value ? `${sep}token=${encodeURIComponent(value)}` : ''}`
 }
 
+let lastPongAt = 0
+const PONG_TIMEOUT_MS = 75000
+
 function startHeartbeat() {
   clearInterval(heartbeatTimer)
+  lastPongAt = Date.now()
   heartbeatTimer = setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }))
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    // 半开连接：发得出 ping 但收不到 pong，主动断开触发重连
+    if (Date.now() - lastPongAt > PONG_TIMEOUT_MS) {
+      try { ws.close(4000) } catch (e) { /* ignore */ }
+      return
+    }
+    ws.send(JSON.stringify({ type: 'ping' }))
   }, 30000)
 }
 
@@ -147,11 +145,14 @@ async function openNotify() {
     handlers.onOpen()
   }
   ws.onmessage = (e) => {
+    let msg
     try {
-      handlers.onMessage(JSON.parse(e.data))
+      msg = JSON.parse(e.data)
     } catch (err) {
-      /* ignore */
+      return
     }
+    if (msg && msg.type === 'pong') lastPongAt = Date.now()
+    handlers.onMessage(msg)
   }
   ws.onerror = () => {
     /* 随后会触发 onclose，统一在那里处理 */

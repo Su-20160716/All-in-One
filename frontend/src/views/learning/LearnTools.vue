@@ -17,8 +17,9 @@
       使用流程：左侧选工具 → 右侧填 JSON 参数（每个工具预置示例入参，可点「重置示例」还原）→ 执行 → 下方查看结构化结果并复制。工具分为数理计算、化学、英语语文、成绩与学习管理、思维与基础训练五组。
     </p>
 
-    <div class="grid grid-cols-12 gap-4">
-      <div class="col-span-3 space-y-3">
+    <!-- #182 移动端单列，桌面才用 12 栏栅格 -->
+    <div class="grid grid-cols-1 gap-4 lg:grid-cols-12">
+      <div class="space-y-3 lg:col-span-3">
         <div v-for="(items, cat) in filteredCatalog" :key="cat" class="card p-2">
           <div class="px-1 pb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-400">{{ cat }}</div>
           <button v-for="t in items" :key="t.key" class="block w-full rounded-control px-2 py-1.5 text-left text-[13px] transition-colors"
@@ -26,7 +27,7 @@
         </div>
       </div>
 
-      <div class="col-span-9">
+      <div class="lg:col-span-9">
         <div v-if="current" class="card p-5">
           <div class="mb-1 flex items-center gap-2">
             <h3 class="text-[15px] font-semibold text-ink-800">{{ current.name }}</h3>
@@ -259,8 +260,13 @@ async function run() {
 }
 async function copyResult() {
   if (result.value === null) return
-  await navigator.clipboard.writeText(pretty.value)
-  app.toastMsg('结果已复制', 'success')
+  // #184 剪贴板在非安全上下文 / 无权限时会 reject，必须兜住并给出可操作提示
+  try {
+    await navigator.clipboard.writeText(pretty.value)
+    app.toastMsg('结果已复制', 'success')
+  } catch {
+    app.toastMsg('复制失败，请手动选择文本', 'error')
+  }
 }
 
 // F538 工具使用历史：最近用过的工具可一键重开

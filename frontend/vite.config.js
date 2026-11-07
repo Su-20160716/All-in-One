@@ -3,6 +3,10 @@ import vue from '@vitejs/plugin-vue'
 
 export default defineConfig({
   plugins: [vue()],
+  // 构建号同时用于 Service Worker 缓存版本，发版即换 cache
+  define: {
+    __APP_BUILD__: JSON.stringify(process.env.VITE_BUILD_ID || String(Date.now())),
+  },
   server: {
     host: '0.0.0.0',
     port: 5173,

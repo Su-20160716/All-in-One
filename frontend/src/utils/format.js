@@ -11,16 +11,37 @@ export function formatSize(bytes) {
 }
 
 // #95 统一时区：后端返回 ISO 8601 UTC，浏览器按本地时区渲染
-const dtf = new Intl.DateTimeFormat('zh-CN', {
-  year: 'numeric', month: '2-digit', day: '2-digit',
-  hour: '2-digit', minute: '2-digit', hour12: false,
-})
-const dtfDate = new Intl.DateTimeFormat('zh-CN', {
-  year: 'numeric', month: '2-digit', day: '2-digit',
-})
-const dtfTime = new Intl.DateTimeFormat('zh-CN', {
-  hour: '2-digit', minute: '2-digit', hour12: false,
-})
+// #196 语言可切换：模块级 locale + 按需懒创建 formatter（切换后下次调用重建）
+let currentLocale = 'zh-CN'
+let dtf = null
+let dtfDate = null
+let dtfTime = null
+
+/** 设置日期展示语言；默认 zh-CN，保持原有行为 */
+export function setLocale(l) {
+  const next = l || 'zh-CN'
+  if (next === currentLocale && dtf) return
+  currentLocale = next
+  dtf = dtfDate = dtfTime = null
+}
+
+function formatter(kind) {
+  if (kind === 'time') {
+    if (!dtfTime) dtfTime = new Intl.DateTimeFormat(currentLocale, { hour: '2-digit', minute: '2-digit', hour12: false })
+    return dtfTime
+  }
+  if (kind === 'date') {
+    if (!dtfDate) dtfDate = new Intl.DateTimeFormat(currentLocale, { year: 'numeric', month: '2-digit', day: '2-digit' })
+    return dtfDate
+  }
+  if (!dtf) {
+    dtf = new Intl.DateTimeFormat(currentLocale, {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    })
+  }
+  return dtf
+}
 
 export function formatTime(value) {
   if (!value) return '-'
@@ -28,16 +49,30 @@ export function formatTime(value) {
   if (isNaN(d.getTime())) return '-'
   const now = new Date()
   if (d.toDateString() === now.toDateString()) {
-    return dtfTime.format(d)
+    return formatter('time').format(d)
   }
-  return dtf.format(d)
+  return formatter('full').format(d)
 }
 
 export function formatDate(value) {
   if (!value) return '-'
   const d = new Date(value)
   if (isNaN(d.getTime())) return '-'
-  return dtfDate.format(d)
+  return formatter('date').format(d)
+}
+
+// #202 大字数千分位：统计面板/存储分析里的计数统一走这里，避免各页各写一套
+export function formatNumber(value, fallback = '0') {
+  const n = Number(value)
+  if (value === null || value === undefined || value === '' || !isFinite(n)) return fallback
+  return new Intl.NumberFormat(currentLocale).format(n)
+}
+
+// #202 紧凑计数（1.2万 / 3.4k），用于卡片角标等空间紧张的位置
+export function formatCompact(value, fallback = '0') {
+  const n = Number(value)
+  if (value === null || value === undefined || value === '' || !isFinite(n)) return fallback
+  return new Intl.NumberFormat(currentLocale, { notation: 'compact', maximumFractionDigits: 1 }).format(n)
 }
 
 export function fileIcon(kind, ext) {
@@ -77,7 +112,8 @@ export function fileTypeMeta(kind, ext) {
 }
 
 export function priorityColor(p) {
-  return { low: 'bg-ink-100 text-ink-500', medium: 'bg-sky-50 text-sky-600', high: 'bg-amber-50 text-amber-600', urgent: 'bg-rose-50 text-rose-600' }[p] || ''
+  // bizhub 用 normal，projects 用 medium，两者语义相同
+  return { low: 'bg-ink-100 text-ink-500', medium: 'bg-sky-50 text-sky-600', normal: 'bg-sky-50 text-sky-600', high: 'bg-amber-50 text-amber-600', urgent: 'bg-rose-50 text-rose-600' }[p] || ''
 }
 
 export function statusColor(s) {

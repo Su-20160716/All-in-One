@@ -57,7 +57,7 @@
 
           <div class="mt-4 flex items-center gap-2">
             <button class="btn-primary" :disabled="running" @click="run">{{ running ? '计算中…' : '执 行' }}</button>
-            <button class="btn-outline" @click="form = {}">清空</button>
+            <button class="btn-outline" @click="resetForm">清空</button>
             <button class="btn-ghost" @click="copyResult">复制结果</button>
             <span v-if="runInfo" class="text-[12px] text-emerald-600">{{ runInfo }}</span>
           </div>
@@ -65,7 +65,7 @@
           <!-- 结果 -->
           <div v-if="result !== null" class="mt-4">
             <div class="mb-1 text-[12px] font-medium text-ink-600">结果</div>
-            <img v-if="current.key === 'qrcode' && result.image" :src="result.image" class="h-56 w-56 rounded-control border border-ink-100 bg-white p-2" />
+            <img v-if="current.key === 'qrcode' && result.image" :src="result.image" alt="根据输入内容生成的二维码" class="h-56 w-56 rounded-control border border-ink-100 bg-white p-2" />
             <div v-else-if="current.key === 'color-palette'" class="flex gap-2">
               <div v-for="(c, i) in result.palette" :key="i" class="text-center">
                 <div class="h-14 w-14 rounded-control border border-ink-100" :style="{ background: c }"></div>
@@ -198,18 +198,33 @@ const strengthColor = computed(() => {
   return ['text-rose-600', 'text-rose-600', 'text-amber-600', 'text-amber-600', 'text-emerald-600', 'text-emerald-600'][Math.min(s, 5)]
 })
 
+// #185 草稿：按工具 key 在内存里保存未提交的输入，切回时自动恢复
+const drafts = {}
+
+function defaultsFor() {
+  const out = {}
+  for (const f of fields.value) {
+    if (f.type === 'checkbox') out[f.name] = false
+    else if (f.type === 'select') out[f.name] = f.options[0].v
+    else out[f.name] = f.type === 'number' ? null : ''
+  }
+  return out
+}
+
 function switchTool(t) {
+  if (current.value?.key && current.value.key !== t.key) drafts[current.value.key] = { ...form.value }
   active.value = t.key
   current.value = { ...t, cat: findCat(t.key) }
-  form.value = {}
   result.value = null
   runInfo.value = ''
-  // 默认值
-  for (const f of fields.value) {
-    if (f.type === 'checkbox') form.value[f.name] = false
-    else if (f.type === 'select') form.value[f.name] = f.options[0].v
-    else form.value[f.name] = f.type === 'number' ? null : ''
-  }
+  form.value = { ...defaultsFor(), ...(drafts[t.key] || {}) }
+}
+
+function resetForm() {
+  if (active.value) delete drafts[active.value]
+  form.value = defaultsFor()
+  result.value = null
+  runInfo.value = ''
 }
 function findCat(key) {
   for (const [cat, items] of Object.entries(catalog.value)) {

@@ -81,6 +81,10 @@ async function load() {
 }
 async function publish() {
   if (!form.title.trim()) return app.toastMsg('请填写标题', 'error')
+  // #165 定时发布必须早于到期时间，否则会发布出永不到期的公告
+  if (form.scheduled_at && form.expires_at && new Date(form.expires_at) <= new Date(form.scheduled_at)) {
+    return app.toastMsg('到期时间必须晚于定时发布时间', 'error')
+  }
   const payload = { ...form }
   if (!payload.scheduled_at) delete payload.scheduled_at
   if (!payload.expires_at) delete payload.expires_at

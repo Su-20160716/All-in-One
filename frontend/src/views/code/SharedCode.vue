@@ -10,12 +10,14 @@
  * - 只读渲染代码（CodeMirror readonly），可复制、可下载（由后端 allow_download 控制）
  * - 若后端 allow_run 为 true，提供「在线运行」按钮（同样走免登录的公开执行通道）
  */
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
-import CodeEditor from '../../components/CodeEditor.vue'
 import codeApi from '../../api/code.js'
-import axios from 'axios'
-import { API_URL } from '../../api/base.js'
+// #161 运行请求走统一 request 实例（带超时/取消能力），不再用裸 axios
+import request from '../../api/request.js'
+
+// 公开执行通道也需要上限：后端单次执行 30s，留一点编译余量
+const RUN_TIMEOUT = 45000
 
 const route = useRoute()
 const token = computed(() => route.params.token)
@@ -68,6 +70,30 @@ async function copyCode() {
 const copied = ref(false)
 const copyFallback = ref(false)
 
+// #270 保存到我的片段库（需登录；未登录先去登录页）
+const cloneBusy = ref(false)
+const cloned = ref(false)
+const cloneNotice = ref('')
+
+async function saveToMySnippets() {
+  if (!localStorage.getItem('access_token')) {
+    window.location.href = '/login'
+    return
+  }
+  if (cloneBusy.value) return
+  cloneBusy.value = true
+  cloneNotice.value = ''
+  try {
+    const res = await codeApi.cloneShare(token.value)
+    cloned.value = true
+    cloneNotice.value = `已保存为片段「${res?.snippet?.title || ''}」，可在代码工坊的片段库里查看`
+  } catch (e) {
+    cloneNotice.value = e?.response?.data?.error || e?.message || '保存失败，请稍后重试'
+  } finally {
+    cloneBusy.value = false
+  }
+}
+
 function download() {
   const d = data.value
   if (!d) return
@@ -91,25 +117,47 @@ function extOf(lang) {
   return map[lang] || 'txt'
 }
 
+// 在途运行请求的取消句柄（组件卸载 / 重复点击时 abort）
+let runAbort = null
+
 async function runShared() {
   const d = data.value
   if (!d || running.value) return
+  // #161 每次运行独立控制器：重复点击先取消上一次，卸载时整体 abort
+  runAbort?.abort()
+  const controller = new AbortController()
+  runAbort = controller
   running.value = true
   runResult.value = null
   runError.value = ''
   try {
     // 只传 stdin —— 后端永远执行分享里的那份代码，不接受客户端替换代码
-    const res = await axios.post(`${API_URL}/share/code/${token.value}/run/`, {
-      stdin: stdin.value,
-    })
-    if (res.data && res.data.ok === false) runError.value = res.data.error || '执行失败'
-    else runResult.value = res.data?.data || res.data
+    const res = await request.post(
+      `/share/code/${token.value}/run/`,
+      { stdin: stdin.value },
+      { timeout: RUN_TIMEOUT, signal: controller.signal },
+    )
+    if (controller.signal.aborted) return
+    if (res && res.ok === false) runError.value = res.error || '执行失败'
+    else runResult.value = res?.data || res
   } catch (e) {
-    runError.value = e?.response?.data?.error || e.message || '执行失败'
+    // 主动取消（重复点击/离开页面）不当成错误
+    if (controller.signal.aborted || e?.code === 'ERR_CANCELED') return
+    runError.value = e?.response?.data?.error || e?.message || '执行失败'
   } finally {
-    running.value = false
+    if (runAbort === controller) {
+      runAbort = null
+      running.value = false
+    }
   }
 }
+
+// 卸载时中断在途运行，避免组件销毁后仍回写结果
+onBeforeUnmount(() => {
+  runAbort?.abort()
+  runAbort = null
+})
+
 
 const statusText = computed(() => {
   const r = runResult.value
@@ -167,6 +215,9 @@ const statusClass = computed(() => {
               <button v-if="data.allow_download" class="btn-outline" @click="download">
                 下载
               </button>
+              <button class="btn-outline" :disabled="cloneBusy || cloned" @click="saveToMySnippets">
+                {{ cloned ? '已保存到片段库 ✓' : cloneBusy ? '保存中…' : '保存到我的片段库' }}
+              </button>
               <button
                 v-if="data.allow_run"
                 class="btn-primary"
@@ -177,19 +228,15 @@ const statusClass = computed(() => {
               </button>
             </div>
           </div>
+          <p v-if="cloneNotice" class="mt-2 text-xs text-ink-500">{{ cloneNotice }}</p>
           <p v-if="copyFallback" class="mt-2 text-xs text-amber-600">
             浏览器拒绝了剪贴板访问，请手动选中代码复制。
           </p>
         </div>
 
-        <!-- 代码区 -->
+        <!-- 代码区（#190 公开页只读渲染，不加载完整 CodeMirror） -->
         <div class="card overflow-hidden p-0">
-          <CodeEditor
-            :model-value="data.code || ''"
-            :language="data.language"
-            :readonly="true"
-            height="60vh"
-          />
+          <pre class="h-[60vh] overflow-auto bg-ink-900 px-4 py-3 font-mono text-[13px] leading-relaxed text-ink-100"><code>{{ data.code || '' }}</code></pre>
         </div>
 
         <!-- 运行区 -->

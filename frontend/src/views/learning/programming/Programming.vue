@@ -5,9 +5,11 @@
         <h2 class="text-[16px] font-semibold text-ink-800">编程语言广场</h2>
         <p class="text-[12px] text-ink-400">10 种主流语言的元信息、学习路线、语法速查、课程与代码片段</p>
       </div>
-      <div class="flex gap-1 rounded-control bg-ink-100 p-1">
-        <button v-for="t in topTabs" :key="t.v" class="rounded-control px-3 py-1 text-[12px]"
-          :class="topTab === t.v ? 'bg-white text-brand-700 shadow-sm' : 'text-ink-500'" @click="topTab = t.v">{{ t.label }}</button>
+      <div class="flex gap-1 rounded-control bg-ink-100 p-1" role="tablist" aria-label="编程广场分区">
+        <button v-for="(t, i) in topTabs" :key="t.v" role="tab" :aria-selected="topTab === t.v" :tabindex="topTab === t.v ? 0 : -1"
+          class="rounded-control px-3 py-1 text-[12px]"
+          :class="topTab === t.v ? 'bg-white text-brand-700 shadow-sm' : 'text-ink-500'"
+          @click="topTab = t.v" @keydown="onTabKey($event, i, topTabs, (v) => (topTab = v))">{{ t.label }}</button>
       </div>
     </div>
 
@@ -44,9 +46,11 @@
             <button class="btn-outline ml-auto" @click="bookmark">收藏片段/语言</button>
           </div>
 
-          <div class="mt-4 flex flex-wrap gap-1 border-b border-ink-100 pb-2">
-            <button v-for="s in subTabs" :key="s.v" class="rounded-pill px-3 py-1 text-[12px]"
-              :class="subTab === s.v ? 'bg-brand-600 text-white' : 'text-ink-500 hover:bg-ink-100'" @click="loadSub(s.v)">{{ s.label }}</button>
+          <div class="mt-4 flex flex-wrap gap-1 border-b border-ink-100 pb-2" role="tablist" aria-label="语言资料子标签">
+            <button v-for="(s, i) in subTabs" :key="s.v" role="tab" :aria-selected="subTab === s.v" :tabindex="subTab === s.v ? 0 : -1"
+              class="rounded-pill px-3 py-1 text-[12px]"
+              :class="subTab === s.v ? 'bg-brand-600 text-white' : 'text-ink-500 hover:bg-ink-100'"
+              @click="loadSub(s.v)" @keydown="onTabKey($event, i, subTabs, loadSub)">{{ s.label }}</button>
           </div>
 
           <div class="pt-4 text-[13px] leading-7 text-ink-700">
@@ -479,6 +483,20 @@ const moduleDetail = ref(null)
 const openCard = ref('')
 function toggleCard(id) { openCard.value = openCard.value === id ? '' : id }
 
+// #192 tab 语义：左右方向键 / Home / End 在标签间切换并激活
+function onTabKey(e, i, items, select) {
+  const n = items.length
+  let next = -1
+  if (e.key === 'ArrowRight') next = (i + 1) % n
+  else if (e.key === 'ArrowLeft') next = (i - 1 + n) % n
+  else if (e.key === 'Home') next = 0
+  else if (e.key === 'End') next = n - 1
+  if (next < 0) return
+  e.preventDefault()
+  select(items[next].v)
+  e.currentTarget?.parentElement?.querySelectorAll('[role="tab"]')[next]?.focus()
+}
+
 // 首页「去学」带 ?lang=key 跳进来：读 query 打开对应语言详情
 const route = useRoute()
 async function openFromQuery() {
@@ -486,7 +504,10 @@ async function openFromQuery() {
   if (k && langs.value.some((l) => l.key === k) && cur.value !== k) await openLang(k)
 }
 
+// #155 竞态守卫：快速切语言 / 切关键词 / 切术语标签时，旧的慢响应直接丢弃
+let langSeq = 0
 async function openLang(key) {
+  const seq = ++langSeq
   cur.value = key
   subTab.value = 'overview'
   Object.keys(cache).forEach((k) => delete cache[k])
@@ -494,7 +515,9 @@ async function openLang(key) {
   keywordDetail.value = null
   selModule.value = -1
   moduleDetail.value = null
-  detail.value = (await learnApi.langDetail(key))
+  const data = await learnApi.langDetail(key)
+  if (seq !== langSeq) return
+  detail.value = data
   await loadSub('overview')
 }
 async function loadSub(v) {
@@ -520,15 +543,20 @@ async function loadSub(v) {
   // 请求期间已切到别的语言：丢弃结果，避免把旧语言数据缓存到新语言下
   if (cur.value === k) cache[v] = data
 }
+let kwSeq = 0
 async function selectKeyword(k) {
   const word = k.word || k
   if (selKeyword.value === word) { selKeyword.value = ''; keywordDetail.value = null; return }
   selKeyword.value = word
   if (k.word && k.desc) {
     keywordDetail.value = k
-  } else {
-    keywordDetail.value = await learnApi.langKeywordDetail(cur.value, word)
+    return
   }
+  const seq = ++kwSeq
+  const data = await learnApi.langKeywordDetail(cur.value, word)
+  // 回包时已切到别的关键词：丢弃，避免串数据
+  if (seq !== kwSeq || selKeyword.value !== word) return
+  keywordDetail.value = data
 }
 async function selectModule(idx) {
   if (selModule.value === idx) { selModule.value = -1; moduleDetail.value = null; return }
@@ -565,8 +593,12 @@ const gloss = ref([])
 const glossTags = ref([])
 const glossQ = ref('')
 const glossTag = ref('')
+let glossSeq = 0
 async function loadGloss() {
-  gloss.value = (await learnApi.glossary({ q: glossQ.value, tag: glossTag.value })).list
+  const seq = ++glossSeq
+  const data = await learnApi.glossary({ q: glossQ.value, tag: glossTag.value })
+  if (seq !== glossSeq) return
+  gloss.value = data.list
 }
 async function pickTag(t) { glossTag.value = glossTag.value === t ? '' : t; await loadGloss() }
 

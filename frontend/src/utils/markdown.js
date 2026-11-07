@@ -48,7 +48,7 @@ export function renderMarkdown(md) {
     ],
     ALLOW_DATA_ATTR: false,
     // 双链 [[]标题]] 渲染出的锚点跳转依赖站内 hash，不放行任意 target
-    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|#|\/|\.\/|\.\.\/):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|#|\/|\.\/|\.\.\/):|[^a-z]|[a-z+.-]+(?:[^a-z+.:-]|$))/i,
   })
 }
 

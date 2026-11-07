@@ -5,7 +5,11 @@ import router from './router'
 import { useAppStore } from './stores/app'
 import { useUserStore } from './stores/user'
 import { reportClientError } from './api/corex'
+import { initI18n } from './i18n'
 import './style.css'
+
+// #197 启动即同步 <html lang> 与已保存语言，首屏文案与读屏语音一致
+initI18n()
 
 const app = createApp(App)
 app.use(createPinia())
@@ -61,7 +65,24 @@ app.mount('#app')
 
 // F59 PWA：仅生产构建注册 Service Worker（开发环境注册会干扰 Vite HMR 与代理）
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  let refreshing = false
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (refreshing) return
+    refreshing = true
+    window.location.reload()
+  })
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => { /* 离线能力不可用不影响在线使用 */ })
+    // #198 构建号作为 cache 版本，发版后旧 cache 自动失效
+    navigator.serviceWorker.register(`/sw.js?v=${__APP_BUILD__}`).then((reg) => {
+      reg.addEventListener('updatefound', () => {
+        const sw = reg.installing
+        if (!sw) return
+        sw.addEventListener('statechange', () => {
+          if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+            if (window.confirm('发现新版本，是否立即刷新？')) sw.postMessage({ type: 'SKIP_WAITING' })
+          }
+        })
+      })
+    }).catch(() => { /* 离线能力不可用不影响在线使用 */ })
   })
 }

@@ -16,6 +16,7 @@ export const authApi = {
   deleteAvatar: () => request.delete('/auth/profile/avatar/'),
   deactivate: (password) => request.post('/auth/profile/deactivate/', { password }),
   exportData: () => request.get('/auth/profile/export/'),
+  exportCount: () => request.get('/auth/profile/export/count/'),
   loginHistory: () => request.get('/auth/profile/login-history/'),
   badges: () => request.get('/auth/profile/badges/'),
   invites: () => request.get('/auth/profile/invites/'),
@@ -429,6 +430,37 @@ export const learnApi = {
   mistakeCause: () => request.get('/learning/study/mistake-cause/'),                            // F545
   setMistakeCause: (data) => request.post('/learning/study/mistake-cause/', data),
   planDetail: (id) => request.get('/learning/study/plan-detail/', { params: { id } }),          // F546
+  // —— 第三轮 373–390：错题 / 偏好 / 倒计时 / 小组 / 榜 / 分享 / 统计 / 排程 / 热力图 / 历史 / 生词互通 / 报表 ——
+  importMistakes: (data) => request.post('/learning/school/mistakes/import/', data),                            // 373
+  exportMistakes: (fmt = 'csv') => request.get('/learning/school/mistakes/export/', { params: { fmt }, responseType: 'blob' }), // 374
+  similarMistakes: (id, limit = 10) => request.get('/learning/school/mistakes/similar/', { params: { id, limit } }), // 375
+  mistakeClusters: () => request.get('/learning/school/mistakes/clusters/'),                                    // 376
+  studyPref: () => request.get('/learning/study/pref/'),                                                        // 377
+  saveStudyPref: (data) => request.post('/learning/study/pref/', data),                                         // 377
+  remindCheck: () => request.post('/learning/study/remind/check/', {}),                                         // 377
+  exams: () => request.get('/learning/study/exam/'),                                                            // 378
+  saveExam: (data) => request.post('/learning/study/exam/', data),                                              // 378
+  delExam: (id) => request.delete(`/learning/study/exam/?id=${id}`),                                            // 378
+  groups: (params) => request.get('/learning/study/groups/', { params }),                                       // 379
+  createGroup: (data) => request.post('/learning/study/groups/', data),                                         // 379
+  joinGroup: (id) => request.post(`/learning/study/groups/${id}/join/`, {}),                                    // 379
+  checkinGroup: (id, minutes) => request.post(`/learning/study/groups/${id}/checkin/`, { minutes }),            // 379
+  leaderboard: (range = 'week', limit = 10) => request.get('/learning/study/leaderboard/', { params: { range, limit } }), // 380
+  shareQuestionSet: (id) => request.post(`/learning/study/question-sets/${id}/share/`, {}),                     // 381
+  questionStats: () => request.get('/learning/school/questions/stats/'),                                        // 382
+  planSchedule: (id, dailyMinutes = 60) =>
+    request.get(`/learning/study/plans/${id}/schedule/`, { params: { daily_minutes: dailyMinutes } }),          // 383
+  masteryHeatmap: (days = 90) => request.get('/learning/school/mastery/heatmap/', { params: { days } }),        // 384
+  calcHistory: (limit = 10) => request.get('/learning/school/formulas/calc-history/', { params: { limit } }),   // 385
+  saveCalcHistory: (data) => request.post('/learning/school/formulas/calc-history/', data),                     // 385
+  exportWordbook: (fmt = 'csv') =>
+    request.get('/learning/school/words/wordbook/export/', { params: { fmt }, responseType: 'blob' }),          // 386
+  importWordbook: (data) => request.post('/learning/school/words/wordbook/import/', data),                      // 386
+  mistakeToNote: (id) => request.post(`/learning/school/mistakes/${id}/to-note/`, {}),                          // 387
+  mistakeToTodo: (id, due) =>
+    request.post(`/learning/school/mistakes/${id}/to-todo/`, {}, { params: due ? { due } : {} }),               // 388
+  usageReport: (days = 30) => request.get('/learning/study/usage-report/', { params: { days } }),               // 389
+  goalForecast: () => request.get('/learning/study/daily-goal/forecast/'),                                      // 390
   // —— 40 个学习工具 ——
   toolCatalog: () => request.get('/learning/tools/catalog/'),
   toolRun: (tool, params) => request.post('/learning/tools/run/', { tool, ...params }),

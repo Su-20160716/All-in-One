@@ -51,6 +51,11 @@
             <span class="tag">{{ t.assignee_name || '未指派' }}</span>
           </div>
         </button>
+        <!-- #181 cursor 分页：底部「加载更多」 -->
+        <button v-if="hasMore" class="btn-outline w-full" :disabled="loadingMore" @click="loadMore">
+          {{ loadingMore ? '加载中…' : '加载更多' }}
+        </button>
+        <div v-else-if="list.length" class="pb-1 text-center text-[11px] text-ink-300">已显示全部 {{ list.length }} 单</div>
       </div>
 
       <!-- 详情 -->
@@ -83,7 +88,7 @@
                 :class="detail.priority === p ? prioCls(p) : ''" @click="doPriority(p)">{{ prioName(p) }}</button>
             </div>
             <div class="flex gap-2">
-              <input v-model="replyContent" class="input flex-1" placeholder="回复内容" @keyup.enter="doReply" />
+              <input v-model="replyContent" class="input flex-1" placeholder="回复内容" @keydown.enter="onReplyEnter" />
               <button class="btn-primary" @click="doReply">回复</button>
             </div>
             <div class="flex gap-2">
@@ -102,7 +107,7 @@
             <div v-if="!detail.replies.length" class="text-[12px] text-ink-400">暂无回复</div>
             <div v-for="(r, i) in detail.replies" :key="i" class="mt-1 rounded-control bg-ink-50 p-2 text-[12px]">
               <span class="font-medium text-brand-700">{{ r.by }}</span>
-              <span class="text-ink-400"> · {{ fmtTime(r.at) }}</span>
+              <span class="text-ink-400"> · {{ formatTime(r.at) }}</span>
               <div class="text-ink-700">{{ r.content }}</div>
             </div>
           </div>
@@ -139,6 +144,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { suiteApi } from '../../api'
 import { useAppStore } from '../../stores/app'
+import { formatTime } from '../../utils/format'
 import Modal from '../../components/Modal.vue'
 
 const D = 'officesuite'
@@ -159,9 +165,6 @@ const prioCls = (p) => ({
   high: 'bg-orange-50 text-orange-600',
   urgent: 'bg-rose-50 text-rose-600',
 }[p] || '')
-function fmtTime(iso) {
-  try { return iso.replace('T', ' ').slice(0, 16) } catch { return iso }
-}
 
 const filters = reactive({ status: '', priority: '', category: '' })
 const list = ref([])
@@ -172,15 +175,47 @@ const assignee = ref('')
 const replyContent = ref('')
 const solution = ref('')
 const reopenReason = ref('')
+// #181 列表分页：offset/limit 游标 + 无新增即停止
+const PAGE_SIZE = 20
+const cursor = ref(0)
+const hasMore = ref(false)
+const loadingMore = ref(false)
 
-async function loadList() {
-  const params = {}
+function listParams() {
+  const params = { limit: PAGE_SIZE, offset: cursor.value }
   if (filters.status) params.status = filters.status
   if (filters.priority) params.priority = filters.priority
   if (filters.category.trim()) params.category = filters.category.trim()
-  const r = await suiteApi.call(D, 'ticket/list/', 'GET', params)
-  list.value = r.data.items
-  total.value = r.data.count
+  return params
+}
+async function loadList() {
+  // 首屏 / 筛选变化：游标归零，整段替换
+  cursor.value = 0
+  const r = await suiteApi.call(D, 'ticket/list/', 'GET', listParams())
+  const items = r.data.items || []
+  list.value = items
+  cursor.value = items.length
+  hasMore.value = items.length >= PAGE_SIZE
+  total.value = r.data.count ?? r.data.total ?? items.length
+}
+async function loadMore() {
+  if (loadingMore.value || !hasMore.value) return
+  loadingMore.value = true
+  try {
+    const r = await suiteApi.call(D, 'ticket/list/', 'GET', listParams())
+    const items = r.data.items || []
+    const seen = new Set(list.value.map((t) => t.id))
+    const fresh = items.filter((t) => !seen.has(t.id))
+    list.value = [...list.value, ...fresh]
+    cursor.value += items.length
+    // 后端若忽略分页参数会返回同一批数据，此时 fresh 为空即认定到底，避免死循环与重复行
+    hasMore.value = fresh.length > 0 && items.length >= PAGE_SIZE
+    if (r.data.count != null) total.value = r.data.count
+  } catch (e) {
+    app.toastMsg(e?.message || '加载更多失败', 'error')
+  } finally {
+    loadingMore.value = false
+  }
 }
 function resetFilters() {
   filters.status = ''; filters.priority = ''; filters.category = ''
@@ -224,6 +259,11 @@ async function doReply() {
   replyContent.value = ''
   app.toastMsg('已回复', 'success')
   await select(selectedId.value)
+}
+// #149 输入法组合态（选词回车）不提交，避免发出半截内容
+function onReplyEnter(e) {
+  if (e.isComposing || e.keyCode === 229) return
+  doReply()
 }
 async function doPriority(p) {
   await suiteApi.call(D, `ticket/${selectedId.value}/priority/`, 'POST', { priority: p })

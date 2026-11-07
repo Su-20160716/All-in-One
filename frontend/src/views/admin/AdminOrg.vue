@@ -30,8 +30,9 @@
           </div>
         </div>
         <div class="mt-2 max-h-[62vh] overflow-y-auto">
-          <DeptNode v-for="d in deptTree" :key="d.id" :node="d" :depth="0"
-                    @add="openDept" @edit="openDept" @remove="removeDept" />
+          <DeptNode v-for="(d, i) in deptTree" :key="d.id" :node="d" :depth="0"
+                    :can-up="i > 0" :can-down="i < deptTree.length - 1"
+                    @add="openDept" @edit="openDept" @remove="removeDept" @move="moveDept" />
           <div v-if="!deptTree.length" class="py-10 text-center text-[12px] text-ink-400">暂无部门，点右上角新建</div>
         </div>
       </div>
@@ -149,8 +150,8 @@ const tenantForm = ref(null)
 /* ---- 递归部门节点（函数式组件，避免再开一个文件）---- */
 const DeptNode = {
   name: 'DeptNode',
-  props: { node: Object, depth: Number },
-  emits: ['add', 'edit', 'remove'],
+  props: { node: Object, depth: Number, canUp: Boolean, canDown: Boolean },
+  emits: ['add', 'edit', 'remove', 'move'],
   setup(props, { emit }) {
     const collapsed = ref(false)
     const render = () => {
@@ -163,6 +164,8 @@ const DeptNode = {
         d.children?.length
           ? h('button', {
               class: 'w-4 shrink-0 text-[10px] text-ink-400',
+              'aria-label': `${collapsed.value ? '展开' : '收起'}「${d.name}」的子部门`,
+              'aria-expanded': !collapsed.value,
               onClick: () => { collapsed.value = !collapsed.value },
             }, collapsed.value ? '▶' : '▼')
           : h('span', { class: 'w-4 shrink-0' }),
@@ -172,13 +175,37 @@ const DeptNode = {
         d.leader_name ? h('span', { class: 'text-[11px] text-ink-400' }, `负责人：${d.leader_name}`) : null,
         !d.is_active ? h('span', { class: 'tag bg-rose-50 text-rose-500' }, '停用') : null,
         h('div', { class: 'ml-auto flex shrink-0 gap-0.5' }, [
+          // #194 上移/下移只有箭头字符，补可读名称并在边界禁用
+          h('button', {
+            class: 'btn-ghost px-1.5 text-[12px]',
+            'aria-label': `上移「${d.name}」`,
+            title: props.canUp ? `上移「${d.name}」` : '已经是第一个，无法上移',
+            disabled: !props.canUp,
+            onClick: () => emit('move', d, -1),
+          }, '↑'),
+          h('button', {
+            class: 'btn-ghost px-1.5 text-[12px]',
+            'aria-label': `下移「${d.name}」`,
+            title: props.canDown ? `下移「${d.name}」` : '已经是最后一个，无法下移',
+            disabled: !props.canDown,
+            onClick: () => emit('move', d, 1),
+          }, '↓'),
           h('button', { class: 'btn-ghost px-1.5 text-[12px]', onClick: () => emit('add', d.id) }, '＋子部门'),
           h('button', { class: 'btn-ghost px-1.5 text-[12px]', onClick: () => emit('edit', d) }, '编辑'),
           h('button', { class: 'btn-ghost px-1.5 text-[12px] text-rose-500', onClick: () => emit('remove', d) }, '删除'),
         ]),
       ])
       const kids = !collapsed.value && d.children?.length
-        ? d.children.map((c) => h(DeptNode, { node: c, depth: props.depth + 1, onAdd: (v) => emit('add', v), onEdit: (v) => emit('edit', v), onRemove: (v) => emit('remove', v) }))
+        ? d.children.map((c, i) => h(DeptNode, {
+            node: c,
+            depth: props.depth + 1,
+            canUp: i > 0,
+            canDown: i < d.children.length - 1,
+            onAdd: (v) => emit('add', v),
+            onEdit: (v) => emit('edit', v),
+            onRemove: (v) => emit('remove', v),
+            onMove: (v, dir) => emit('move', v, dir),
+          }))
         : []
       return h('div', [row, ...kids])
     }
@@ -237,6 +264,48 @@ async function removeDept(d) {
     app.toastMsg('部门已删除', 'success')
     loadDepts()
   } catch (e) { /* 后端会给出「仍有成员/子部门」的提示，request 拦截器已弹窗 */ }
+}
+
+// #194 上移/下移：在同一父级的兄弟节点间交换位置，按新顺序回写 sort
+function findSiblingList(nodes, id) {
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].id === id) return { list: nodes, index: i }
+    const kids = nodes[i].children
+    if (kids?.length) {
+      const hit = findSiblingList(kids, id)
+      if (hit) return hit
+    }
+  }
+  return null
+}
+async function moveDept(d, dir) {
+  const hit = findSiblingList(deptTree.value, d.id)
+  if (!hit) return
+  const target = hit.index + dir
+  if (target < 0 || target >= hit.list.length) return
+  const order = hit.list.map((n) => n.id)
+  order.splice(target, 0, order.splice(hit.index, 1)[0])
+  // 按新顺序重排 sort（步长 10）；只提交发生变化的节点，其余字段原样带上
+  const updates = order
+    .map((id, i) => {
+      const node = hit.list.find((n) => n.id === id)
+      const sort = (i + 1) * 10
+      return { node, sort, changed: (node?.sort ?? 0) !== sort }
+    })
+    .filter((u) => u.changed && u.node)
+  try {
+    await Promise.all(updates.map((u) => orgApi.updateDepartment(u.node.id, {
+      name: u.node.name,
+      code: u.node.code || '',
+      parent: u.node.parent ?? null,
+      leader: u.node.leader ?? null,
+      sort: u.sort,
+      tenant: u.node.tenant ?? null,
+    })))
+    await loadDepts()
+  } catch (e) {
+    app.toastMsg(e?.message || '移动失败', 'error')
+  }
 }
 
 function openTenant(t) {
