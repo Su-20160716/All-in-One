@@ -66,6 +66,20 @@ urlpatterns = [
     path("api/dataintel/", include("dataintel.urls")),
     path("api/officesuite/", include("officesuite.urls")),
     path("api/code/", include("code.urls")),
+    path("api/biz/", include("bizhub.urls")),
+    # 平台能力域（扩展批次）
+    path("api/workflow/", include("workflow.urls")),
+    path("api/formstudio/", include("formstudio.urls")),
+    path("api/reporting/", include("reporting.urls")),
+    path("api/rules/", include("rules.urls")),
+    path("api/contracts/", include("contracts.urls")),
+    path("api/pipeline/", include("pipeline.urls")),
+    path("api/billing/", include("billing.urls")),
+    path("api/marketplace/", include("marketplace.urls")),
+    path("api/flags/", include("flags.urls")),
+    path("api/observability/", include("observability.urls")),
+    path("api/knowledgegraph/", include("knowledgegraph.urls")),
+    path("api/governance/", include("governance.urls")),
     path("api/auth/refresh/", RefreshView.as_view(), name="token_refresh"),
     path("api/auth/verify/", TokenVerifyView.as_view(), name="token_verify"),
     # S2-B1：OpenAPI schema + Swagger UI（只读文档，不影响既有路由匹配顺序——
@@ -91,11 +105,10 @@ urlpatterns += code_public_urlpatterns
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
-elif getattr(settings, "SERVE_MEDIA", False):
-    # DEBUG=0 但部署环境没有 Nginx/Caddy 反代 /media/ 时（ClawCloud Run 单容器最常见），
-    # 用 SERVE_MEDIA=1 让 Django 直接吐 MEDIA_ROOT，否则「上传成功但访问 404」。
-    # 注意：不能复用上面那个 static() 助手——它在 DEBUG=False 时直接返回 []（源码里的门控），
-    # 所以这里手挂 django.views.static.serve。
+elif getattr(settings, "SERVE_MEDIA", False) and getattr(settings, "MEDIA_SERVE_INSECURE", False):
+    # #46：生产环境默认不再把整个 MEDIA_ROOT 裸挂到 /media/（无鉴权直出他人附件）。
+    # 仅在部署方显式接受风险（MEDIA_SERVE_INSECURE=1）时保留旧的直出行为；
+    # 本地开发走上面的 DEBUG 分支，不受影响。推荐由 Nginx/Caddy 反代并做鉴权。
     from django.urls import re_path
     from django.views.static import serve as _serve_media
 

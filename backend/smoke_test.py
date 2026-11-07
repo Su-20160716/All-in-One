@@ -24,7 +24,7 @@ def check(name, cond, extra=""):
         print(f"  ✗ {name} {extra}")
 
 
-def register(client, username, password="test123", **extra):
+def register(client, username, password="test12345", **extra):
     return client.post("/api/auth/register/", {"username": username, "password": password, **extra}, format="json")
 
 
@@ -60,7 +60,7 @@ def main():
     check("修改用户名", r.status_code == 200 and r.data["user"]["username"] == new_uname)
     r = c.delete("/api/auth/profile/avatar/")
     check("删除头像", r.status_code == 200)
-    r = c.get("/api/auth/profile/export/")
+    r = c.get("/api/auth/profile/export/", {"password": "test12345"})
     check("个人数据导出", r.status_code == 200 and "profile" in r.data)
     r = c.post("/api/auth/heartbeat/", {}, format="json")
     check("在线心跳", r.status_code == 200 and r.data.get("ok"))
@@ -75,7 +75,7 @@ def main():
     ct = APIClient()
     rr = register(ct, f"throw{ts}")
     ct = auth_client(rr.data["access"])
-    r = ct.post("/api/auth/profile/change-password/", {"old_password": "test123", "new_password": "newpass456"}, format="json")
+    r = ct.post("/api/auth/profile/change-password/", {"old_password": "test12345", "new_password": "newpass456"}, format="json")
     check("修改密码", r.status_code == 200)
     # B12：改密后旧 token 立即失效是预期行为 —— 重新登录拿新凭证再走注销
     r = APIClient().post("/api/auth/login/", {"username": f"throw{ts}", "password": "newpass456"}, format="json")
@@ -217,10 +217,10 @@ def main():
     anon = APIClient()
     r = anon.get(f"/share/{token}/")
     check("共享需密码", r.status_code == 401 and r.data.get("need_password"))
-    r = anon.get(f"/share/{token}/", {"password": "pw"})
+    r = anon.get(f"/share/{token}/", HTTP_X_SHARE_PASSWORD="pw")
     check("密码正确可访问", r.status_code == 200 and r.data.get("name") == "hello.txt")
-    r = c.get("/api/files/shares/", {"status": "active"})
-    check("共享链接筛选", r.status_code == 200 and r.data["total"] >= 1)
+    r = c.get("/api/files/shares/", {"status": "active", "page_size": 50})
+    check("共享链接筛选", r.status_code == 200 and r.data["count"] >= 1)
     r = c.patch(f"/api/files/shares/{token}/", {"permission": "view"}, format="json")
     check("共享链接更新", r.status_code == 200 and r.data["permission"] == "view")
     r = c.patch(f"/api/files/shares/{token}/", {"is_revoked": True}, format="json")

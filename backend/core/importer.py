@@ -7,15 +7,21 @@
 import csv
 import io
 import json
+import logging
 
 from django.db import transaction
 from django.http import HttpResponse
 from django.utils import timezone
 from django.utils.http import content_disposition_header
 
+logger = logging.getLogger(__name__)
+
 MAX_EXPORT_ROWS = 5000
 MAX_IMPORT_ROWS = 2000
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
+
+# #18：对外只回固定原因，异常类型/ORM 字段/唯一约束名一律只进日志
+ROW_ERROR_MESSAGE = "该行导入失败（数据不合法或与已有数据冲突）"
 
 
 def _export_files(request):
@@ -147,8 +153,12 @@ def _import_notes(request, rows, mapping):
                         tag, _ = NoteTag.objects.get_or_create(owner=request.user, name=name[:50])
                         note.tags.add(tag)
             created += 1
-        except Exception as exc:
-            errors.append({"row": idx, "message": f"{type(exc).__name__}: {exc}"[:160]})
+        except Exception as exc:  # noqa: BLE001 —— 对外脱敏，原文只写日志
+            logger.warning(
+                "导入笔记失败（第 %s 行，用户 %s）：%s: %s",
+                idx, getattr(request.user, "id", None), type(exc).__name__, exc,
+            )
+            errors.append({"row": idx, "message": ROW_ERROR_MESSAGE})
         if len(errors) >= 200:
             errors.append({"row": idx, "message": "错误过多，已中止"})
             break

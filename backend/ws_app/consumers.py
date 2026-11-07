@@ -17,7 +17,12 @@
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
+from asgiref.sync import async_to_sync, sync_to_async
+
+import logging
+import time
+
+logger = logging.getLogger(__name__)
 
 
 class NotifyConsumer(AsyncJsonWebsocketConsumer):
@@ -29,11 +34,23 @@ class NotifyConsumer(AsyncJsonWebsocketConsumer):
         self.user = user
         self.group_name = f"user_{user.id}"
         await self.channel_layer.group_add(self.group_name, self.channel_name)
+        # 同时加入所属会话组：群聊事件一次 group_send 即可投递全体成员
+        self.session_groups = [f"session_{sid}" for sid in await self._session_ids()]
+        for group in self.session_groups:
+            await self.channel_layer.group_add(group, self.channel_name)
         await self.accept()
 
     async def disconnect(self, code):
         if hasattr(self, "group_name"):
             await self.channel_layer.group_discard(self.group_name, self.channel_name)
+        for group in getattr(self, "session_groups", []):
+            await self.channel_layer.group_discard(group, self.channel_name)
+
+    @database_sync_to_async
+    def _session_ids(self):
+        from im.models import ChatSession
+
+        return list(ChatSession.objects.filter(members=self.user).values_list("id", flat=True))
 
     async def receive_json(self, content, **kwargs):
         msg_type = content.get("type")
@@ -49,12 +66,11 @@ class NotifyConsumer(AsyncJsonWebsocketConsumer):
             if not member_ids:
                 return  # 非会话成员不允许向该会话广播输入状态
             payload = {"user": self.user.display_name, "user_id": self.user.id, "session_id": session_id}
-            for uid in member_ids:
-                if uid == self.user.id:
-                    continue
-                await self.channel_layer.group_send(
-                    f"user_{uid}", {"type": "chat_typing", "data": payload},
-                )
+            # #39：一次 group_send 投递到会话组，不再按成员数逐个 fan-out
+            #（放大倍数 = 群成员数）；发送者自己由前端过滤。
+            await self.channel_layer.group_send(
+                f"session_{session_id}", {"type": "session_typing", "data": payload},
+            )
 
     @database_sync_to_async
     def _session_member_ids(self, session_id):
@@ -84,6 +100,23 @@ class NotifyConsumer(AsyncJsonWebsocketConsumer):
 
     async def group_system(self, event):
         await self.send_json({"type": "group.system", "data": event["data"]})
+
+    async def session_kick(self, event):
+        """#33：被移出会话 → 解绑会话组并断开连接。
+
+        connect 时一次性加入全部会话组，仅删 m2m 不会解绑，被移出者仍能收到
+        该会话消息。收到业务侧 kick 后只处理自己的那条，然后 group_discard，
+        并关闭连接（客户端重连后按最新成员关系重建组）。
+        """
+        data = event.get("data") or {}
+        if data.get("user_id") != self.user.id:
+            return
+        group = f"session_{data.get('session_id')}"
+        if group in getattr(self, "session_groups", []):
+            self.session_groups.remove(group)
+        await self.channel_layer.group_discard(group, self.channel_name)
+        await self.send_json({"type": "session.kick", "data": data})
+        await self.close(code=4004)
 
     async def session_updated(self, event):
         await self.send_json({"type": "session.updated", "data": event["data"]})
@@ -117,6 +150,18 @@ def push_to_user(user_id: int, event_type: str, data: dict):
 # ---------------------------------------------------------------------------
 
 MAX_UPDATE_LOG = 200  # 增量日志上限，超过则请求客户端压缩为快照
+MAX_AWARENESS_PER_SECOND = 5  # #38：每连接 awareness 帧率上限，超出直接丢弃
+# #90：协同通道不受 DRF 限流约束，单帧增量与频率必须在这里兜住。
+# 64KB 足够覆盖一次正常按键合并后的增量（base64 后约 48KB 原始 CRDT 更新），
+# 120 条/分钟 ≈ 2 条/秒，远高于人工输入速率，只有脚本刷帧才会触发。
+MAX_UPDATE_BYTES = 64 * 1024
+MAX_UPDATES_PER_MINUTE = 120
+UPDATE_WINDOW_SECONDS = 60.0
+# #91：快照是整篇文档的全量状态，单条上限 256KB；同一笔记 5 秒内只落库一次，
+# 否则多个客户端同时压缩会把整篇正文反复写入库并整组广播。
+MAX_SNAPSHOT_BYTES = 256 * 1024
+SNAPSHOT_MIN_INTERVAL_SECONDS = 5.0
+SNAPSHOT_CACHE_PREFIX = "collab:snapshot:"
 
 
 class CollabConsumer(AsyncJsonWebsocketConsumer):
@@ -136,6 +181,7 @@ class CollabConsumer(AsyncJsonWebsocketConsumer):
       {"type": "awareness",    "data": {...}}
       {"type": "presence",     "data": {action, sender, participants}}
       {"type": "collab.compact", "data": {reason}}
+      {"type": "collab.error", "data": {code, message}}   入参超限 / 被节流
       {"type": "pong"}
 
     关键设计：服务端**不做 CRDT 合并**（无需 Python 端 Yjs 实现）。
@@ -154,6 +200,13 @@ class CollabConsumer(AsyncJsonWebsocketConsumer):
             await self.close(code=4003)
             return
 
+        # #38：awareness 每连接内存计数（本连接内 1 秒窗口），不落库不跨连接共享
+        self._awareness_window_start = 0.0
+        self._awareness_frames = 0
+        # #90 / #91：单连接增量计数窗口与上次快照落库时间（monotonic）
+        self._update_window_start = 0.0
+        self._update_count = 0
+        self._last_snapshot_at = 0.0
         self.group_name = f"collab_note_{self.note_id}"
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
@@ -190,6 +243,25 @@ class CollabConsumer(AsyncJsonWebsocketConsumer):
             update = content.get("update")
             if not isinstance(update, str) or not update:
                 return
+            # #90：单帧 64KB 上限，超限回错误帧并断开（不落库、不广播）
+            size_bytes = len(update.encode("utf-8", errors="ignore"))
+            if size_bytes > MAX_UPDATE_BYTES:
+                logger.warning(
+                    "collab 单帧增量超限：user=%s note=%s bytes=%s", self.user.id, self.note_id, size_bytes,
+                )
+                await self._reject(
+                    "update_too_large", f"单帧增量不能超过 {MAX_UPDATE_BYTES // 1024}KB",
+                )
+                return
+            # #90：每连接每分钟最多 120 条，超限回错误帧并断开
+            if not self._allow_update():
+                logger.warning(
+                    "collab 增量频率超限：user=%s note=%s window=%ss", self.user.id, self.note_id, UPDATE_WINDOW_SECONDS,
+                )
+                await self._reject(
+                    "update_rate_limited", f"增量更新不能超过 {MAX_UPDATES_PER_MINUTE} 条/分钟",
+                )
+                return
             size = await self._append_update(update, self.user.id)
             await self.channel_layer.group_send(
                 self.group_name,
@@ -204,7 +276,27 @@ class CollabConsumer(AsyncJsonWebsocketConsumer):
             snapshot = content.get("snapshot")
             if not isinstance(snapshot, str) or not snapshot:
                 return
+            # #91：快照单条 256KB 上限，超限回错误帧并断开（避免整组广播超大载荷）
+            snap_bytes = len(snapshot.encode("utf-8", errors="ignore"))
+            if snap_bytes > MAX_SNAPSHOT_BYTES:
+                logger.warning(
+                    "collab 快照超限：user=%s note=%s bytes=%s", self.user.id, self.note_id, snap_bytes,
+                )
+                await self._reject(
+                    "snapshot_too_large", f"快照不能超过 {MAX_SNAPSHOT_BYTES // 1024}KB",
+                )
+                return
             text = content.get("text") or ""
+            if not isinstance(text, str):
+                text = ""
+            # #91：同一笔记 5 秒内最多保存一次快照；被节流只回错误帧，不断连
+            if not await self._allow_snapshot():
+                await self.send_json({
+                    "type": "collab.error",
+                    "data": {"code": "snapshot_throttled",
+                             "message": f"同一笔记 {int(SNAPSHOT_MIN_INTERVAL_SECONDS)} 秒内最多保存一次快照"},
+                })
+                return
             revision = await self._save_snapshot(snapshot, text, self.user.id)
             await self.channel_layer.group_send(
                 self.group_name,
@@ -215,6 +307,14 @@ class CollabConsumer(AsyncJsonWebsocketConsumer):
             return
 
         if msg_type == "awareness":
+            # #38：每连接 awareness 不超过 5 帧/秒，超出直接丢弃（不广播、不断连）
+            now = time.monotonic()
+            if now - self._awareness_window_start >= 1.0:
+                self._awareness_window_start = now
+                self._awareness_frames = 0
+            self._awareness_frames += 1
+            if self._awareness_frames > MAX_AWARENESS_PER_SECOND:
+                return
             await self.channel_layer.group_send(
                 self.group_name,
                 {"type": "collab_awareness",
@@ -230,6 +330,51 @@ class CollabConsumer(AsyncJsonWebsocketConsumer):
                  "data": {"action": content.get("action", "join"),
                           "sender": self.user.display_name, "user_id": self.user.id}},
             )
+
+    # ---- 入参上限 / 频率控制（#90 / #91） ----
+    async def _reject(self, code: str, message: str, close_code: int = 4002):
+        """回一帧错误说明后主动断开：客户端据此提示并停止重试同一载荷"""
+        try:
+            await self.send_json({"type": "collab.error", "data": {"code": code, "message": message}})
+        finally:
+            await self.close(code=close_code)
+
+    def _allow_update(self) -> bool:
+        """#90：每连接 60 秒固定窗口内最多 MAX_UPDATES_PER_MINUTE 条增量"""
+        now = time.monotonic()
+        if now - self._update_window_start >= UPDATE_WINDOW_SECONDS:
+            self._update_window_start = now
+            self._update_count = 0
+        self._update_count += 1
+        return self._update_count <= MAX_UPDATES_PER_MINUTE
+
+    async def _allow_snapshot(self) -> bool:
+        """#91：同一笔记 5 秒内最多落库一次快照（跨连接用 cache 占位）。
+
+        先用本连接的内存时间戳挡掉连发，再用 cache.add 做笔记级互斥：
+        多端同时压缩时只有第一个请求落库，其余收到 collab.error。
+        cache 不可用时退化为「仅按连接限频」，不阻断正常协同。
+        """
+        now = time.monotonic()
+        if now - self._last_snapshot_at < SNAPSHOT_MIN_INTERVAL_SECONDS:
+            return False
+        try:
+            reserved = await self._reserve_snapshot_slot()
+        except Exception:  # cache 后端异常不应让协同写回失败
+            logger.exception("collab 快照节流占位失败：note=%s", self.note_id)
+            reserved = True
+        if not reserved:
+            return False
+        self._last_snapshot_at = now
+        return True
+
+    @sync_to_async
+    def _reserve_snapshot_slot(self) -> bool:
+        from django.core.cache import cache
+
+        return cache.add(
+            f"{SNAPSHOT_CACHE_PREFIX}{self.note_id}", 1, SNAPSHOT_MIN_INTERVAL_SECONDS,
+        )
 
     # ---- group_send handlers ----
     async def collab_update(self, event):
@@ -269,7 +414,7 @@ class CollabConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def _load_state(self):
-        from notes.models import Note, NoteCollabState
+        from notes.models import Note, NoteCollabState, NoteCollabUpdate
 
         note = Note.objects.filter(pk=self.note_id).first()
         state = NoteCollabState.objects.filter(note_id=self.note_id).first()
@@ -277,33 +422,42 @@ class CollabConsumer(AsyncJsonWebsocketConsumer):
         if state and state.snapshot is not None:
             raw = state.snapshot
             snapshot = bytes(raw).decode("utf-8", errors="ignore") if isinstance(raw, (bytes, memoryview)) else str(raw)
+        # 新表优先；历史数据仍在 JSON 列里时回退读取
+        updates = list(
+            NoteCollabUpdate.objects.filter(note_id=self.note_id)
+            .order_by("-revision")[:MAX_UPDATE_LOG]
+            .values_list("payload", flat=True)
+        )
+        updates.reverse()
+        if not updates and state:
+            updates = list(state.update_log or [])
         return {
             "note_id": self.note_id,
             "title": note.title if note else "",
             "content": note.content if note else "",
             "snapshot": snapshot,
-            "updates": (state.update_log if state else []) or [],
+            "updates": updates,
             "revision": state.revision if state else 0,
         }
 
     @database_sync_to_async
     def _append_update(self, update: str, user_id: int) -> int:
-        from notes.models import NoteCollabState
+        from django.db import transaction
+        from notes.models import NoteCollabState, NoteCollabUpdate
 
-        state, _ = NoteCollabState.objects.get_or_create(note_id=self.note_id)
-        log = list(state.update_log or [])
-        log.append(update)
-        state.update_log = log
-        state.revision += 1
-        contributors = [c for c in (state.contributors or []) if c != user_id]
-        contributors.insert(0, user_id)
-        state.contributors = contributors[:10]
-        state.save(update_fields=["update_log", "revision", "contributors", "updated_at"])
-        return len(log)
+        with transaction.atomic():
+            state, _ = NoteCollabState.objects.select_for_update().get_or_create(note_id=self.note_id)
+            state.revision += 1
+            contributors = [c for c in (state.contributors or []) if c != user_id]
+            contributors.insert(0, user_id)
+            state.contributors = contributors[:10]
+            state.save(update_fields=["revision", "contributors", "updated_at"])
+            NoteCollabUpdate.objects.create(note_id=self.note_id, revision=state.revision, payload=update)
+            return NoteCollabUpdate.objects.filter(note_id=self.note_id).count()
 
     @database_sync_to_async
     def _save_snapshot(self, snapshot: str, text: str, user_id: int) -> int:
-        from notes.models import Note, NoteCollabState
+        from notes.models import Note, NoteCollabState, NoteCollabUpdate
 
         state, _ = NoteCollabState.objects.get_or_create(note_id=self.note_id)
         state.snapshot = snapshot.encode("utf-8")
@@ -311,6 +465,8 @@ class CollabConsumer(AsyncJsonWebsocketConsumer):
         state.revision += 1
         state.text_mirror = text[:200000]
         state.save(update_fields=["snapshot", "update_log", "revision", "text_mirror", "updated_at"])
+        # 快照已覆盖旧增量，整批清空独立更新表
+        NoteCollabUpdate.objects.filter(note_id=self.note_id).delete()
 
         # 把协同结果回写到笔记正文（触发全文索引与双链重建）
         if text:

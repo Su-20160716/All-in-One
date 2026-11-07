@@ -7,6 +7,8 @@ Base32 密钥与 otpauth:// 链接，由用户手动录入验证器 App）。
 
 约定：6 位数字、30 秒步长、SHA-1（与 Google Authenticator / Authy /
 1Password 等主流验证器默认参数一致），校验时允许 ±1 个时间窗容差。
+#5：校验同时返回命中的时间步长，配合 last_used_counter 实现「一次性」，
+同一验证码无法在容差窗口内重放。
 """
 import base64
 import binascii
@@ -57,24 +59,41 @@ def totp(secret: str, at: float = None, offset: int = 0) -> str:
     return _hotp(_decode(secret), _counter(at) + offset)
 
 
-def verify(secret: str, code, window: int = WINDOW) -> bool:
-    """校验动态口令：允许 ±window 个步长的时间漂移；比较使用常数时间算法"""
+def verify(secret: str, code, window: int = WINDOW, last_counter: int = None) -> bool:
+    """校验动态口令：允许 ±window 个步长的时间漂移；比较使用常数时间算法
+
+    #5：传入 last_counter（上次成功校验命中的步长）时，命中的步长必须严格
+    大于它，避免同一验证码在容差窗口内被重复提交（登录 / 关闭 2FA 重放）。
+    """
+    return match_counter(secret, code, window=window, last_counter=last_counter) is not None
+
+
+def match_counter(secret: str, code, window: int = WINDOW, last_counter: int = None):
+    """返回命中的时间步长（int）；不匹配 / 已被使用过则返回 None。
+
+    调用方拿到步长后应持久化（见 TwoFactorSecret.last_used_counter），
+    下次校验时作为 last_counter 传入即可获得「一次性」语义。
+    """
     if not secret or code is None:
-        return False
+        return None
     code = str(code).strip().replace(" ", "")
     if len(code) != DIGITS or not code.isdigit():
-        return False
+        return None
     try:
         key = _decode(secret)
     except (binascii.Error, ValueError):
-        return False
+        return None
     now = _counter()
     # 容差窗口 ±window：历史上写成 range(-w, w+w+1)，前向多放一个步长，
     # 等于把验证码有效期延长到 90 秒，削弱防重放强度。
     for w in range(-window, window + 1):
-        if hmac.compare_digest(_hotp(key, now + w), code):
-            return True
-    return False
+        candidate = now + w
+        # 已用过的步长（含更早的）直接跳过：同一码不可重放
+        if last_counter is not None and candidate <= last_counter:
+            continue
+        if hmac.compare_digest(_hotp(key, candidate), code):
+            return candidate
+    return None
 
 
 def otpauth_url(secret: str, username: str, issuer: str = ISSUER) -> str:

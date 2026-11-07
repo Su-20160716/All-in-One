@@ -46,9 +46,15 @@ class OptionalPageNumberPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = "page_size"
     max_page_size = settings.PAGE_SIZE_MAX
+    # 未显式分页时的硬上限：防止漏传 page 的客户端一次拉全表
+    hard_cap = 500
 
     def paginate_queryset(self, queryset, request, view=None):
-        # 没有显式分页意图（无 page 参数）→ 返回 None，视图走全量分支
-        if "page" not in request.query_params:
+        # 没有显式分页意图（无 page / page_size 参数）→ 返回 None，视图走全量分支
+        if "page" not in request.query_params and "page_size" not in request.query_params:
             return None
         return super().paginate_queryset(queryset, request, view)
+
+    def cap(self, queryset):
+        """未分页分支的兜底：最多返回 hard_cap 条。"""
+        return queryset[: self.hard_cap]

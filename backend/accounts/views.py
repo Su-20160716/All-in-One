@@ -7,7 +7,7 @@ import json
 import os
 
 from django.contrib.auth import get_user_model
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework import status
@@ -23,6 +23,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from accounts import totp as totp_lib
 from accounts.models import (
     ActiveSession,
+    ApiTokenUsage,
     AvatarHistory,
     Badge,
     ContactAlias,
@@ -67,15 +68,22 @@ from core.models import OperationLog
 from core.pagination import StandardPagination
 from core.scoping import describe_scope
 from core.utils import get_client_ip
-from core.validators import as_int, parse_bool
+from core.validators import as_datetime, as_int, parse_bool
 
 User = get_user_model()
 
 # ---------------------------------------------------------------------------
 # F626 登录失败保护：同账号连续 N 次失败 → 锁定 M 分钟（并写入登录历史）
+# #4：锁定维度从「仅账号」升级为「账号 / 账号+IP / 单 IP 失败总量」三重，
+#     避免匿名者连错 5 次就锁死指定账号（也顺手削弱账号枚举预言机）。
 # ---------------------------------------------------------------------------
 LOGIN_LOCK_THRESHOLD = 5
 LOGIN_LOCK_MINUTES = 10
+# 账号维度（跨 IP）阈值：高于「账号+IP」一档，既保留定向爆破防护，
+# 又不再让任意匿名者 5 次就把别人的账号锁死
+LOGIN_ACCOUNT_LOCK_THRESHOLD = 15
+# 同一 IP 在窗口内失败总量上限：跨账号撞库（spraying）单独限流
+LOGIN_IP_LOCK_THRESHOLD = 20
 # F614 注销冷静期（天）
 DEACTIVATE_COOLDOWN_DAYS = DeactivateRequest.COOLDOWN_DAYS
 
@@ -114,63 +122,127 @@ def record_login(request, user, success=True, username=""):
     )
 
 
-# ---------------- F626 登录失败锁定 ----------------
+# ---------------- F626 登录失败锁定（#4 双维度计数） ----------------
 
-def login_lock_state(username: str):
-    """同账号自最近一次成功登录起连续失败 ≥5 次 → 锁定 10 分钟。
+def _failures_since_last_success(username=None, ip=None):
+    """返回该维度下「自最近一次成功之后」的失败记录查询集
+
+    账号维度：username；账号+IP 维度：username & ip；IP 维度：ip。
+    """
+    now = timezone.now()
+    fails = LoginLog.objects.filter(is_success=False, created_at__lte=now)
+    oks = LoginLog.objects.filter(is_success=True, created_at__lte=now)
+    if username is not None:
+        fails = fails.filter(username=username)
+        oks = oks.filter(username=username)
+    if ip is not None:
+        fails = fails.filter(ip=ip)
+        oks = oks.filter(ip=ip)
+    last_ok = oks.order_by("-created_at").values_list("created_at", flat=True).first()
+    if last_ok:
+        fails = fails.filter(created_at__gt=last_ok)
+    return fails
+
+
+def _remaining_lock(fails_qs, threshold, now) -> int:
+    """失败数达到阈值时返回剩余锁定秒数，否则返回 0"""
+    if fails_qs.count() < threshold:
+        return 0
+    latest = fails_qs.order_by("-created_at").values_list("created_at", flat=True).first()
+    if latest is None:
+        return 0
+    until = latest + timezone.timedelta(minutes=LOGIN_LOCK_MINUTES)
+    if now < until:
+        return max(1, int((until - now).total_seconds()))
+    return 0
+
+
+def login_lock_state(username: str, ip: str = None):
+    """登录失败锁定状态：三重维度取最大剩余锁定时间。
+
+    - 账号 + IP：同设备连续 5 次失败（主判定，不牵连其他设备/其他用户）
+    - 账号（跨 IP）：连续 15 次失败（防多 IP 轮换的定向爆破）
+    - 单 IP 失败总量：20 次（防撞库 spraying，覆盖大量不同账号名）
 
     返回剩余锁定秒数（int）表示仍在锁定期，返回 None 表示未锁定。
     锁定期内的拦截请求不再写失败记录，避免「越锁越久」。
     """
-    if not username:
+    if not username and not ip:
         return None
     now = timezone.now()
     try:
-        last_ok = (
-            LoginLog.objects.filter(username=username, is_success=True, created_at__lte=now)
-            .order_by("-created_at")
-            .values_list("created_at", flat=True)
-            .first()
-        )
-        qs = LoginLog.objects.filter(username=username, is_success=False, created_at__lte=now)
-        if last_ok:
-            qs = qs.filter(created_at__gt=last_ok)
-        if qs.count() < LOGIN_LOCK_THRESHOLD:
-            return None
-        latest = qs.order_by("-created_at").values_list("created_at", flat=True).first()
-        if latest is None:
-            return None
-        until = latest + timezone.timedelta(minutes=LOGIN_LOCK_MINUTES)
-        if now < until:
-            return max(1, int((until - now).total_seconds()))
+        checks = []
+        if username:
+            if ip:
+                checks.append(
+                    (_failures_since_last_success(username=username, ip=ip), LOGIN_LOCK_THRESHOLD)
+                )
+            checks.append(
+                (_failures_since_last_success(username=username), LOGIN_ACCOUNT_LOCK_THRESHOLD)
+            )
+        if ip:
+            checks.append((_failures_since_last_success(ip=ip), LOGIN_IP_LOCK_THRESHOLD))
+        locked = 0
+        for qs, threshold in checks:
+            locked = max(locked, _remaining_lock(qs, threshold, now))
+        return locked or None
     except Exception:
         return None
-    return None
 
 
 # ---------------- F614 注销冷静期：执行到期申请 ----------------
 
 def process_due_deactivations() -> int:
-    """执行已到冷静期的注销申请（幂等；任何异常都不影响主流程）"""
+    """执行已到冷静期的注销申请（幂等；任何异常都不影响主流程）
+
+    #69：先用条件 update 把 pending 抢占成 running，只有真正抢到的 worker
+    才执行——多 worker/多进程并发时不会对同一申请重复停用与重复写日志。
+    处理失败会把状态放回 pending，等下一轮重试；running 悬挂超过 1 天
+    （worker 崩溃）也会被回收。
+    """
     done = 0
+    now = timezone.now()
     try:
-        now = timezone.now()
-        due = DeactivateRequest.objects.filter(status="pending", execute_at__lte=now).select_related("user")
-        for req in list(due):
-            user = req.user
-            user.is_active = False
-            user.is_disabled = True
-            user.save(update_fields=["is_active", "is_disabled"])
-            req.status = "done"
-            req.processed_at = now
-            req.save(update_fields=["status", "processed_at"])
-            OperationLog.objects.create(
-                user=user, module="accounts", action="delete",
-                target="注销申请到期执行", detail=f"冷静期 {DEACTIVATE_COOLDOWN_DAYS} 天已过",
-            )
-            done += 1
+        DeactivateRequest.objects.filter(
+            status="running", execute_at__lt=now - timezone.timedelta(days=1)
+        ).update(status="pending")
+        due_ids = list(
+            DeactivateRequest.objects.filter(status="pending", execute_at__lte=now)
+            .values_list("id", flat=True)
+        )
     except Exception:
-        return done
+        return 0
+    for rid in due_ids:
+        try:
+            claimed = DeactivateRequest.objects.filter(pk=rid, status="pending").update(status="running")
+        except Exception:
+            continue
+        if not claimed:
+            # 已被其他 worker 抢走 / 已被撤销
+            continue
+        try:
+            with transaction.atomic():
+                req = DeactivateRequest.objects.select_for_update().filter(pk=rid).first()
+                if req is None or req.status != "running":
+                    continue
+                user = req.user
+                user.is_active = False
+                user.is_disabled = True
+                user.save(update_fields=["is_active", "is_disabled"])
+                req.status = "done"
+                req.processed_at = timezone.now()
+                req.save(update_fields=["status", "processed_at"])
+                OperationLog.objects.create(
+                    user=user, module="accounts", action="delete",
+                    target="注销申请到期执行", detail=f"冷静期 {DEACTIVATE_COOLDOWN_DAYS} 天已过",
+                )
+            done += 1
+        except Exception:
+            logger.exception("注销申请执行失败，回退为 pending 待重试（id=%s）", rid)
+            try:
+                DeactivateRequest.objects.filter(pk=rid, status="running").update(status="pending")
+            except Exception:
+                pass
     return done
 
 
@@ -184,6 +256,30 @@ def _totp_state(user):
     return obj.enabled, obj.secret, totp_lib.otpauth_url(obj.secret, user.username)
 
 
+def _consume_totp(row, code) -> bool:
+    """#5 校验并「消费」验证码：命中即把时间步长写回 last_used_counter。
+
+    同一验证码再次提交时命中步长 ≤ last_used_counter 会被拒绝，
+    因此 ±1 容差窗口内不可重放（登录、关闭 2FA、重置密钥统一走这里）。
+    """
+    if row is None:
+        return False
+    counter = totp_lib.match_counter(row.secret, code, last_counter=row.last_used_counter)
+    if counter is None:
+        return False
+    now = timezone.now()
+    try:
+        TwoFactorSecret.objects.filter(pk=row.pk).update(
+            last_used_counter=counter, last_used_at=now
+        )
+    except Exception:
+        logger.exception("TOTP 计数器写入失败（user_id=%s）", row.user_id)
+        return False
+    row.last_used_counter = counter
+    row.last_used_at = now
+    return True
+
+
 class LoginView(TokenObtainPairView):
     """登录：连续失败锁定（F626）+ TOTP 双因素（F615）+ 到期注销执行（F614）"""
 
@@ -195,14 +291,15 @@ class LoginView(TokenObtainPairView):
         # F614：登录入口顺带执行到期的注销冷静期
         process_due_deactivations()
 
-        # F626：连续 5 次失败锁定 10 分钟
-        locked_seconds = login_lock_state(username)
+        # F626 / #4：连续失败锁定（账号+IP、账号、单 IP 三维度取最长剩余时间）
+        locked_seconds = login_lock_state(username, get_client_ip(request))
         if locked_seconds:
             minutes = max(1, (locked_seconds + 59) // 60)
             return Response(
                 {
                     "code": 1016,
-                    "message": f"连续 {LOGIN_LOCK_THRESHOLD} 次登录失败，账号已锁定，请 {minutes} 分钟后再试",
+                    # 文案不区分命中哪一维度（账号 / 账号+IP / IP），避免泄露账号是否存在
+                    "message": f"登录失败次数过多，请 {minutes} 分钟后再试",
                     "locked_seconds": locked_seconds,
                     "detail": {},
                 },
@@ -214,24 +311,26 @@ class LoginView(TokenObtainPairView):
         user = User.objects.filter(username=username).first()
         if user is not None:
             totp_row = TwoFactorSecret.objects.filter(user=user).first()
-            if (
-                totp_row is not None
-                and totp_row.enabled
-                and user.check_password(str(request.data.get("password", "") or ""))
-            ):
+            if totp_row is not None and totp_row.enabled:
+                # #32：缺验证码时不能暴露「密码是否正确」——无论密码对错都返回
+                # 同一条 twofa_required 挑战（保持前端 Login.vue 契约），并计入
+                # 一次失败，使未认证请求无法据此判定密码正确性。
                 if not code:
+                    record_login(request, None, False, username)
                     return Response(
                         {"twofa_required": True, "code": 1017,
                          "message": "该账号已开启两步验证，请输入 6 位验证码", "detail": {}},
                         status=status.HTTP_200_OK,
                     )
-                if not totp_lib.verify(totp_row.secret, code):
+                # 先验码：码错直接 401（不泄露密码正确性）；码对再由下方
+                # super().post 校验密码，只有全部通过才签发令牌。
+                # #5：验码成功后立即消费该时间步长，同一码不可二次使用。
+                if not _consume_totp(totp_row, code):
                     record_login(request, None, False, username)
                     return Response(
                         {"code": 1018, "message": "两步验证码错误或已过期", "detail": {}},
                         status=status.HTTP_401_UNAUTHORIZED,
                     )
-                TwoFactorSecret.objects.filter(pk=totp_row.pk).update(last_used_at=timezone.now())
 
         try:
             resp = super().post(request, *args, **kwargs)
@@ -258,15 +357,20 @@ class LoginView(TokenObtainPairView):
             user = User.objects.filter(username=username).first()
             if user:
                 record_login(request, user, True, username)
+                # #32：密码 + TOTP 全部通过后才记录验证器最近使用时间
+                TwoFactorSecret.objects.filter(user=user, enabled=True).update(last_used_at=timezone.now())
                 # #56 记录活跃会话
                 try:
                     jti = resp.data.get("access", "").split(".")
                     # 从 access token 解 jti
-                    from rest_framework_simplejwt.tokens import AccessToken
+                    from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
                     token = AccessToken(resp.data["access"])
+                    refresh_raw = resp.data.get("refresh") or ""
+                    refresh_jti = str(RefreshToken(refresh_raw)["jti"]) if refresh_raw else ""
                     ActiveSession.objects.create(
                         user=user,
                         jti=str(token["jti"]),
+                        refresh_jti=refresh_jti,
                         ip=get_client_ip(request),
                         device=parse_device(request.META.get("HTTP_USER_AGENT", "")),
                         user_agent=(request.META.get("HTTP_USER_AGENT", "") or "")[:300],
@@ -284,27 +388,54 @@ class RefreshView(TokenRefreshView):
     serializer_class = MyTokenRefreshSerializer
 
 
+def _validate_password_policy(password, user=None):
+    """#6：把 AUTH_PASSWORD_VALIDATORS 真正落到所有设置口令的入口。
+
+    序列化层只有硬编码的 min_length，settings 里的校验器此前没有任何调用方
+    （等于死配置）。这里统一调用 validate_password：长度 / 相似度 / 常见弱口令 /
+    纯数字都在同一处生效，失败转成 DRF ValidationError（→ 400）。
+    """
+    from django.contrib.auth.password_validation import validate_password
+    from django.core.exceptions import ValidationError as DjangoValidationError
+
+    try:
+        validate_password(password, user=user)
+    except DjangoValidationError as exc:
+        raise ValidationError(list(exc.messages))
+
+
 class RegisterView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
         invite_code = (request.data.get("invite_code") or "").strip()
-        invite = None
         # 如果站点设置了 register_invite_required，则必须提供有效邀请码
         from core.models import SiteSetting
         require_invite = SiteSetting.objects.filter(key="register_invite_required", value="1").exists()
-        if invite_code:
-            invite = InviteCode.objects.filter(code=invite_code).first()
-            if not invite or not invite.is_valid:
-                return Response({"message": "邀请码无效或已过期", "code": 1007}, status=status.HTTP_400_BAD_REQUEST)
-        elif require_invite:
-            return Response({"message": "本站点需要邀请码才能注册", "code": 1008}, status=status.HTTP_400_BAD_REQUEST)
 
         # B5：用户 + 邀请码绑定 + 邀请记录 + 操作日志 + 登录日志多表写，
-        # 任一步失败整体回滚，避免「用户建了但邀请码没用上」的中间态
+        # 任一步失败整体回滚，避免「用户建了但邀请码没用上」的中间态。
+        # #31：邀请码行加 select_for_update，校验与占用在同一事务内完成，
+        # 并发注册无法突破 max_uses。
         with transaction.atomic():
+            invite = None
+            if invite_code:
+                invite = (
+                    InviteCode.objects.select_for_update()
+                    .filter(code=invite_code)
+                    .first()
+                )
+                if not invite or not invite.is_valid:
+                    return Response({"message": "邀请码无效或已过期", "code": 1007}, status=status.HTTP_400_BAD_REQUEST)
+                if invite.uses >= invite.max_uses:
+                    return Response({"message": "邀请码使用次数已达上限", "code": 1007}, status=status.HTTP_400_BAD_REQUEST)
+            elif require_invite:
+                return Response({"message": "本站点需要邀请码才能注册", "code": 1008}, status=status.HTTP_400_BAD_REQUEST)
+
             ser = RegisterSerializer(data=request.data)
             ser.is_valid(raise_exception=True)
+            # #6：注册口令同样受站点口令策略约束（弱口令 / 纯数字直接 400）
+            _validate_password_policy(ser.validated_data["password"])
             user = ser.save()
             # 绑定邀请码
             if invite:
@@ -382,12 +513,19 @@ class ChangeUsernameView(APIView):
         ser = ChangeUsernameSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         old = request.user.username
-        request.user.username = ser.validated_data["username"]
-        request.user.save(update_fields=["username"])
-        OperationLog.objects.create(
-            user=request.user, module="accounts", action="update", target="修改用户名", detail=f"{old} → {request.user.username}",
-            ip=get_client_ip(request),
-        )
+        new_username = ser.validated_data["username"]
+        try:
+            # #80：唯一性最终以数据库约束为准（serializer 的 exists() 检查
+            # 存在并发窗口），同一事务内改名 + 留痕，冲突返回 400 而非 500。
+            with transaction.atomic():
+                request.user.username = new_username
+                request.user.save(update_fields=["username"])
+                OperationLog.objects.create(
+                    user=request.user, module="accounts", action="update", target="修改用户名",
+                    detail=f"{old} → {new_username}", ip=get_client_ip(request),
+                )
+        except IntegrityError:
+            return Response({"message": "该用户名已被占用", "code": 1002}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"message": "用户名已修改", "user": UserSerializer(request.user).data})
 
 
@@ -395,10 +533,19 @@ class ChangePasswordView(APIView):
     def post(self, request):
         ser = ChangePasswordSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
-        request.user.set_password(ser.validated_data["new_password"])
-        # B12：改密后吊销该用户所有已签发 token（tv claim 对不上即失效）
-        request.user.token_version += 1
-        request.user.save(update_fields=["password", "token_version"])
+        new_password = ser.validated_data["new_password"]
+        # #6：改密同样走站点口令策略（长度 / 常见弱口令 / 纯数字）
+        _validate_password_policy(new_password, user=request.user)
+        # #47：改密与「吊销全部会话」放在同一事务里，设备管理页不会再显示
+        # 一批实际已失效的旧设备在线；同时 bump token_version 让旧 access 立刻失效。
+        with transaction.atomic():
+            request.user.set_password(new_password)
+            request.user.token_version += 1
+            request.user.save(update_fields=["password", "token_version"])
+            revoked = ActiveSession.objects.filter(
+                user=request.user, is_revoked=False
+            ).update(is_revoked=True, revoked_at=timezone.now())
+        logger.info("用户 %s 改密成功，已吊销 %s 个活跃会话", request.user.pk, revoked)
         return Response({"message": "密码修改成功，请重新登录"})
 
 
@@ -531,14 +678,76 @@ def _deactivate_state(user) -> dict:
     }
 
 
+# ---------------- #10 导出前的二次认证 ----------------
+
+# 5 分钟内通过过 TOTP 校验即视为已完成二次认证（与清单口径一致）
+EXPORT_REAUTH_TTL_SECONDS = 300
+# #85：笔记正文是导出里唯一可能无界的字段（单篇可达数十万字、篇数无上限），
+# 一次性拼进内存 JSON 会打爆 worker。只导前 200 篇、单篇截断 200k 字。
+EXPORT_NOTE_LIMIT = 200
+EXPORT_NOTE_MAX_CHARS = 200_000
+
+
+def _export_reauth_ok(request) -> bool:
+    """导出个人全量数据前的二次认证：当前密码，或 5 分钟内刚校验过 TOTP。"""
+    user = request.user
+    row = TwoFactorSecret.objects.filter(user=user, enabled=True).first()
+    if row is not None and row.last_used_at is not None:
+        if (timezone.now() - row.last_used_at).total_seconds() <= EXPORT_REAUTH_TTL_SECONDS:
+            return True
+    password = str(
+        request.query_params.get("password")
+        or request.headers.get("X-Reauth-Password", "")
+        or ""
+    )
+    return bool(password) and user.check_password(password)
+
+
+def _export_notes_payload(user):
+    """#85：按上限取笔记，返回 (行列表, 是否发生截断)。
+
+    只取前 EXPORT_NOTE_LIMIT 篇（多取 1 条用于判断是否还有更多），
+    单篇正文超过 EXPORT_NOTE_MAX_CHARS 时截断；行结构与原来一致。
+    """
+    from notes.models import Note
+
+    rows = list(
+        Note.objects.filter(owner=user)
+        .values("id", "title", "content", "created_at", "updated_at")
+        .order_by("id")[: EXPORT_NOTE_LIMIT + 1]
+    )
+    truncated = len(rows) > EXPORT_NOTE_LIMIT
+    rows = rows[:EXPORT_NOTE_LIMIT]
+    for row in rows:
+        content = row.get("content")
+        if isinstance(content, str) and len(content) > EXPORT_NOTE_MAX_CHARS:
+            row["content"] = content[:EXPORT_NOTE_MAX_CHARS]
+            truncated = True
+    return rows, truncated
+
+
 class DataExportView(APIView):
-    """导出我的全部个人数据（F613 数据 JSON 导出：覆盖账号/内容/社交/安全全量模块）"""
+    """导出我的全部个人数据（F613 数据 JSON 导出：覆盖账号/内容/社交/安全全量模块）
+
+    #10：导出属于高敏感操作——必须二次认证（当前密码或 5 分钟内 TOTP），
+    成功后写一条 OperationLog 审计。
+    """
 
     def get(self, request):
         from files.models import FileMeta
-        from notes.models import Note
         from projects.models import TaskCard
         from im.models import ChatSession
+
+        if not _export_reauth_ok(request):
+            return Response(
+                {
+                    "ok": False,
+                    "code": 1031,
+                    "message": "导出个人数据需二次认证：请提供当前密码，或在 5 分钟内完成一次两步验证",
+                    "detail": {},
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         u = request.user
 
@@ -548,10 +757,14 @@ class DataExportView(APIView):
             except Exception:
                 return default if default is not None else []
 
+        # #85：笔记分页导出——前 200 篇、单篇正文截断 200k 字，
+        # 超出部分不再拼进内存（全量导出应走后台任务生成文件）。
+        notes, notes_truncated = _export_notes_payload(u)
+
         data = {
             "profile": UserSerializer(u).data,
             "files": list(FileMeta.objects.filter(owner=u).values("id", "name", "size", "kind", "created_at")),
-            "notes": list(Note.objects.filter(owner=u).values("id", "title", "content", "created_at", "updated_at")),
+            "notes": notes,
             "tasks": list(
                 TaskCard.objects.filter(assignees=u).values("id", "title", "status", "priority", "due_date")
             ),
@@ -604,8 +817,58 @@ class DataExportView(APIView):
             "files": len(data["files"]), "notes": len(data["notes"]), "tasks": len(data["tasks"]),
             "sessions": len(data["sessions"]), "login_history": len(data["login_history"]),
             "notifications": len(data["notifications"]), "follows": len(data["follows"]["following"]),
+            # #85：为 True 表示笔记仅导出前 200 篇 / 单篇截断 200k 字
+            "notes_truncated": notes_truncated,
         }
+        # #10：留痕（谁、何时、从哪个 IP 导出了全量个人数据）
+        try:
+            OperationLog.objects.create(
+                user=u, module="accounts", action="export", target="导出个人全部数据",
+                detail=f"export_version={data['export_version']} 模块数={len(data) - 1}",
+                ip=get_client_ip(request),
+            )
+        except Exception:
+            logger.exception("数据导出审计写入失败（user_id=%s）", u.pk)
         return Response(data)
+
+
+class DataExportCountView(APIView):
+    """导出模块计数（#196）：只做 exists 探测，不把全部数据装配一遍。"""
+
+    def get(self, request):
+        from files.models import FileMeta
+        from im.models import ChatSession
+        from notes.models import Note
+        from projects.models import TaskCard
+
+        u = request.user
+
+        def _has(qs):
+            try:
+                return qs.exists()
+            except Exception:
+                return False
+
+        count = 1  # profile 始终存在
+        probes = [
+            FileMeta.objects.filter(owner=u),
+            Note.objects.filter(owner=u),
+            TaskCard.objects.filter(assignees=u),
+            ChatSession.objects.filter(members=u),
+            LoginLog.objects.filter(user=u),
+            _notif_qs(u),
+            UserBadge.objects.filter(user=u),
+            InviteCode.objects.filter(owner=u),
+            InviteUse.objects.filter(invite__owner=u),
+            UserFollow.objects.filter(follower=u),
+            UserFollow.objects.filter(following=u),
+            ContactAlias.objects.filter(owner=u),
+            NicknameHistory.objects.filter(user=u),
+            AvatarHistory.objects.filter(user=u),
+            PersonalAccessToken.objects.filter(user=u),
+        ]
+        count += sum(1 for qs in probes if _has(qs))
+        return Response({"count": count})
 
 
 class HeartbeatView(APIView):
@@ -616,15 +879,58 @@ class HeartbeatView(APIView):
         return Response({"ok": True, "server_time": timezone.now().isoformat()})
 
 
+# ---------------- #9 用户名探测防护 ----------------
+
+# 按 IP 限流：60 秒内最多 10 次（缓存计数，缓存不可用时降级放行）
+USERNAME_CHECK_LIMIT = 10
+USERNAME_CHECK_WINDOW = 60
+
+
+def _username_check_blocked(ip: str) -> bool:
+    """同 IP 高频查询判定（滑动窗口用 60 秒固定窗口近似）"""
+    from django.core.cache import cache
+
+    key = f"accounts:username_check:{ip or 'unknown'}"
+    try:
+        if cache.add(key, 1, USERNAME_CHECK_WINDOW):
+            return False
+        return int(cache.incr(key)) > USERNAME_CHECK_LIMIT
+    except ValueError:
+        # 计数键刚好过期（add 与 incr 之间被淘汰）：重置后放行本次
+        cache.add(key, 1, USERNAME_CHECK_WINDOW)
+        return False
+    except Exception:
+        # 缓存不可用时不阻断正常注册流程
+        return False
+
+
 class UsernameCheckView(APIView):
-    """用户名可用性校验（注册/改名实时提示）"""
+    """用户名可用性校验（注册/改名实时提示）
+
+    #9：匿名请求统一返回模糊结果（不区分「已占用 / 未占用」），并按 IP 限流，
+    消除匿名枚举预言机；登录用户（改名场景）仍返回真实可用性。
+    """
 
     permission_classes = [AllowAny]
 
     def get(self, request):
+        ip = get_client_ip(request)
+        if _username_check_blocked(ip):
+            return Response(
+                {"valid": False, "available": None, "code": 1029,
+                 "message": "查询过于频繁，请稍后再试"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
         username = (request.query_params.get("username") or "").strip()
         if len(username) < 3:
+            # 长度不合法与是否被占用无关，可以直接告知
             return Response({"valid": False, "available": False, "message": "至少 3 个字符"})
+        if not getattr(request.user, "is_authenticated", False):
+            # 模糊响应：格式校验通过即可提交，占用与否以注册结果为准
+            return Response(
+                {"valid": True, "available": None,
+                 "message": "用户名格式可用，最终以提交注册的结果为准"}
+            )
         exists = User.objects.filter(username=username).exists()
         return Response({"valid": True, "available": not exists, "message": "可用" if not exists else "已被占用"})
 
@@ -647,17 +953,35 @@ class LoginHistoryView(APIView):
 
 
 class UserDirectoryView(APIView):
-    """全员用户名录（登录可见，用于 @、拉人、发起聊天）"""
+    """全员用户名录（登录可见，用于 @、拉人、发起聊天）
+
+    #30：按租户/部门收敛可见范围；邮箱检索仅 staff 可用；只返回最简字段。
+    """
 
     def get(self, request):
+        actor = request.user
         qs = User.objects.filter(is_active=True, is_disabled=False)
+        # 同租户收敛（模型支持 tenant 字段；超管无租户时不限制）
+        if actor.tenant_id:
+            qs = qs.filter(tenant_id=actor.tenant_id)
+        # 非 staff 只能看到本部门同事（无部门时退化为仅同租户）
+        if not actor.is_staff and actor.department_id:
+            qs = qs.filter(department_id=actor.department_id)
         keyword = request.query_params.get("q")
         if keyword:
-            qs = qs.filter(Q(username__icontains=keyword) | Q(nickname__icontains=keyword) | Q(email__icontains=keyword))
+            cond = Q(username__icontains=keyword) | Q(nickname__icontains=keyword)
+            # 邮箱属于个人敏感信息，仅 staff 可按邮箱检索
+            if actor.is_staff:
+                cond |= Q(email__icontains=keyword)
+            qs = qs.filter(cond)
         # 先取总数再切片 —— 对切片后的 QuerySet 调 count() 会带上 LIMIT，
         # total 会永远等于 50
         total = qs.count()
-        rows = qs.order_by("username")[:50]
+        rows = (
+            qs.select_related("department")
+            .prefetch_related("roles")
+            .order_by("username")[:50]
+        )
         return Response({"list": UserDirectorySerializer(rows, many=True).data, "total": total})
 
 
@@ -708,30 +1032,52 @@ class UserDetailView(APIView):
         user = self.get_object(pk)
         if not user:
             return Response({"message": "用户不存在"}, status=status.HTTP_404_NOT_FOUND)
-        for field in ("nickname", "email", "phone", "bio"):
-            if field in request.data:
-                setattr(user, field, request.data[field])
-        if "storage_quota_mb" in request.data:
-            user.storage_quota_mb = as_int(request.data["storage_quota_mb"], field="storage_quota_mb", minimum=0)
-        if "is_disabled" in request.data:
-            user.is_disabled = parse_bool(request.data["is_disabled"], field="is_disabled")
-            user.is_active = not user.is_disabled
-        if "department" in request.data:
-            dept_id = as_int(request.data["department"], field="department") if request.data["department"] else None
-            user.department = Department.objects.filter(pk=dept_id).first() if dept_id else None
-        if "tenant" in request.data:
-            tenant_id = as_int(request.data["tenant"], field="tenant") if request.data["tenant"] else None
-            user.tenant = Tenant.objects.filter(pk=tenant_id).first() if tenant_id else None
-        user.save()
+        if user.is_superuser and not request.user.is_superuser:
+            return Response({"message": "仅超级管理员可操作超级管理员账号"}, status=status.HTTP_403_FORBIDDEN)
+
         role_ids = request.data.get("role_ids")
+        roles = None
         if isinstance(role_ids, list):
-            before = list(user.roles.values_list("code", flat=True))
-            user.roles.set(Role.objects.filter(id__in=role_ids))
-            after = list(user.roles.values_list("code", flat=True))
-            if before != after:
-                record_role_change(
-                    request.user, user, "set", before, after, get_client_ip(request), "编辑用户角色"
-                )
+            roles = list(Role.objects.filter(id__in=role_ids).prefetch_related("permissions"))
+            if roles and not request.user.is_superuser:
+                if any(_is_admin_level_role(r) for r in roles):
+                    return Response(
+                        {"message": "仅超级管理员可分配管理员级角色"},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                if user.id == request.user.id:
+                    actor_codes = _actor_permission_codes(request.user)
+                    new_codes = {c for r in roles for c in r.permissions.values_list("code", flat=True) if c}
+                    if actor_codes is not None and (new_codes - actor_codes):
+                        return Response(
+                            {"message": "不能为自己分配超出自身权限的角色"},
+                            status=status.HTTP_403_FORBIDDEN,
+                        )
+
+        with transaction.atomic():
+            for field in ("nickname", "email", "phone", "bio"):
+                if field in request.data:
+                    setattr(user, field, request.data[field])
+            if "storage_quota_mb" in request.data:
+                user.storage_quota_mb = as_int(request.data["storage_quota_mb"], field="storage_quota_mb", minimum=0)
+            if "is_disabled" in request.data:
+                user.is_disabled = parse_bool(request.data["is_disabled"], field="is_disabled")
+                user.is_active = not user.is_disabled
+            if "department" in request.data:
+                dept_id = as_int(request.data["department"], field="department") if request.data["department"] else None
+                user.department = Department.objects.filter(pk=dept_id).first() if dept_id else None
+            if "tenant" in request.data:
+                tenant_id = as_int(request.data["tenant"], field="tenant") if request.data["tenant"] else None
+                user.tenant = Tenant.objects.filter(pk=tenant_id).first() if tenant_id else None
+            user.save()
+            if roles is not None:
+                before = list(user.roles.values_list("code", flat=True))
+                user.roles.set(roles)
+                after = list(user.roles.values_list("code", flat=True))
+                if before != after:
+                    record_role_change(
+                        request.user, user, "set", before, after, get_client_ip(request), "编辑用户角色"
+                    )
         return Response({"message": "已更新", "user": UserSerializer(user).data})
 
 
@@ -743,7 +1089,17 @@ class UserCreateView(APIView):
     def post(self, request):
         ser = UserAdminCreateSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        user = ser.save()
+        role_ids = request.data.get("role_ids") or []
+        if role_ids and not request.user.is_superuser:
+            roles = list(Role.objects.filter(id__in=role_ids).prefetch_related("permissions"))
+            if any(_is_admin_level_role(r) for r in roles):
+                return Response({"message": "仅超级管理员可分配管理员级角色"}, status=status.HTTP_403_FORBIDDEN)
+            if any(r.tenant_id and r.tenant_id != request.user.tenant_id for r in roles):
+                return Response({"message": "不能分配其他组织的角色"}, status=status.HTTP_403_FORBIDDEN)
+        # #6：管理员代建账号的初始口令同样受站点口令策略约束
+        _validate_password_policy(ser.validated_data["password"])
+        with transaction.atomic():
+            user = ser.save()
         # F636 初始角色也进变更历史
         record_role_change(
             request.user, user, "initial", [],
@@ -762,8 +1118,13 @@ class AdminResetPasswordView(APIView):
         user = User.objects.filter(pk=pk).first()
         if not user:
             return Response({"message": "用户不存在"}, status=status.HTTP_404_NOT_FOUND)
+        # 只有超管能重置超管密码，避免 is_staff 直接接管站点
+        if user.is_superuser and not request.user.is_superuser:
+            return Response({"message": "无权重置超级管理员密码"}, status=status.HTTP_403_FORBIDDEN)
         ser = AdminResetPasswordSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        # #6：管理员重置口令同样受站点口令策略约束
+        _validate_password_policy(ser.validated_data["new_password"], user=user)
         user.set_password(ser.validated_data["new_password"])
         # B12：管理员重置密码同样吊销该用户所有旧 token
         user.token_version += 1
@@ -787,6 +1148,36 @@ def record_role_change(actor, target, action, roles_from, roles_to, ip=None, det
         logger.exception("B23：静默兜底已登记（accounts/views.py:763 原为 pass）——review 是否应收窄异常类型")
 
 
+# 管理员级角色编码（内置 admin / superadmin），另加 data_scope=all 与含 admin 权限点
+_ADMIN_ROLE_CODES = {"admin", "superadmin", "super_admin"}
+_BATCH_ACTION_MAX_IDS = 500
+
+
+def _is_admin_level_role(role) -> bool:
+    """角色是否含管理员级能力：管理员编码 / 全局数据范围 / admin 模块权限点"""
+    if role.code in _ADMIN_ROLE_CODES or role.data_scope == "all":
+        return True
+    # 优先用 prefetch_related("permissions") 的缓存，避免逐角色查询
+    return any(p.module == "admin" for p in role.permissions.all())
+
+
+def _actor_permission_codes(user):
+    """非超管操作者当前拥有的权限编码集合（超管返回 None 表示不受限）"""
+    if user.is_superuser:
+        return None
+    return {c for c in user.roles.values_list("permissions__code", flat=True) if c}
+
+
+def _validate_batch_ids(raw):
+    """#81：批量 ids 必须是非空整型列表，去重并限制单次数量"""
+    if not isinstance(raw, list) or not raw:
+        raise ValidationError("未选择用户")
+    ids = {as_int(v, field="user_ids", minimum=1) for v in raw}
+    if len(ids) > _BATCH_ACTION_MAX_IDS:
+        raise ValidationError(f"单次最多操作 {_BATCH_ACTION_MAX_IDS} 个用户")
+    return sorted(ids)
+
+
 class AdminBatchActionView(APIView):
     """管理员批量操作用户：启用/禁用/删除/分配角色/设置配额
     + F637 扩展：强制下线 / 重置两步验证 / 调整部门 / 重置注销申请
@@ -796,18 +1187,24 @@ class AdminBatchActionView(APIView):
 
     def post(self, request):
         action = request.data.get("action")
-        ids = request.data.get("user_ids") or []
-        if not isinstance(ids, list) or not ids:
-            return Response({"message": "未选择用户"}, status=status.HTTP_400_BAD_REQUEST)
-        qs = User.objects.filter(id__in=ids)
+        ids = _validate_batch_ids(request.data.get("user_ids") or [])
+        # #81：禁止把任何批量操作落到超管与操作者本人身上
+        qs = User.objects.filter(id__in=ids).exclude(id=request.user.id).exclude(is_superuser=True)
+        if not qs.exists():
+            return Response(
+                {"message": "没有可操作的用户（不能操作超级管理员或本人）"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if action == "enable":
-            qs.update(is_disabled=False, is_active=True)
-            msg = f"已启用 {len(ids)} 个用户"
+            n = qs.update(is_disabled=False, is_active=True)
+            msg = f"已启用 {n} 个用户"
         elif action == "disable":
-            qs.update(is_disabled=True, is_active=False)
-            msg = f"已禁用 {len(ids)} 个用户"
+            n = qs.update(is_disabled=True, is_active=False)
+            msg = f"已禁用 {n} 个用户"
         elif action == "delete":
-            n = qs.exclude(is_superuser=True).delete()[0]
+            # 只统计主对象，delete() 的返回值包含级联删除的关联对象
+            n = qs.count()
+            qs.delete()
             msg = f"已删除 {n} 个用户"
         elif action == "quota":
             quota = as_int(request.data.get("storage_quota_mb"), default=2048, field="storage_quota_mb", minimum=0)
@@ -815,7 +1212,10 @@ class AdminBatchActionView(APIView):
             msg = f"已为 {n} 个用户设置配额 {quota}MB"
         elif action == "roles":
             role_ids = request.data.get("role_ids") or []
-            roles = Role.objects.filter(id__in=role_ids)
+            roles = list(Role.objects.filter(id__in=role_ids).prefetch_related("permissions"))
+            # 与 AssignRoleView 对齐：管理员级角色仅超管可分配
+            if not request.user.is_superuser and any(_is_admin_level_role(r) for r in roles):
+                return Response({"message": "仅超级管理员可分配管理员级角色"}, status=status.HTTP_403_FORBIDDEN)
             n = 0
             for u in qs:
                 before = list(u.roles.values_list("code", flat=True))
@@ -829,6 +1229,7 @@ class AdminBatchActionView(APIView):
             msg = f"已为 {n} 个用户分配角色"
         # ---------- F637 批量操作扩展 ----------
         elif action == "force_logout":
+            n_users = qs.count()
             n_sess = ActiveSession.objects.filter(user__in=qs, is_revoked=False).update(is_revoked=True)
             n_tok = 0
             try:
@@ -844,15 +1245,15 @@ class AdminBatchActionView(APIView):
                 n_tok = 0
             # B12：黑名单只挡 refresh，access 在有效期内仍可用；
             # token_version +1 让所有已签发 access 立即失效（认证端校验 tv claim）
-            n_tv = qs.update(token_version=F("token_version") + 1)
-            msg = f"已强制 {qs.count()} 个用户下线（会话 {n_sess} 个 / 吊销令牌 {n_tok} 个 / 令牌版本 {n_tv} 个）"
+            qs.update(token_version=F("token_version") + 1)
+            msg = f"已强制 {n_users} 个用户下线（会话 {n_sess} 个 / 吊销令牌 {n_tok} 个）"
         elif action == "reset_2fa":
             n = TwoFactorSecret.objects.filter(user__in=qs).update(
                 enabled=False, confirmed_at=None, last_used_at=None
             )
             msg = f"已重置 {n} 个用户的两步验证（需重新绑定）"
         elif action == "assign_dept":
-            dept_id = request.data.get("department")
+            dept_id = as_int(request.data.get("department"), default=None, field="department") if request.data.get("department") else None
             dept = Department.objects.filter(pk=dept_id).first() if dept_id else None
             n = qs.update(department=dept)
             msg = f"已将 {n} 个用户调整到「{dept.path_name() if dept else '未分配部门'}」"
@@ -878,7 +1279,29 @@ class AssignRoleView(APIView):
         users = list(
             User.objects.filter(id__in=ser.validated_data["user_ids"]).prefetch_related("roles")
         )
-        roles = list(Role.objects.filter(id__in=ser.validated_data["role_ids"]))
+        roles = list(
+            Role.objects.filter(id__in=ser.validated_data["role_ids"]).prefetch_related("permissions")
+        )
+        # #22：管理员级角色（admin 编码 / data_scope=all / admin 模块权限点）仅超管可分配
+        if roles and not request.user.is_superuser and any(_is_admin_level_role(r) for r in roles):
+            return Response(
+                {"message": "仅超级管理员可分配管理员级角色"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        # #22：禁止自我提权——非超管给自己分配的角色权限不得超出自己已有权限
+        actor_codes = _actor_permission_codes(request.user)
+        if actor_codes is not None:
+            new_codes = {
+                code
+                for r in roles
+                for code in r.permissions.values_list("code", flat=True)
+                if code
+            }
+            if any(u.id == request.user.id for u in users) and (new_codes - actor_codes):
+                return Response(
+                    {"message": "不能为自己分配超出自身权限的角色"},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
         after = [r.code for r in roles]
         ip = get_client_ip(request)
         for u in users:
@@ -905,9 +1328,12 @@ class RoleListView(APIView):
             return Response({"message": "角色名与编码不能为空"}, status=status.HTTP_400_BAD_REQUEST)
         if Role.objects.filter(code=code).exists():
             return Response({"message": "角色编码已存在"}, status=status.HTTP_400_BAD_REQUEST)
+        scope = request.data.get("data_scope") or "self"
+        if scope == "all" and not request.user.is_superuser:
+            return Response({"message": "仅超级管理员可设置全局数据范围"}, status=status.HTTP_403_FORBIDDEN)
         role = Role.objects.create(
             name=name, code=code, description=request.data.get("description", ""),
-            data_scope=request.data.get("data_scope") or "self",
+            data_scope=scope,
         )
         tenant_id = request.data.get("tenant")
         if tenant_id:
@@ -937,12 +1363,21 @@ class RoleDetailView(APIView):
         role = self.get_object(pk)
         if not role:
             return Response({"message": "角色不存在"}, status=status.HTTP_404_NOT_FOUND)
+        if _is_admin_level_role(role) and not request.user.is_superuser:
+            return Response({"message": "仅超级管理员可修改管理员级角色"}, status=status.HTTP_403_FORBIDDEN)
+        permission_ids = request.data.get("permission_ids")
+        if isinstance(permission_ids, list) and not request.user.is_superuser:
+            if Permission.objects.filter(id__in=permission_ids, module="admin").exists():
+                return Response({"message": "仅超级管理员可分配管理模块权限点"}, status=status.HTTP_403_FORBIDDEN)
         if "name" in request.data:
             role.name = request.data["name"]
         if "description" in request.data:
             role.description = request.data["description"]
         if "data_scope" in request.data:
-            role.data_scope = request.data["data_scope"] or "self"
+            scope = request.data["data_scope"] or "self"
+            if scope == "all" and not request.user.is_superuser:
+                return Response({"message": "仅超级管理员可设置全局数据范围"}, status=status.HTTP_403_FORBIDDEN)
+            role.data_scope = scope
         if "tenant" in request.data:
             tenant_id = request.data.get("tenant")
             role.tenant = Tenant.objects.filter(pk=tenant_id).first() if tenant_id else None
@@ -1078,8 +1513,16 @@ class MyInviteCodesView(APIView):
         return Response({"list": InviteCodeSerializer(qs, many=True).data, "total": qs.count()})
 
     def post(self, request):
-        max_uses = as_int(request.data.get("max_uses"), default=1, field="max_uses", minimum=0)
-        expires_days = as_int(request.data.get("expires_days"), default=30, field="expires_days", minimum=0)
+        # #31：普通用户按角色配额限制（次数 ≤10、有效期 ≤30 天）；staff/超管不限
+        unlimited = request.user.is_staff or request.user.is_superuser
+        max_uses = as_int(
+            request.data.get("max_uses"), default=1, field="max_uses",
+            minimum=1, maximum=None if unlimited else 10,
+        )
+        expires_days = as_int(
+            request.data.get("expires_days"), default=30, field="expires_days",
+            minimum=0 if unlimited else 1, maximum=None if unlimited else 30,
+        )
         code = InviteCode.generate(request.user, max_uses=max_uses, expires_days=expires_days)
         return Response(InviteCodeSerializer(code).data, status=status.HTTP_201_CREATED)
 
@@ -1095,21 +1538,43 @@ class MySessionsView(APIView):
 
 
 class SessionRevokeView(APIView):
-    """吊销指定会话（踢下线）"""
+    """吊销指定会话（踢下线）
+
+    #11：黑名单只挡 refresh，access 在有效期内仍可用、WS 长连接也不会断。
+    因此吊销时同步 bump token_version——accounts.auth 的 tv 校验与
+    ws_app.middleware 的握手校验都以该字段为准，HTTP 与 WebSocket
+    两侧立即失效。
+    """
 
     def post(self, request, pk):
         sess = ActiveSession.objects.filter(pk=pk, user=request.user).first()
         if not sess:
             return Response({"message": "会话不存在"}, status=404)
         sess.is_revoked = True
-        sess.save(update_fields=["is_revoked"])
-        # 将 jti 加入 simplejwt 黑名单
+        sess.revoked_at = timezone.now()
+        sess.save(update_fields=["is_revoked", "revoked_at"])
+        # 将 refresh token 加入 simplejwt 黑名单（否则攻击者可用 refresh 续出新 access）
         try:
-            from rest_framework_simplejwt.tokens import BlacklistMixin
-            from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
-            OutstandingToken.objects.get_or_create(jti=sess.jti)
+            from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+
+            refresh_jti = getattr(sess, "refresh_jti", "") or ""
+            if refresh_jti:
+                ot = OutstandingToken.objects.filter(jti=refresh_jti).first()
+                if ot is not None:
+                    BlacklistedToken.objects.get_or_create(token=ot)
+            else:
+                # 老会话没有记录 refresh_jti：退化为吊销该用户全部 refresh
+                for ot in OutstandingToken.objects.filter(user_id=sess.user_id):
+                    BlacklistedToken.objects.get_or_create(token=ot)
         except Exception:
             logger.exception("B23：静默兜底已登记（accounts/views.py:1086 原为 pass）——review 是否应收窄异常类型")
+        # #11：token_version 单调递增，已签发的 access/PAT 立即失效（WS 握手同样被拒）。
+        # 注意：该字段是用户级而非会话级，踢任一台设备都会让全端重新登录。
+        try:
+            User.objects.filter(pk=request.user.pk).update(token_version=F("token_version") + 1)
+            request.user.token_version += 1
+        except Exception:
+            logger.exception("踢下线时 token_version 递增失败（user_id=%s）", request.user.pk)
         return Response({"message": "已踢出该设备"})
 
 
@@ -1275,7 +1740,16 @@ class TenantDetailView(APIView):
         if "remark" in request.data:
             tenant.remark = request.data["remark"]
         if "expire_at" in request.data:
-            tenant.expire_at = request.data["expire_at"] or None
+            # #48：直接把原始字符串塞给 DateTimeField 会在 save() 才抛 500；
+            # 统一用 as_datetime 解析（非法值 → 400），且不允许设置为过去时间。
+            raw_expire = request.data["expire_at"]
+            if raw_expire in (None, ""):
+                tenant.expire_at = None
+            else:
+                expire_at = as_datetime(raw_expire, field="expire_at")
+                if expire_at <= timezone.now():
+                    return Response({"message": "到期时间必须晚于当前时间"}, status=400)
+                tenant.expire_at = expire_at
         if "is_active" in request.data:
             tenant.is_active = parse_bool(request.data["is_active"], field="is_active")
         tenant.save()
@@ -1311,6 +1785,10 @@ def _guard(fn):
         except ValueError as exc:
             return Response({"ok": False, "error": str(exc), "code": 400}, status=400)
         except Exception as exc:  # noqa: BLE001 —— 结构化降级
+            # #7：非参数类异常一律不回显 str(exc)——它可能带出 ORM 字段名、
+            # 磁盘路径、SQL 片段等内部信息。调用方只拿到固定文案与错误码，
+            # 细节仅写日志 / 异常平台。
+            logger.exception("accounts 视图未预期异常（path=%s）", getattr(request, "path", ""))
             try:
                 from core.platform import record_exception
 
@@ -1318,7 +1796,7 @@ def _guard(fn):
             except Exception:
                 logger.exception("B23：静默兜底已登记（accounts/views.py:1293 原为 pass）——review 是否应收窄异常类型")
             return Response(
-                {"ok": False, "error": f"{type(exc).__name__}: {exc}", "code": 422},
+                {"ok": False, "error": "服务器处理异常，请稍后重试或联系管理员", "code": 422},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
@@ -1386,7 +1864,7 @@ def _cancel_deactivate(request):
 # ---------------- F615 TOTP 双因素 ----------------
 
 class TwoFactorView(APIView):
-    """GET 双因素状态（含可复制的 Base32 密钥与 otpauth 链接）"""
+    """GET 双因素状态。已启用后不再返回明文 secret / otpauth 链接（#21）。"""
 
     @_guard
     def get(self, request):
@@ -1395,14 +1873,18 @@ class TwoFactorView(APIView):
             # 按需生成，但保持未启用状态（用户点「绑定」时会写入）
             return Response({
                 "enabled": False, "configured": False, "secret": "", "otpauth_url": "",
+                "secret_available": False,
                 "digits": totp_lib.DIGITS, "period": totp_lib.PERIOD,
                 "algorithm": totp_lib.ALGORITHM, "last_used_at": None,
             })
+        # 启用后 secret 只允许在 setup 响应中返回一次；此后 GET 一律脱敏
+        secret_visible = not row.enabled
         return Response({
             "enabled": row.enabled,
             "configured": True,
-            "secret": row.secret,
-            "otpauth_url": totp_lib.otpauth_url(row.secret, request.user.username),
+            "secret": row.secret if secret_visible else "",
+            "otpauth_url": totp_lib.otpauth_url(row.secret, request.user.username) if secret_visible else "",
+            "secret_available": secret_visible,
             "digits": totp_lib.DIGITS,
             "period": totp_lib.PERIOD,
             "algorithm": totp_lib.ALGORITHM,
@@ -1413,10 +1895,26 @@ class TwoFactorView(APIView):
 
 
 class TwoFactorSetupView(APIView):
-    """POST 生成 / 重新生成密钥（尚未启用，需用验证码确认）"""
+    """POST 生成 / 重新生成密钥（尚未启用，需用验证码确认）
+
+    #21：已有密钥（重置）时必须提供账号密码；已启用的密钥重置还需有效 TOTP。
+    首次绑定（尚无密钥）不需要密码，保持现有前端「生成密钥并绑定」流程可用。
+    """
 
     @_guard
     def post(self, request):
+        row = TwoFactorSecret.objects.filter(user=request.user).first()
+        if row is not None:
+            password = str(request.data.get("password") or "")
+            if not password or not request.user.check_password(password):
+                return Response({"ok": False, "error": "重置两步验证需要输入正确的账号密码", "code": 1005}, status=400)
+            if row.enabled:
+                code = str(request.data.get("totp_code") or request.data.get("code") or "").strip()
+                if not _consume_totp(row, code):
+                    return Response(
+                        {"ok": False, "error": "重置已开启的两步验证需要当前验证码", "code": 1018},
+                        status=400,
+                    )
         secret = totp_lib.generate_secret()
         row, created = TwoFactorSecret.objects.update_or_create(
             user=request.user,
@@ -1425,14 +1923,19 @@ class TwoFactorSetupView(APIView):
         return Response({
             "message": "密钥已生成，请在验证器 App 中录入后提交验证码" if created else "密钥已重新生成，请重新录入验证器",
             "enabled": row.enabled,
+            "configured": True,
             "secret": row.secret,
             "otpauth_url": totp_lib.otpauth_url(row.secret, request.user.username),
+            "secret_available": True,
             "digits": totp_lib.DIGITS, "period": totp_lib.PERIOD,
         }, status=201 if created else 200)
 
 
 class TwoFactorVerifyView(APIView):
-    """POST {code} 校验并启用（enable）/ 校验并停用（disable）双因素"""
+    """POST {code} 校验并启用（enable）/ 校验并停用（disable）双因素
+
+    #21：关闭已启用的两步验证必须同时提供账号密码 + 当前 TOTP。
+    """
 
     @_guard
     def post(self, request):
@@ -1441,7 +1944,13 @@ class TwoFactorVerifyView(APIView):
         row = TwoFactorSecret.objects.filter(user=request.user).first()
         if row is None:
             return Response({"ok": False, "error": "请先生成密钥", "code": 400}, status=400)
-        if not totp_lib.verify(row.secret, code):
+        if mode == "disable":
+            password = str(request.data.get("password") or "")
+            if not row.enabled:
+                return Response({"ok": False, "error": "两步验证未开启", "code": 400}, status=400)
+            if not password or not request.user.check_password(password):
+                return Response({"ok": False, "error": "关闭两步验证需要输入正确的账号密码", "code": 1005}, status=400)
+        if not _consume_totp(row, code):
             return Response({"ok": False, "error": "验证码错误或已过期", "code": 1018}, status=400)
         now = timezone.now()
         if mode == "disable":
@@ -1511,7 +2020,14 @@ class SecurityScoreView(APIView):
 # ---------------- F617 个人公开主页 ----------------
 
 class PublicProfileView(APIView):
-    """GET /api/auth/profile/public/<username>/ 公开主页（免登录可读）"""
+    """GET /api/auth/profile/public/<username>/ 公开主页
+
+    #8 隐私分级（免登录不再能做人员画像）：
+    - 匿名：仅昵称 / 头像 / 简介等名片字段；
+    - 登录：追加关注关系、在线状态等社交字段；
+    - 登录且同组织（或本人 / staff）：才返回部门路径、角色名、注册时间、
+      徽章与内容/粉丝计数。
+    """
 
     permission_classes = [AllowAny]
 
@@ -1521,6 +2037,46 @@ class PublicProfileView(APIView):
         if target is None or not target.is_active or getattr(target, "is_disabled", False):
             return Response({"ok": False, "error": "用户不存在", "code": 404}, status=404)
         me = request.user if getattr(request.user, "is_authenticated", False) else None
+        payload = {
+            "username": target.username,
+            "nickname": target.nickname,
+            "display_name": target.display_name,
+            "avatar": target.avatar.url if target.avatar else "",
+            "bio": target.bio,
+            "profile_url": f"/u/{target.username}",
+        }
+        if me is None:
+            # 未登录：到此为止，不返回任何可用于画像的字段
+            return Response(payload)
+
+        is_following = None
+        if me.pk != target.pk:
+            is_following = UserFollow.objects.filter(follower=me, following=target).exists()
+        payload.update({
+            "tags": target.tags or [],
+            "is_following": is_following,
+            "is_self": bool(me.pk == target.pk),
+            "is_online": bool(
+                target.last_active_at
+                and (timezone.now() - target.last_active_at).total_seconds() < 300
+            ),
+            # 登录用户可见最近活跃时间（与用户名录口径一致）
+            "last_active_at": (
+                target.last_active_at.isoformat() if target.last_active_at else None
+            ),
+        })
+
+        # 同组织判定：本人 / staff / 双方租户一致（都为 None 视为单租户部署，
+        # 也算同一组织；只要一方有租户则必须完全一致）
+        same_org = (
+            me.pk == target.pk
+            or getattr(me, "is_staff", False)
+            or me.tenant_id == target.tenant_id
+        )
+        if not same_org:
+            payload["detail_hidden"] = True
+            return Response(payload)
+
         from files.models import FileMeta
         from notes.models import Note
 
@@ -1528,23 +2084,10 @@ class PublicProfileView(APIView):
             {"name": b.badge.name, "icon": b.badge.icon, "level": b.badge.level}
             for b in UserBadge.objects.filter(user=target).select_related("badge")[:20]
         ]
-        is_following = None
-        if me is not None and me.pk != target.pk:
-            is_following = UserFollow.objects.filter(follower=me, following=target).exists()
-        payload = {
-            "username": target.username,
-            "nickname": target.nickname,
-            "display_name": target.display_name,
-            "avatar": target.avatar.url if target.avatar else "",
-            "bio": target.bio,
-            "tags": target.tags or [],
+        payload.update({
             "department": target.department.path_name() if target.department_id else "",
             "role_names": list(target.roles.values_list("name", flat=True)),
             "date_joined": target.date_joined.isoformat() if target.date_joined else None,
-            "is_online": bool(
-                target.last_active_at
-                and (timezone.now() - target.last_active_at).total_seconds() < 300
-            ),
             "badges": badges,
             "stats": {
                 "notes": Note.objects.filter(owner=target).count(),
@@ -1553,14 +2096,8 @@ class PublicProfileView(APIView):
                 "following": UserFollow.objects.filter(follower=target).count(),
                 "invite_codes": InviteCode.objects.filter(owner=target).count(),
             },
-            "is_following": is_following,
-            "is_self": bool(me is not None and me.pk == target.pk),
-            "profile_url": f"/u/{target.username}",
-        }
-        if me is not None:  # 登录用户可见最近活跃时间（与用户名录口径一致）
-            payload["last_active_at"] = (
-                target.last_active_at.isoformat() if target.last_active_at else None
-            )
+            "detail_hidden": False,
+        })
         return Response(payload)
 
 
@@ -1745,7 +2282,48 @@ def _pat_item(t):
         "last_used_at": t.last_used_at.isoformat() if t.last_used_at else None,
         "revoked_at": t.revoked_at.isoformat() if t.revoked_at else None,
         "is_valid": t.is_valid,
+        # #414 作用域：空列表 = 全权（兼容升级前的旧令牌）
+        "scopes": [s.strip() for s in (getattr(t, "scopes", "") or "").split(",") if s.strip()],
+        "scopes_raw": getattr(t, "scopes", "") or "",
     }
+
+
+# #414 允许的作用域：read / write / * 与 <资源>:<read|write|*>
+def _normalize_pat_scopes(value) -> str:
+    """scopes 入参（字符串或数组）→ 规范化逗号串；空串表示全权"""
+    from core.middleware import SCOPE_RESOURCES
+
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        items = value.replace("，", ",").split(",")
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        raise ValidationError("scopes 必须是字符串或数组")
+    resources = set(SCOPE_RESOURCES.values()) | {"api"}
+    out = []
+    for raw in items:
+        token = str(raw or "").strip().lower()
+        if not token:
+            continue
+        if token in ("*", "read", "write"):
+            if token not in out:
+                out.append(token)
+            continue
+        resource, _, action = token.partition(":")
+        if not action or resource not in resources or action not in ("read", "write", "*"):
+            raise ValidationError(
+                f"scope 不合法：{token[:32]}（可用 read/write/* 或 <资源>:<read|write|*>）"
+            )
+        if token not in out:
+            out.append(token)
+    if len(out) > 20:
+        raise ValidationError("scopes 最多 20 个")
+    joined = ",".join(out)
+    if len(joined) > 200:
+        raise ValidationError("scopes 总长度不能超过 200")
+    return joined
 
 
 class PersonalTokenView(APIView):
@@ -1772,6 +2350,7 @@ class PersonalTokenView(APIView):
             raise ValueError("expires_days 必须是整数")
         if days < 0 or days > 3650:
             raise ValueError("有效期需在 0（长期）~3650 天之间")
+        scopes = _normalize_pat_scopes(request.data.get("scopes"))
         import hashlib
         import secrets as _secrets
 
@@ -1781,12 +2360,14 @@ class PersonalTokenView(APIView):
             user=request.user,
             name=name[:80],
             token_hash=token_hash,
+            token_version=request.user.token_version,
             prefix=raw[:12] + "…",
+            scopes=scopes,
             expires_at=(timezone.now() + timezone.timedelta(days=days)) if days else None,
         )
         OperationLog.objects.create(
             user=request.user, module="accounts", action="create", target="创建访问令牌",
-            detail=name[:80], ip=get_client_ip(request),
+            detail=f"{name[:60]} scopes={scopes or '*'}", ip=get_client_ip(request),
         )
         return Response({
             "message": "令牌创建成功，请立即复制保存（仅此一次可见）",
@@ -1815,8 +2396,50 @@ class PersonalTokenRevokeView(APIView):
         return Response({"message": "令牌已吊销", "token_info": _pat_item(obj)})
 
 
-# ---------------- F622 昵称变更历史 ----------------
+class PersonalTokenUsageView(APIView):
+    """#415 GET 单个令牌的按日调用量（?days=30，最多 365 天）"""
 
+    @_guard
+    def get(self, request, pk):
+        token = PersonalAccessToken.objects.filter(pk=pk, user=request.user).first()
+        if token is None:
+            return Response({"ok": False, "code": 404, "error": "令牌不存在"}, status=404)
+        try:
+            days = int(request.query_params.get("days") or 30)
+        except (TypeError, ValueError):
+            raise ValueError("days 必须是整数")
+        if days < 1 or days > 365:
+            raise ValueError("days 需在 1~365 之间")
+        today = timezone.localdate()
+        start_day = today - timezone.timedelta(days=days - 1)
+        rows = {
+            r.date: r
+            for r in ApiTokenUsage.objects.filter(token=token, date__gte=start_day)
+        }
+        series = []
+        for offset in range(days):
+            day = start_day + timezone.timedelta(days=offset)
+            row = rows.get(day)
+            series.append({
+                "date": day.isoformat(),
+                "count": row.count if row else 0,
+                "last_path": (row.last_path if row else "") or "",
+            })
+        total = sum(item["count"] for item in series)
+        peak = max(series, key=lambda x: x["count"]) if series else {"date": "", "count": 0}
+        return Response({
+            "token": _pat_item(token),
+            "days": days,
+            "start": start_day.isoformat(),
+            "end": today.isoformat(),
+            "total": total,
+            "avg": round(total / days, 1),
+            "peak": {"date": peak.get("date", ""), "count": peak.get("count", 0)},
+            "series": series,
+        })
+
+
+# ---------------- F622 昵称变更历史 ----------------
 class NicknameHistoryView(APIView):
     """GET 我的昵称变更历史"""
 
@@ -1858,6 +2481,9 @@ class AvatarHistoryView(APIView):
         row = AvatarHistory.objects.filter(pk=pk, user=request.user).first()
         if row is None or not row.image:
             raise ValueError("历史头像不存在")
+        # 先把目标记录提到最新，避免 snapshot 的「只留 10 张」把它清理掉
+        row.created_at = timezone.now()
+        row.save(update_fields=["created_at"])
         snapshot_avatar(request.user, note="切换头像前自动保存")
         request.user.avatar = row.image.name
         request.user.save(update_fields=["avatar"])
@@ -2055,12 +2681,20 @@ class DepartmentMoveView(APIView):
 
 
 class ActivityHeatmapView(APIView):
-    """F09 用户活跃热力图：按周×小时聚合登录/操作日志"""
+    """F09 用户活跃热力图：按周×小时聚合登录/操作日志
+
+    #106：原来把 90 天的 created_at 全量拉进 Python 再逐条 localtime 分桶，
+    数据量随日志线性增长（百万级日志 = 百万次 Python 循环 + 巨量内存）。
+    改为在 DB 内用 TruncDay + ExtractWeekDay/ExtractHour 聚合，只回 7×24 个桶。
+    """
 
     permission_classes = [IsAdminUser]
 
     def get(self, request):
         from datetime import timedelta
+
+        from django.db.models import Count
+        from django.db.models.functions import ExtractHour, ExtractWeekDay, TruncDay
 
         from core.models import OperationLog
 
@@ -2079,18 +2713,40 @@ class ActivityHeatmapView(APIView):
             except (TypeError, ValueError):
                 return Response({"message": "user 必须是整数"}, status=400)
             login, oper = login.filter(user_id=uid), oper.filter(user_id=uid)
+
+        # 分桶口径：一天（本地时区的自然日）× 星期 × 小时，聚合出 ≤ 天数×24 行
+        tz = timezone.get_current_timezone()
         weekday = [0] * 7
         hour = [0] * 24
         by_day = {}
         cells = {}
-        for ts in list(login.values_list("created_at", flat=True)) + \
-                list(oper.values_list("created_at", flat=True)):
-            local = timezone.localtime(ts)
-            weekday[local.weekday()] += 1
-            hour[local.hour] += 1
-            key = local.date().isoformat()
-            by_day[key] = by_day.get(key, 0) + 1
-            cells[(local.weekday(), local.hour)] = cells.get((local.weekday(), local.hour), 0) + 1
+        for qs in (login, oper):
+            rows = (
+                qs.annotate(
+                    _day=TruncDay("created_at"),
+                    _weekday=ExtractWeekDay("created_at", tzinfo=tz),
+                    _hour=ExtractHour("created_at", tzinfo=tz),
+                )
+                .values("_day", "_weekday", "_hour")
+                .annotate(_count=Count("id"))
+            )
+            for row in rows:
+                count = row["_count"] or 0
+                if not count:
+                    continue
+                day = row["_day"]
+                if day is not None:
+                    key = (day.date() if hasattr(day, "date") else day).isoformat()
+                    by_day[key] = by_day.get(key, 0) + count
+                wd, hr = row["_weekday"], row["_hour"]
+                if wd is None or hr is None:
+                    continue
+                # ExtractWeekDay 的返回口径是 Sunday=1 … Saturday=7，换算成「周一=0」
+                idx = (int(wd) + 5) % 7
+                hr = int(hr)
+                weekday[idx] += count
+                hour[hr] += count
+                cells[(idx, hr)] = cells.get((idx, hr), 0) + count
         return Response({
             "days": days,
             "total": sum(weekday),

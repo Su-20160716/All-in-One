@@ -14,6 +14,7 @@ urlpatterns = [
     path("profile/avatar/", views.AvatarView.as_view(), name="avatar"),
     path("profile/deactivate/", views.DeactivateSelfView.as_view(), name="deactivate-self"),
     path("profile/export/", views.DataExportView.as_view(), name="data-export"),
+    path("profile/export/count/", views.DataExportCountView.as_view(), name="data-export-count"),
     path("profile/login-history/", views.LoginHistoryView.as_view(), name="login-history"),
     path("profile/badges/", views.MyBadgesView.as_view(), name="my-badges"),
     path("profile/invites/", views.MyInviteCodesView.as_view(), name="my-invites"),
@@ -67,6 +68,9 @@ urlpatterns = [
     # F621 长期访问令牌 PAT
     path("profile/tokens/", views.PersonalTokenView.as_view(), name="pat-list"),
     path("profile/tokens/<int:pk>/", views.PersonalTokenRevokeView.as_view(), name="pat-revoke"),
+    # #415 令牌调用量（按日）
+    path("profile/tokens/<int:pk>/usage/", views.PersonalTokenUsageView.as_view(),
+         name="pat-usage"),
     # F622 昵称变更历史
     path("profile/nickname-history/", views.NicknameHistoryView.as_view(), name="nickname-history"),
     # F623 头像历史切换

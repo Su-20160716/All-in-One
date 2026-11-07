@@ -221,6 +221,12 @@ class LoginLog(models.Model):
         verbose_name = "登录历史"
         verbose_name_plural = "登录历史"
         ordering = ["-created_at"]
+        # #104：登录历史 / 活跃热力图恒按 created_at 倒序过滤（可选按 user 收敛），
+        # 原先无任何索引 → 全表扫 + 排序。两个索引分别覆盖「某用户的历史」与「全局近期」。
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="loginlog_user_created_idx"),
+            models.Index(fields=["-created_at"], name="loginlog_created_idx"),
+        ]
 
     def __str__(self):
         return f"{self.username} @ {self.created_at:%Y-%m-%d %H:%M}"
@@ -319,12 +325,15 @@ class ActiveSession(models.Model):
 
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="sessions", verbose_name="用户")
     jti = models.CharField(max_length=64, unique=True, verbose_name="Token ID")
+    refresh_jti = models.CharField(max_length=64, blank=True, default="", verbose_name="Refresh Token ID")
     ip = models.GenericIPAddressField(null=True, blank=True, verbose_name="IP")
     device = models.CharField(max_length=60, blank=True, verbose_name="设备")
     user_agent = models.CharField(max_length=300, blank=True, verbose_name="User-Agent")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="登录时间")
     last_seen = models.DateTimeField(auto_now=True, verbose_name="最后活跃")
     is_revoked = models.BooleanField(default=False, verbose_name="已吊销")
+    # #47：吊销时刻（改密 / 踢下线时与 is_revoked 一起写入，便于排查与展示）
+    revoked_at = models.DateTimeField(null=True, blank=True, verbose_name="吊销时间")
 
     class Meta:
         verbose_name = "活跃会话"
@@ -342,7 +351,12 @@ class ActiveSession(models.Model):
 class DeactivateRequest(models.Model):
     """F614 注销申请：7 天冷静期，期间可撤销，到期后账号被停用"""
 
-    STATUS_CHOICES = [("pending", "待执行"), ("cancelled", "已撤销"), ("done", "已执行")]
+    STATUS_CHOICES = [
+        ("pending", "待执行"),
+        ("running", "执行中"),  # #69：worker 抢占标记，多 worker 只有一个能处理
+        ("cancelled", "已撤销"),
+        ("done", "已执行"),
+    ]
     COOLDOWN_DAYS = 7
 
     user = models.ForeignKey(
@@ -382,6 +396,11 @@ class TwoFactorSecret(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
     confirmed_at = models.DateTimeField(null=True, blank=True, verbose_name="确认启用时间")
     last_used_at = models.DateTimeField(null=True, blank=True, verbose_name="最近校验时间")
+    # #5：最近一次成功校验所命中的时间步长（RFC 6238 counter）。校验成功即写入，
+    # 之后 counter ≤ 该值的验证码一律拒绝，堵住 ±1 窗口内的验证码重放。
+    last_used_counter = models.PositiveBigIntegerField(
+        null=True, blank=True, verbose_name="已用时间步长"
+    )
 
     class Meta:
         verbose_name = "双因素密钥"
@@ -421,7 +440,13 @@ class PersonalAccessToken(models.Model):
     )
     name = models.CharField(max_length=80, verbose_name="令牌名称")
     token_hash = models.CharField(max_length=64, unique=True, verbose_name="令牌 SHA256")
+    token_version = models.PositiveIntegerField(default=0, verbose_name="绑定的 token_version")
     prefix = models.CharField(max_length=20, blank=True, verbose_name="令牌前缀(展示用)")
+    # #414 作用域：逗号串，空 = 全权（兼容升级前签发的旧令牌）；
+    # 取值形如 "read" / "write" / "files:read" / "*"，映射表见 core.middleware.SCOPE_RESOURCES
+    scopes = models.CharField(
+        max_length=200, blank=True, default="", verbose_name="作用域(逗号分隔，空=全权)"
+    )
     expires_at = models.DateTimeField(null=True, blank=True, verbose_name="过期时间")
     last_used_at = models.DateTimeField(null=True, blank=True, verbose_name="最近使用")
     revoked_at = models.DateTimeField(null=True, blank=True, verbose_name="吊销时间")
@@ -444,6 +469,28 @@ class PersonalAccessToken(models.Model):
         if self.expires_at and tz.now() > self.expires_at:
             return False
         return True
+
+
+class ApiTokenUsage(models.Model):
+    """#415 PAT 调用量（按日累加，由 core.middleware.pat_authenticate 写入）"""
+
+    token = models.ForeignKey(
+        PersonalAccessToken, on_delete=models.CASCADE,
+        related_name="usage_rows", verbose_name="令牌",
+    )
+    date = models.DateField(verbose_name="日期")
+    count = models.PositiveIntegerField(default=0, verbose_name="调用次数")
+    last_path = models.CharField(max_length=200, blank=True, default="", verbose_name="最近路径")
+
+    class Meta:
+        verbose_name = "令牌调用量"
+        verbose_name_plural = "令牌调用量"
+        unique_together = [("token", "date")]
+        ordering = ["-date"]
+        indexes = [models.Index(fields=["token", "-date"], name="patusage_token_date_idx")]
+
+    def __str__(self):
+        return f"{self.token_id}@{self.date}={self.count}"
 
 
 class NicknameHistory(models.Model):

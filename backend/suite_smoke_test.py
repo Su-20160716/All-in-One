@@ -460,7 +460,12 @@ def test_dataintel(c):
 # =====================================================================
 
 
-def test_officesuite(c, peer):
+def test_officesuite(c, peer, boss):
+    """c=提交人/操作者，peer=同租户普通同事，boss=超管审批人。
+
+    自 S18 起审批链路禁止自批（#39/#41），且写权限按 owner 收口，
+    因此审批类接口必须由跨可见范围的审批人（boss）发起。
+    """
     print("\n【officesuite 办公套件】%d 接口" % OS_EXPECTED)
     r = c.get("/api/officesuite/catalog/")
     check("officesuite/catalog 目录", ok200(r) and r.data["data"]["endpoint_count"] == OS_EXPECTED)
@@ -489,14 +494,18 @@ def test_officesuite(c, peer):
     r = call(c, "POST", "/api/officesuite/approval/submit/", {"title": "采购显示器", "type": "purchase"})
     ap2 = r.data["data"]["id"]
     r = call(c, "POST", f"/api/officesuite/approval/{ap2}/reject/", {"reason": "预算不足"})
+    check("approval 降级：自批被拒（驳回）", r.status_code in (400, 403, 422))
+    r = call(boss, "POST", f"/api/officesuite/approval/{ap2}/reject/", {"reason": "预算不足"})
     check("approval/reject", ok200(r) and r.data["data"]["status"] == "rejected")
     r = call(c, "POST", "/api/officesuite/approval/submit/", {"title": "加班餐补"})
     ap3 = r.data["data"]["id"]
     r = call(c, "POST", f"/api/officesuite/approval/{ap3}/cancel/", {})
     check("approval/cancel", ok200(r))
     r = call(c, "POST", f"/api/officesuite/approval/{ap_id}/approve/", {"note": "同意"})
+    check("approval 降级：自批被拒（通过）", r.status_code in (400, 403, 422))
+    r = call(boss, "POST", f"/api/officesuite/approval/{ap_id}/approve/", {"note": "同意"})
     check("approval/approve", ok200(r) and r.data["data"]["status"] == "approved")
-    r = call(c, "POST", f"/api/officesuite/approval/{ap_id}/approve/", {"note": "再批一次"})
+    r = call(boss, "POST", f"/api/officesuite/approval/{ap_id}/approve/", {"note": "再批一次"})
     check("approval 降级：重复审批被拒", r.status_code in (400, 422))
 
     # ---- seal（6）----
@@ -630,6 +639,8 @@ def test_officesuite(c, peer):
     check("vehicle/book", ok200(r))
     vb_id = r.data["data"]["id"]
     r = call(c, "POST", f"/api/officesuite/vehicle/booking/{vb_id}/approve/", {"action": "approve"})
+    check("vehicle 降级：自批被拒", r.status_code in (400, 403, 422))
+    r = call(boss, "POST", f"/api/officesuite/vehicle/booking/{vb_id}/approve/", {"action": "approve"})
     check("vehicle/booking/approve", ok200(r))
     r = call(c, "GET", "/api/officesuite/vehicle/my-bookings/", {})
     check("vehicle/my-bookings", ok200(r))
@@ -705,7 +716,7 @@ def test_officesuite(c, peer):
     check("duty/week", ok200(r))
     r = call(c, "GET", "/api/officesuite/duty/my-shifts/")
     check("duty/my-shifts", ok200(r))
-    r2 = call(c, "POST", "/api/officesuite/duty/shift/add/", {"schedule_id": ds_id, "duty_date": "2026-09-21", "member_name": "test"})
+    r2 = call(c, "POST", "/api/officesuite/duty/shift/add/", {"schedule_id": ds_id, "duty_date": "2026-09-21", "member_name": PEER_NAME})
     r = call(c, "POST", f"/api/officesuite/duty/shift/{r2.data['data']['id']}/delete/", {})
     check("duty/shift/delete", ok200(r))
     r = call(c, "POST", f"/api/officesuite/duty/schedule/{ds_id}/delete/", {})
@@ -728,6 +739,8 @@ def test_officesuite(c, peer):
     r = call(c, "POST", f"/api/officesuite/timesheet/{ts_id}/update/", {"hours": 8})
     check("timesheet/update", ok200(r))
     r = call(c, "POST", f"/api/officesuite/timesheet/{ts_id}/approve/", {"action": "approve"})
+    check("timesheet 降级：自批被拒", r.status_code in (400, 403, 422))
+    r = call(boss, "POST", f"/api/officesuite/timesheet/{ts_id}/approve/", {"action": "approve"})
     check("timesheet/approve", ok200(r))
     r2 = call(c, "POST", "/api/officesuite/timesheet/create/", {"work_date": "2026-09-13", "hours": 2, "project_name": "删除测试"})
     r = call(c, "POST", f"/api/officesuite/timesheet/{r2.data['data']['id']}/delete/", {})
@@ -782,7 +795,7 @@ def test_officesuite(c, peer):
     r = call(c, "GET", "/api/officesuite/standup/today/")
     check("standup/today", ok200(r) and r.data["data"]["submitted_count"] >= 1)
     r = call(c, "POST", "/api/officesuite/standup/create/", {"yesterday": "重复提交测试"})
-    check("standup 深度：同日重复拒绝", r.status_code in (400, 422))
+    check("standup 深度：同日重复幂等", ok200(r) and r.data["data"].get("existing") is True)
     r = call(c, "GET", "/api/officesuite/standup/summary/")
     check("standup/summary", ok200(r))
     r = call(c, "GET", "/api/officesuite/standup/export/")
@@ -1057,7 +1070,7 @@ def test_officesuite(c, peer):
 
     # ---- 权限收口验证（跨用户）----
     r = call(peer, "POST", f"/api/officesuite/approval/{ap_id}/", {})
-    check("officesuite 深度：peer 可见已批准单", r.status_code == 200)
+    check("officesuite 深度：peer 不可见他人审批单", r.status_code in (400, 403, 404))
     r = call(peer, "POST", f"/api/officesuite/faq/999999/vote/", {})
     check("officesuite 降级：不存在对象 4xx", r.status_code in (400, 404, 422))
 
@@ -1065,22 +1078,37 @@ def test_officesuite(c, peer):
 def main():
     ts = int(time.time())
     c = APIClient()
-    r = c.post("/api/auth/register/", {"username": f"suite{ts}", "password": "test123"}, format="json")
+    r = c.post("/api/auth/register/", {"username": f"suite{ts}", "password": "test12345"}, format="json")
     if r.status_code not in (200, 201):
         print("注册失败", r.status_code, str(r.data)[:200])
         raise SystemExit(1)
     c = APIClient()
     c.credentials(HTTP_AUTHORIZATION=f"Bearer {r.data['access']}")
     global PEER_NAME
-    r2 = c.post("/api/auth/register/", {"username": f"peer{ts}", "password": "test123"}, format="json")
+    r2 = c.post("/api/auth/register/", {"username": f"peer{ts}", "password": "test12345"}, format="json")
     PEER_NAME = f"peer{ts}"
     peer = APIClient()
     peer.credentials(HTTP_AUTHORIZATION=f"Bearer {r2.data['access']}")
 
+    # 审批人：注册后提权为超管，用 force_authenticate（避免复登/密码策略干扰）。
+    # 审批链路要求「跨 owner 可见 + 写权限」，普通同事（self 范围）不再具备。
+    r3 = c.post("/api/auth/register/", {"username": f"boss{ts}", "password": "test12345"}, format="json")
+    if r3.status_code not in (200, 201):
+        print("审批人注册失败", r3.status_code, str(r3.data)[:200])
+        raise SystemExit(1)
+    from django.contrib.auth import get_user_model  # noqa: E402
+
+    boss_user = get_user_model().objects.get(username=f"boss{ts}")
+    boss_user.is_staff = True
+    boss_user.is_superuser = True
+    boss_user.save(update_fields=["is_staff", "is_superuser"])
+    boss = APIClient()
+    boss.force_authenticate(user=boss_user)
+
     t0 = time.time()
     test_devtools(c)
     test_dataintel(c)
-    test_officesuite(c, peer)
+    test_officesuite(c, peer, boss)
     cost = time.time() - t0
 
     print(f"\n========== v5 套件冒烟：通过 {len(passed)} / 失败 {len(failed)} ==========")

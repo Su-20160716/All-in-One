@@ -9,7 +9,12 @@ urlpatterns = [
     path("notifications/read/", views.NotificationMarkReadView.as_view(), name="notification-read"),
     path("notifications/unread-count/", views.NotificationUnreadCountView.as_view(), name="notification-unread-count"),
     path("notifications/delete/", views.NotificationDeleteView.as_view(), name="notification-delete"),
+    # #337 稍后提醒（默认 60 分钟，0 取消）
+    path("notifications/snooze/", views.NotificationSnoozeView.as_view(), name="notification-snooze"),
     path("notifications/settings/", views.NotificationSettingView.as_view(), name="notification-settings"),
+    # #339 Webhook 自检
+    path("notifications/settings/test-webhook/", views.NotificationTestWebhookView.as_view(),
+         name="notification-settings-test-webhook"),
     # 公告
     path("announcements/", views.AnnouncementListView.as_view(), name="announcement-list"),
     path("announcements/<int:pk>/", views.AnnouncementDetailView.as_view(), name="announcement-detail"),
@@ -42,6 +47,8 @@ urlpatterns = [
     path("admin/settings/", views.AdminSiteSettingView.as_view(), name="admin-settings"),
     # 健康检查
     path("health/", views.HealthView.as_view(), name="health"),
+    # #137 Prometheus 文本指标（仅 staff 或内网来源可读）
+    path("metrics/", views.MetricsView.as_view(), name="metrics"),
     # F03 通用导入导出
     path("io/<str:app>/export/", views.GenericExportView.as_view(), name="core-io-export"),
     path("io/<str:app>/import/", views.GenericImportView.as_view(), name="core-io-import"),
@@ -80,4 +87,27 @@ urlpatterns = [
     path("admin/broadcast/", views.AdminBroadcastView.as_view(), name="admin-broadcast"),
     # F642 关于页（版本 / 最近提交 / 运行时长，git 不可用时优雅降级）
     path("about/", views.AboutView.as_view(), name="about"),
+    # ---------------- S26 平台能力（411–420） ----------------
+    # #411 Webhook 事件订阅（GET/POST 列表，GET/PATCH/DELETE 详情）
+    path("webhooks/subscriptions/", views.WebhookSubscriptionListView.as_view(),
+         name="webhook-subscriptions"),
+    path("webhooks/subscriptions/<int:pk>/", views.WebhookSubscriptionDetailView.as_view(),
+         name="webhook-subscription-detail"),
+    # #412 投递记录 + 手动重试
+    path("webhooks/deliveries/", views.WebhookDeliveryListView.as_view(), name="webhook-deliveries"),
+    path("webhooks/deliveries/<int:pk>/retry/", views.WebhookDeliveryRetryView.as_view(),
+         name="webhook-delivery-retry"),
+    # #413 签名自测（生成签名头 / 校验签名 / 带签名投递）
+    path("webhooks/verify/", views.WebhookVerifyView.as_view(), name="webhook-verify"),
+    # #417 定时任务（命令白名单 + cron，外部 cron 调 due/ 驱动）
+    path("admin/schedules/", views.AdminScheduledJobListView.as_view(), name="admin-schedules"),
+    path("admin/schedules/due/", views.AdminScheduledJobDueView.as_view(), name="admin-schedules-due"),
+    path("admin/schedules/<int:pk>/", views.AdminScheduledJobDetailView.as_view(),
+         name="admin-schedule-detail"),
+    # #418 接口报表（按 app 前缀聚合）
+    path("admin/api-usage/", views.AdminApiUsageView.as_view(), name="admin-api-usage"),
+    # #419 错误码目录（反射 ERR_*）
+    path("errors/catalog/", views.ErrorCatalogView.as_view(), name="errors-catalog"),
+    # #420 开发者门户汇总
+    path("developer/summary/", views.DeveloperSummaryView.as_view(), name="developer-summary"),
 ]

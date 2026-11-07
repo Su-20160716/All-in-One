@@ -171,7 +171,7 @@ class DepartmentSerializer(serializers.ModelSerializer):
 
 
 class UserDirectorySerializer(serializers.ModelSerializer):
-    """用户名录（精简，全员可见）"""
+    """用户名录（精简，仅保留 @/拉人/聊天所需字段）"""
 
     display_name = serializers.CharField(read_only=True)
     role_names = serializers.SerializerMethodField()
@@ -180,10 +180,12 @@ class UserDirectorySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "username", "nickname", "display_name", "avatar", "bio", "tags", "role_names",
-                  "department_name", "last_active_at", "is_online"]
+        fields = ["id", "username", "nickname", "display_name", "avatar", "role_names",
+                  "department_name", "is_online"]
 
     def get_role_names(self, obj):
+        if _has_prefetch(obj, "roles"):
+            return [r.name for r in obj.roles.all()]
         return list(obj.roles.values_list("name", flat=True))
 
     def get_department_name(self, obj):

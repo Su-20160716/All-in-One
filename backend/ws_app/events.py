@@ -45,24 +45,26 @@ def notify_chat_message(session_id: int, payload: dict):
     send_to_session(session_id, {"type": "chat.message", "data": payload})
 
 
-def _session_member_ids(session_id: int):
-    """惰性导入，避免循环依赖"""
-    from im.models import ChatSession
-
-    session = ChatSession.objects.filter(pk=session_id).first()
-    return list(session.members.values_list("id", flat=True)) if session else []
-
-
 def send_to_session(session_id: int, event: dict):
-    """向会话全体成员的个人频道投递事件（event 形如 {"type": "chat.message", "data": {...}}）"""
+    """向会话组广播事件（event 形如 {"type": "chat.message", "data": {...}}）
+
+    NotifyConsumer 连接时会加入其所有会话组，因此这里一次 group_send 即可
+    覆盖全体在线成员；离线/刚入群尚未重连的成员由前端拉取兜底。
+    """
+    from asgiref.sync import async_to_sync
+    from channels.layers import get_channel_layer
+
     event_type = str(event.get("type") or "")
     handler = event_type.replace(".", "_")
     if handler not in _KNOWN_HANDLERS:
         logger.warning("send_to_session 收到未注册事件类型 %r，已跳过（session=%s）", event_type, session_id)
         return
-    for uid in _session_member_ids(session_id):
-        # type 中的点号对应 consumer handler 名（点→下划线）
-        push_to_user(uid, handler, event.get("data", {}))
+    layer = get_channel_layer()
+    if not layer:
+        return
+    async_to_sync(layer.group_send)(
+        f"session_{session_id}", {"type": handler, "data": event.get("data", {})}
+    )
 
 
 def broadcast_session(session_id: int, event: dict):

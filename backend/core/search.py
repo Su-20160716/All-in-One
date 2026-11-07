@@ -268,13 +268,26 @@ def index_document(module: str, object_id: int, owner_id, title: str, body: str,
             "length": max(total, 1),
         },
     )
-    doc.terms.all().delete()
-    rows = [
-        SearchTerm(doc=doc, term=term[:64], freq=freq, in_title=term in title_terms)
-        for term, freq in merged.items()
-    ]
-    if rows:
-        SearchTerm.objects.bulk_create(rows, batch_size=2000)
+    # 只同步变化的词项：删掉已消失的、更新频次变化的、补新增的。
+    # 长文动辄数千词条，全删全建会造成大量无谓写入。
+    existing = {t.term: t for t in doc.terms.all()}
+    stale_ids = [t.id for term, t in existing.items() if term not in merged]
+    if stale_ids:
+        SearchTerm.objects.filter(id__in=stale_ids).delete()
+    to_create, to_update = [], []
+    for term, freq in merged.items():
+        row = existing.get(term)
+        in_title = term in title_terms
+        if row is None:
+            to_create.append(SearchTerm(doc=doc, term=term[:64], freq=freq, in_title=in_title))
+        elif row.freq != freq or row.in_title != in_title:
+            row.freq = freq
+            row.in_title = in_title
+            to_update.append(row)
+    if to_create:
+        SearchTerm.objects.bulk_create(to_create, batch_size=2000)
+    if to_update:
+        SearchTerm.objects.bulk_update(to_update, ["freq", "in_title"], batch_size=2000)
     return doc
 
 

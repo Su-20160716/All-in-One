@@ -23,7 +23,7 @@ def check(name, cond, extra=""):
     print(("  ✓ " if cond else "  ✗ ") + name + ("" if cond else f"  {extra}"))
 
 
-def register(client, username, password="test123", **extra):
+def register(client, username, password="test12345", **extra):
     return client.post("/api/auth/register/", {"username": username, "password": password, **extra}, format="json")
 
 

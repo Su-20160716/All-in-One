@@ -114,8 +114,13 @@ def should_record_exception(exc) -> bool:
     return type(exc).__name__ not in _SKIP_EXC_NAMES
 
 
-def record_exception(exc, path: str = "", extra: str = "") -> bool:
-    """按签名聚合一条异常（类型 + 规范化消息 + 出错位置）。失败静默。"""
+def record_exception(exc, path: str = "", extra: str = "", user_id=None, request_id=None) -> bool:
+    """按签名聚合一条异常（类型 + 规范化消息 + 出错位置）。失败静默。
+
+    #135：新增 ``user_id`` / ``request_id``，用于定位受影响用户与调用链。
+    两者**不进签名**（进了就会按用户/请求把同一异常打散，失去聚合意义），
+    而是写到样本尾部 ``[ctx] ...`` 并随日志输出；异常列表/CSV 里可直接看到。
+    """
     try:
         if not should_record_exception(exc):
             return False
@@ -123,6 +128,9 @@ def record_exception(exc, path: str = "", extra: str = "") -> bool:
 
         etype = type(exc).__name__
         message = _MSG_NOISE.sub("N", str(exc))[:400].strip()
+        ctx = ""
+        if user_id or request_id:
+            ctx = f"\n[ctx] user_id={user_id or '-'} request_id={request_id or '-'}"
         location = ""
         tb = getattr(exc, "__traceback__", None)
         if tb is not None:
@@ -142,9 +150,10 @@ def record_exception(exc, path: str = "", extra: str = "") -> bool:
             sample = _tb.format_exc()
             if not sample or sample.strip() == "NoneType: None":
                 sample = f"{etype}: {message}"
-            sample = sample[-3000:]
+            sample = sample[-2900:]
         except Exception:
             sample = f"{etype}: {exc}"
+        sample = f"{sample}{ctx}"
         obj, created = ExceptionRecord.objects.get_or_create(
             signature=signature,
             defaults={
@@ -159,7 +168,14 @@ def record_exception(exc, path: str = "", extra: str = "") -> bool:
             updates = {"count": obj.count + 1, "last_at": timezone.now()}
             if path:
                 updates["path"] = path[:200]
+            # #135：把最新的用户/请求上下文补进样本尾部（去重后追加，长度有界）
+            if ctx and ctx not in (obj.sample or ""):
+                updates["sample"] = f"{(obj.sample or '')[-2900:]}{ctx}"
             ExceptionRecord.objects.filter(pk=obj.pk).update(**updates)
+        if user_id or request_id:
+            logger.warning(
+                "异常聚合：%s path=%s user_id=%s request_id=%s", etype, path, user_id or "-", request_id or "-"
+            )
         return True
     except Exception:
         return False
@@ -168,7 +184,19 @@ def record_exception(exc, path: str = "", extra: str = "") -> bool:
 # ---------------------------------------------------------------------------
 # 后端健康卡（F627）
 # ---------------------------------------------------------------------------
-def _dir_size(path, file_limit: int = 60000):
+# #102：健康卡结果缓存 5 分钟（磁盘遍历 + 迁移查询都不便宜），
+# 单次 media 遍历上限同时从 60000 降到 5000 个文件
+HEALTH_CARD_TTL = 300
+HEALTH_CARD_MEDIA_FILE_LIMIT = 5000
+_HEALTH_CARD_CACHE_KEY = "core:health-card:v2"
+
+
+def uptime_seconds() -> int:
+    """进程运行秒数（metrics / 关于页共用）"""
+    return int(max(0.0, time.time() - _BOOT_AT))
+
+
+def _dir_size(path, file_limit: int = HEALTH_CARD_MEDIA_FILE_LIMIT):
     total, n, truncated = 0, 0, False
     p = Path(path)
     if not p.exists():
@@ -193,8 +221,38 @@ def human_size(num: float) -> str:
     return f"{num:.1f} TB"
 
 
-def health_card() -> dict:
-    """DB / 表数 / 最新迁移 / 存储占用 健康卡"""
+def health_card(force: bool = False) -> dict:
+    """DB / 表数 / 最新迁移 / 存储占用 健康卡（#102：结果缓存 5 分钟）
+
+    ``force=True`` 绕过缓存重新体检（管理端「刷新」用）。
+    """
+    if not force:
+        try:
+            from django.core.cache import cache
+
+            cached = cache.get(_HEALTH_CARD_CACHE_KEY)
+            if isinstance(cached, dict):
+                out = dict(cached)
+                out["cached"] = True
+                out["cache_ttl_seconds"] = HEALTH_CARD_TTL
+                return out
+        except Exception:
+            pass
+    data = _health_card_uncached()
+    try:
+        from django.core.cache import cache
+
+        cache.set(_HEALTH_CARD_CACHE_KEY, data, HEALTH_CARD_TTL)
+    except Exception:
+        pass
+    out = dict(data)
+    out["cached"] = False
+    out["cache_ttl_seconds"] = HEALTH_CARD_TTL
+    return out
+
+
+def _health_card_uncached() -> dict:
+    """真实体检（不缓存）；任何探测失败只降级不抛异常"""
     out = {
         "status": "ok",
         "checked_at": timezone.now().isoformat(),
@@ -248,12 +306,15 @@ def health_card() -> dict:
     try:
         db_name = str(settings.DATABASES.get("default", {}).get("NAME", ""))
         db_bytes = os.path.getsize(db_name) if db_name and os.path.exists(db_name) else 0
-        media_bytes, _n, _trunc = _dir_size(settings.MEDIA_ROOT)
+        media_bytes, media_files, media_trunc = _dir_size(settings.MEDIA_ROOT)
         out["storage"] = {
             "db_bytes": db_bytes,
             "db_text": human_size(db_bytes),
             "media_bytes": media_bytes,
             "media_text": human_size(media_bytes),
+            "media_files": media_files,
+            "media_truncated": media_trunc,
+            "file_limit": HEALTH_CARD_MEDIA_FILE_LIMIT,
             "total_bytes": db_bytes + media_bytes,
             "total_text": human_size(db_bytes + media_bytes),
         }
@@ -685,3 +746,111 @@ def slow_endpoints(limit: int = 10) -> dict:
         "list": rows[:limit], "total": len(rows), "threshold_ms": SLOW_MS,
         "tracked_paths": len(rows),
     }
+
+
+# ---------------------------------------------------------------------------
+# #417 定时任务：5 段 cron 的最小实现（分 时 日 月 周）
+#
+# 支持 ``*`` / ``*/n`` / ``a`` / ``a-b`` / ``a-b/n`` / 逗号列表；周字段 0 与 7 都表示
+# 周日。不引入第三方 cron 库：调度语义只用于「当前分钟是否到期」，由外部 cron
+# 每分钟调 `/api/core/admin/schedules/due/` 驱动。
+# ---------------------------------------------------------------------------
+CRON_FIELD_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+CRON_MAX_HORIZON_MINUTES = 8 * 24 * 60  # 下次执行时间最多向后看 8 天
+
+
+def _cron_values(expr: str, lo: int, hi: int) -> set:
+    values = set()
+    for part in str(expr or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        step = 1
+        if "/" in part:
+            part, _, step_text = part.partition("/")
+            step = int(step_text)
+            if step <= 0:
+                raise ValueError("cron 步长必须为正整数")
+        if part in ("*", "?"):
+            start, end = lo, hi
+        elif "-" in part.lstrip("-"):
+            left, _, right = part.partition("-")
+            start, end = int(left), int(right)
+        else:
+            start = end = int(part)
+        if start < lo or end > hi or start > end:
+            raise ValueError(f"cron 字段 {part} 超出范围 {lo}-{hi}")
+        values.update(range(start, end + 1, step))
+    if not values:
+        raise ValueError("cron 字段为空")
+    return values
+
+
+def parse_cron(expr: str):
+    """解析 5 段 cron，返回 (分, 时, 日, 月, 周) 的取值集合；非法表达式抛 ValueError"""
+    parts = str(expr or "").split()
+    if len(parts) != 5:
+        raise ValueError("cron 表达式需要 5 段：分 时 日 月 周")
+    parsed = []
+    for raw, (lo, hi) in zip(parts, CRON_FIELD_RANGES):
+        parsed.append(_cron_values(raw, lo, hi))
+    weekdays = parsed[4]
+    if 7 in weekdays:  # 兼容 7=周日
+        weekdays.discard(7)
+        weekdays.add(0)
+    return tuple(parsed), parts
+
+
+def cron_matches(expr: str, when) -> bool:
+    """判断某时刻（到分钟）是否命中 cron；表达式非法一律返回 False"""
+    try:
+        parsed, parts = parse_cron(expr)
+    except (ValueError, TypeError):
+        return False
+    return _cron_match_parsed(parsed, parts, when)
+
+
+def _cron_match_parsed(parsed, parts, when) -> bool:
+    """已解析表达式的匹配（next_cron_time 复用，避免逐分钟重复解析）"""
+    minutes, hours, days, months, weekdays = parsed
+    if when.minute not in minutes or when.hour not in hours or when.month not in months:
+        return False
+    day_ok = when.day in days
+    dow_ok = (when.isoweekday() % 7) in weekdays
+    # 标准 cron 语义：日与周都受限时取「或」，否则取「与」
+    day_star = parts[2] in ("*", "?")
+    dow_star = parts[4] in ("*", "?")
+    if day_star or dow_star:
+        return day_ok and dow_ok
+    return day_ok or dow_ok
+
+
+def next_cron_time(expr: str, after) -> str:
+    """下次执行时间（ISO 字符串）；8 天内无匹配或表达式非法返回空串"""
+    try:
+        parsed, parts = parse_cron(expr)
+    except (ValueError, TypeError):
+        return ""
+    moment = (after + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    for _ in range(CRON_MAX_HORIZON_MINUTES):
+        if _cron_match_parsed(parsed, parts, moment):
+            return moment.isoformat()
+        moment += timedelta(minutes=1)
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# #418 接口报表：路径 → 应用前缀（/api/<app>/...；/api/auth/ 归 accounts）
+# ---------------------------------------------------------------------------
+APP_ALIASES = {"auth": "accounts"}
+
+
+def app_from_path(path: str) -> str:
+    parts = [p for p in (path or "").split("?")[0].strip("/").split("/") if p]
+    if len(parts) >= 2 and parts[0] == "api":
+        app = parts[1]
+    elif parts:
+        app = parts[0]
+    else:
+        return "root"
+    return APP_ALIASES.get(app, app)
