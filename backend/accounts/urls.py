@@ -65,6 +65,8 @@ urlpatterns = [
     path("profile/onboarding/", views.OnboardingView.as_view(), name="onboarding"),
     # F620 时区与周起始日偏好
     path("profile/preferences/", views.PreferenceView.as_view(), name="preferences"),
+    # #37 WS 一次性 ticket 签发（替代 ?token= 握手）
+    path("ws-ticket/", views.WsTicketView.as_view(), name="ws-ticket"),
     # F621 长期访问令牌 PAT
     path("profile/tokens/", views.PersonalTokenView.as_view(), name="pat-list"),
     path("profile/tokens/<int:pk>/", views.PersonalTokenRevokeView.as_view(), name="pat-revoke"),

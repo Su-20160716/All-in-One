@@ -5,7 +5,7 @@
       <span class="mt-0.5 text-[18px]">📢</span>
       <div class="min-w-0 flex-1">
         <div class="flex flex-wrap items-center gap-2">
-          <span class="tag bg-amber-100 text-amber-700">{{ banner.level || '公告' }}</span>
+          <span class="tag bg-amber-100 text-amber-700">{{ bannerLevelLabel }}</span>
           <RouterLink to="/announcements" class="truncate text-[14px] font-semibold text-ink-800 hover:text-brand-600">
             {{ banner.title }}
           </RouterLink>
@@ -49,7 +49,7 @@
               : { to: q.url }"
             class="btn-outline text-[12px]"
           >
-            <span v-if="pickingFor !== qi" class="cursor-pointer" @click.prevent.stop="openEmojiPicker(qi)">
+            <span v-if="pickingFor !== qi" :class="editingQuick ? 'cursor-pointer' : ''" @click="onIconTap(qi, $event)">
               {{ q.icon || '🔗' }}
             </span>
             <select v-else class="mr-1 max-w-[64px] cursor-pointer border-0 bg-transparent text-[12px] outline-none"
@@ -277,10 +277,10 @@
             <div class="text-[12px] text-ink-500">未读消息</div>
             <div class="mt-1 text-[24px] font-bold text-brand-600">{{ todo.unread_messages ?? 0 }}</div>
           </RouterLink>
-          <div class="card p-4">
+          <RouterLink to="/projects/my-tasks" class="card p-4 hover:shadow-pop">
             <div class="text-[12px] text-ink-500">本周到期</div>
             <div class="mt-1 text-[24px] font-bold text-ink-900">{{ todo.week ?? 0 }}</div>
-          </div>
+          </RouterLink>
           <div v-if="cardErrors.todo" class="col-span-full flex items-center gap-2 rounded-control bg-rose-50 px-2 py-1 text-[11px] text-rose-600">
             <span class="min-w-0 flex-1 truncate">{{ cardErrors.todo }}</span>
             <button class="shrink-0 font-medium" @click="loadTodo">重试</button>
@@ -861,6 +861,9 @@ function clearCardError(key) {
 
 // ---------------- F665 首页公告横幅 ----------------
 const banner = ref(null)
+// 后端级别是英文枚举（info/important/urgent），界面统一中文
+const BANNER_LEVEL_LABELS = { info: '公告', important: '重要', urgent: '紧急' }
+const bannerLevelLabel = computed(() => BANNER_LEVEL_LABELS[banner.value?.level] || '公告')
 async function loadBanner() {
   try {
     const r = await coreApi.announcements()
@@ -1257,8 +1260,14 @@ const EMOJIS = ['📁', '📝', '📋', '💬', '🔍', '🏠', '📊', '🗓️
                 '🌐', '✨', '🧹', '📚', '🎵', '🎨', '📅', '✅', '❤️', '⭐',
                 '🔥', '💡', '🚀', '📌', '📈', '📉', '🗂️', '🗃️', '🕒', '🎯']
 const pickingFor = ref(null)
+// 仅编辑模式下点图标才弹 emoji 选择器；平时点图标照常跳转链接
+function onIconTap(qi, e) {
+  if (!editingQuick.value) return
+  e.preventDefault()
+  e.stopPropagation()
+  openEmojiPicker(qi)
+}
 function openEmojiPicker(target) {
-  if (!editingQuick.value && target !== 'new') editingQuick.value = true
   pickingFor.value = pickingFor.value === target ? null : target
 }
 function setIcon(target, emoji) {

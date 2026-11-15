@@ -479,7 +479,7 @@
       </div>
       <div v-if="(follows.list || []).length" class="mt-2 space-y-1.5">
         <div v-for="f in follows.list" :key="f.id" class="flex items-center gap-2 rounded-control border border-ink-100 px-3 py-1.5">
-          <img v-if="f.avatar" :src="f.avatar" class="h-7 w-7 rounded-full object-cover" />
+          <img v-if="f.avatar" :src="f.avatar" loading="lazy" decoding="async" class="h-7 w-7 rounded-full object-cover" />
           <div v-else class="grid h-7 w-7 place-items-center rounded-full bg-brand-100 text-[11px] font-bold text-brand-700">{{ f.display_name.slice(0, 1) }}</div>
           <span class="text-[13px]">{{ f.display_name }}</span>
           <span class="text-[11px] text-ink-400">@{{ f.username }}</span>
@@ -609,7 +609,7 @@
       </div>
       <div class="mt-3 space-y-1.5">
         <div v-for="c in contacts" :key="c.id" class="flex items-center gap-2 rounded-control border border-ink-100 px-3 py-1.5">
-          <img v-if="c.avatar" :src="c.avatar" class="h-7 w-7 rounded-full object-cover" />
+          <img v-if="c.avatar" :src="c.avatar" loading="lazy" decoding="async" class="h-7 w-7 rounded-full object-cover" />
           <div v-else class="grid h-7 w-7 place-items-center rounded-full bg-indigo-100 text-[11px] font-bold text-indigo-700">{{ c.alias.slice(0, 1) }}</div>
           <span class="text-[13px]">{{ c.alias }}</span>
           <span class="text-[11px] text-ink-400">@{{ c.username }}（{{ c.display_name }}）</span>

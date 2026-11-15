@@ -21,7 +21,9 @@ class CodeF669F680Tests(TestCase):
         # 直接签发 JWT（accounts 的 TwoFactorSecret 缺迁移，走 /api/auth/login/ 会在测试库 500）
         from rest_framework_simplejwt.tokens import RefreshToken
         self.c = Client()
-        self.token = str(RefreshToken.for_user(self.user).access_token)
+        token = RefreshToken.for_user(self.user).access_token
+        token["tv"] = self.user.token_version
+        self.token = str(token)
 
     def api(self, method, path, data=None):
         h = {"HTTP_AUTHORIZATION": f"Bearer {self.token}"}

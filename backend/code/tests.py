@@ -925,7 +925,7 @@ class CodeV6Tests(TestCase):
         token = self.js(r)["data"]["token"]
 
         anon = Client()
-        r = anon.get(f"/api/share/code/{token}/")
+        r = anon.get(f"/share/code/{token}/")
         self.assertEqual(r.status_code, 200)
         d = json.loads(r.content.decode())["data"]
         self.assertIn("public", d["code"])
@@ -935,7 +935,7 @@ class CodeV6Tests(TestCase):
 
     def test_d2_public_share_bad_token(self):
         anon = Client()
-        r = anon.get("/api/share/code/totallyinvalidtoken999/")
+        r = anon.get("/share/code/totallyinvalidtoken999/")
         self.assertEqual(r.status_code, 404)
 
     def test_d3_share_requires_target(self):
@@ -948,8 +948,8 @@ class CodeV6Tests(TestCase):
         r = self.api("post", "/api/code/shares/create/", {"file": f["id"]})
         token = self.js(r)["data"]["token"]
         anon = Client()
-        anon.get(f"/api/share/code/{token}/")
-        anon.get(f"/api/share/code/{token}/")
+        anon.get(f"/share/code/{token}/")
+        anon.get(f"/share/code/{token}/")
         items = self.js(self.api("get", "/api/code/shares/"))["data"]["items"]
         hit = next(x for x in items if x["token"] == token)
         self.assertEqual(hit["view_count"], 2)
@@ -1035,9 +1035,11 @@ class CodeV6Tests(TestCase):
         """代码文件保存后应自动进入全文索引。"""
         from core.search import search
         ws = self.mkws()
-        self.mkfile(ws["id"], "indexme.py", "def unique_marker_fn_zzz():\n    return 'xyzzy_marker'\n")
-        res = search("xyzzy_marker", user=self.user, kinds=["code"], limit=10)
-        items = res.get("items") if isinstance(res, dict) else res
+        # 索引写入挂在 transaction.on_commit，TestCase 内需显式触发
+        with self.captureOnCommitCallbacks(execute=True):
+            self.mkfile(ws["id"], "indexme.py", "def unique_marker_fn_zzz():\n    return 'xyzzy_marker'\n")
+        res = search("xyzzy_marker", owner_ids=[self.user.id], modules=["code"], limit=10)
+        items = res.get("results") if isinstance(res, dict) else res
         self.assertTrue(items, f"代码文件未进入全文索引: {res}")
 
     def test_f4_limits_probe_cached(self):

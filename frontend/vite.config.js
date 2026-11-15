@@ -7,6 +7,23 @@ export default defineConfig({
   define: {
     __APP_BUILD__: JSON.stringify(process.env.VITE_BUILD_ID || String(Date.now())),
   },
+  build: {
+    // 单 chunk 超过 600KB 时才提示（CodeMirror 语言包天然较大）
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        // 手动分包：只把「几乎每个路由都要用、且版本极少变」的框架依赖拆成
+        // 独立 vendor chunk，发版时浏览器可复用其 hash 缓存。
+        // 注意：CodeMirror / marked / yjs 刻意不在这里合并 —— 它们由路由
+        // 动态 import 天然切分，强行归并会把按需加载的语言包变成 1MB 大包。
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return
+          if (id.includes('/vue/') || id.includes('vue-router') || id.includes('pinia')) return 'vendor-vue'
+          if (id.includes('axios')) return 'vendor-axios'
+        },
+      },
+    },
+  },
   server: {
     host: '0.0.0.0',
     port: 5173,

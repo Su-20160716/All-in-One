@@ -25,7 +25,9 @@ class OfficeF681F692Tests(TestCase):
         # 直接签发 JWT（accounts 的 TwoFactorSecret 缺迁移，走登录接口会在测试库 500）
         from rest_framework_simplejwt.tokens import RefreshToken
         user = User.objects.get(username=username)
-        return str(RefreshToken.for_user(user).access_token)
+        token = RefreshToken.for_user(user).access_token
+        token["tv"] = user.token_version
+        return str(token)
 
     def api(self, method, path, data=None, token=None):
         h = {"HTTP_AUTHORIZATION": f"Bearer {token or self.token}"}
@@ -189,6 +191,9 @@ class OfficeF681F692Tests(TestCase):
 
     # ---------- F685 工单轮询自动分配 ----------
     def test_ticket_auto_assign(self):
+        # 批量改派属于管理动作，需管理员身份
+        self.user.is_staff = True
+        self.user.save(update_fields=["is_staff"])
         r = self.api("post", "/api/officesuite/ticket/create/", {"title": "账号锁定"})
         self.assertEqual(r.status_code, 200, r.content[:300])
         r = self.api("post", "/api/officesuite/ticket/auto-assign/",
@@ -316,6 +321,10 @@ class OfficeF681F692Tests(TestCase):
         self.assertEqual(d["rate"], 0.0)
 
         line_no = d["action_items"][0]["line_no"]
+        # GET 只做提取不落库，标记完成前先同步到 data.action_items
+        r = self.api("post", f"/api/officesuite/minutes/{mid}/action-items/sync/",
+                     {"action_items": d["action_items"]})
+        self.assertEqual(r.status_code, 200, r.content[:300])
         r = self.api("post", f"/api/officesuite/minutes/{mid}/action-items/toggle/",
                      {"line_no": line_no})
         d = self.js(r)["data"]

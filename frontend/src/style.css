@@ -16,13 +16,18 @@
   --color-ink-700: #334155;
   --color-ink-800: #1e293b;
   --color-ink-900: #0f172a;
-  /* 圆角角色：只有可点的东西才是圆的 */
-  --radius-control: 6px;
-  --radius-card: 10px;
+  /* 圆角角色：iPadOS 液态玻璃风格的大连续圆角尺度 */
+  --radius-control: 10px;
+  --radius-card: 18px;
   --radius-pill: 9999px;
-  --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-pop: 0 10px 30px rgba(15, 23, 42, 0.14);
-  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  /* 分层软阴影：低透明度 + 大模糊半径，模拟自然光 */
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 20px -6px rgba(15, 23, 42, 0.07);
+  --shadow-pop: 0 4px 12px -4px rgba(15, 23, 42, 0.10), 0 24px 56px -12px rgba(15, 23, 42, 0.20);
+  /* Apple 弹性缓动：起步快、收尾丝滑 */
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+  /* 液态玻璃回弹：轻微过冲，用于弹窗/浮层「落下回弹」瞬间 */
+  --ease-liquid: cubic-bezier(0.34, 1.35, 0.64, 1);
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro SC", "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
 }
 
@@ -107,10 +112,51 @@
 
 /* Tailwind 4：被 @apply 复用的基类必须用 @utility 定义（v3 的 components layer 类不再可被 @apply） */
 @utility btn {
-  @apply inline-flex items-center justify-center gap-1.5 rounded-control px-3 py-1.5 text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  @apply inline-flex items-center justify-center gap-1.5 rounded-control px-3 py-1.5 text-[13px] font-medium disabled:opacity-50 disabled:cursor-not-allowed;
+  transition: all 0.18s var(--ease-spring, cubic-bezier(0.32, 0.72, 0, 1));
 }
 @utility tag {
   @apply inline-flex items-center rounded-pill bg-ink-100 px-2 py-0.5 text-[11px] text-ink-600;
+}
+/* 液态玻璃浮层：下拉菜单 / 通知面板 / 弹窗等叠层专用。
+   iPadOS Liquid Glass 配方 = 高通透底色 + 强模糊高饱和 + 上亮下暗的折射边缘高光
+   + ::before 镜面光泽 streak（斜向掠过表面的柔和高光带）。
+   注意：backdrop-filter 会让后代 fixed 定位失效，只用于无 fixed 后代的浮层。 */
+@utility glass-panel {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.72) 0%, rgba(255, 255, 255, 0.58) 100%);
+  backdrop-filter: blur(30px) saturate(1.9);
+  -webkit-backdrop-filter: blur(30px) saturate(1.9);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow:
+    var(--shadow-pop),
+    inset 0 1px 1px rgba(255, 255, 255, 0.85),
+    inset 0 -1px 1px rgba(15, 23, 42, 0.05),
+    inset 1px 0 1px rgba(255, 255, 255, 0.4);
+
+  /* 镜面光泽 streak：斜向掠过玻璃表面的柔和高光带 */
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: linear-gradient(115deg, rgba(255, 255, 255, 0.5) 0%, rgba(255, 255, 255, 0.12) 22%, transparent 42%);
+    opacity: 0.55;
+  }
+}
+/* 背景漂浮光斑：液态玻璃的「折射光源」，让浮层透出流动的彩色光晕。
+   用径向渐变替代 filter: blur —— 视觉上同样是柔和光晕，
+   但省掉一次大尺寸滤镜采样，低端设备合成开销明显更低。 */
+@utility liquid-orb {
+  position: fixed;
+  pointer-events: none;
+  border-radius: 9999px;
+  background: radial-gradient(closest-side, currentColor 0%, transparent 70%);
+  /* -1：沉到内容层之下，玻璃浮层的 backdrop-filter 才能折射到它 */
+  z-index: -1;
+  animation: liquid-orb-drift 18s ease-in-out infinite alternate;
 }
 
 @layer base {
@@ -122,18 +168,35 @@
     color-scheme: dark;
   }
   body {
-    @apply bg-ink-50 text-ink-800 text-[14px];
+    @apply text-ink-800 text-[14px];
+    /* 环境光背景：品牌色 + 紫色 + 青色的径向渐变光晕，
+       液态玻璃浮层由此透出流动的颜色（折射感来源） */
+    background-color: #eef1f8;
+    background-image:
+      radial-gradient(52rem 30rem at 108% -8%, color-mix(in srgb, var(--brand-color, var(--brand-500)) 16%, transparent), transparent 62%),
+      radial-gradient(46rem 28rem at -8% 108%, rgba(139, 92, 246, 0.12), transparent 60%),
+      radial-gradient(40rem 24rem at 55% 118%, rgba(56, 189, 248, 0.10), transparent 58%);
+    background-attachment: fixed;
   }
   .dark body {
-    background-color: #0b1220;
+    background-color: #060b16;
+    background-image:
+      radial-gradient(52rem 30rem at 108% -8%, color-mix(in srgb, var(--brand-color, var(--brand-500)) 20%, transparent), transparent 62%),
+      radial-gradient(46rem 28rem at -8% 108%, rgba(139, 92, 246, 0.16), transparent 60%),
+      radial-gradient(40rem 24rem at 55% 118%, rgba(56, 189, 248, 0.12), transparent 58%);
     color: #e2e8f0;
   }
+  ::selection {
+    background: color-mix(in srgb, var(--brand-color, var(--brand-500)) 22%, transparent);
+  }
   ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
   }
   ::-webkit-scrollbar-thumb {
     @apply bg-ink-200 rounded-full;
+    border: 2px solid transparent;
+    background-clip: content-box;
   }
   ::-webkit-scrollbar-thumb:hover {
     @apply bg-ink-300;
@@ -150,22 +213,63 @@
 
 @layer components {
   .btn-primary {
-    @apply btn bg-brand-600 text-white hover:bg-brand-700;
+    @apply btn relative overflow-hidden text-white;
+    background-image: linear-gradient(180deg, color-mix(in srgb, var(--brand-color, var(--brand-500)) 88%, #ffffff) 0%, var(--brand-color, var(--brand-600)) 100%);
+    box-shadow:
+      0 1px 2px rgba(15, 23, 42, 0.14),
+      0 6px 18px -6px color-mix(in srgb, var(--brand-color, var(--brand-500)) 55%, transparent),
+      inset 0 1px 0 rgba(255, 255, 255, 0.35),
+      inset 0 -1px 1px rgba(15, 23, 42, 0.12);
+    transition: all 0.25s var(--ease-liquid, cubic-bezier(0.34, 1.35, 0.64, 1));
+  }
+  /* 顶部镜面光泽：液态玻璃按钮的标志性高光 */
+  .btn-primary::after {
+    content: "";
+    position: absolute;
+    inset: 1px 1px auto 1px;
+    height: 46%;
+    border-radius: inherit;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.02));
+    pointer-events: none;
+  }
+  .btn-primary:hover {
+    filter: brightness(1.07);
+    transform: translateY(-1px);
+  }
+  .btn-primary:active {
+    filter: brightness(0.95);
+    transform: scale(0.97);
   }
   .btn-ghost {
-    @apply btn bg-transparent text-ink-600 hover:bg-ink-100;
+    @apply btn bg-transparent text-ink-600 hover:bg-ink-900/5;
+  }
+  .btn-ghost:active {
+    transform: scale(0.96);
   }
   .btn-outline {
-    @apply btn border border-ink-200 bg-white text-ink-700 hover:border-brand-400 hover:text-brand-600;
+    @apply btn border border-ink-200/80 bg-white/70 text-ink-700 hover:border-brand-400 hover:text-brand-600;
+    backdrop-filter: blur(8px);
+  }
+  .btn-outline:active {
+    transform: scale(0.97);
   }
   .btn-danger {
     @apply btn bg-rose-50 text-rose-600 hover:bg-rose-100;
   }
   .input {
-    @apply w-full rounded-control border border-ink-200 bg-white px-3 py-1.5 text-[13px] text-ink-800 placeholder:text-ink-400 focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500;
+    @apply w-full rounded-control border border-ink-200/80 bg-white/80 px-3 py-1.5 text-[13px] text-ink-800 placeholder:text-ink-400 focus:outline-none focus:ring-4 focus:ring-brand-500/15 focus:border-brand-500;
+    transition: border-color 0.18s var(--ease-spring, cubic-bezier(0.32, 0.72, 0, 1)), box-shadow 0.18s var(--ease-spring, cubic-bezier(0.32, 0.72, 0, 1));
   }
   .card {
-    @apply rounded-card border border-ink-100 bg-white shadow-card;
+    @apply rounded-card shadow-card;
+    background: rgba(255, 255, 255, 0.86);
+    border: 1px solid rgba(15, 23, 42, 0.06);
+    /* 液态边缘高光：顶部亮边 + 底部微暗边，模拟玻璃厚度折射 */
+    box-shadow:
+      var(--shadow-card),
+      inset 0 1px 0 rgba(255, 255, 255, 0.6),
+      inset 0 -1px 0 rgba(15, 23, 42, 0.03);
+    transition: box-shadow 0.22s var(--ease-spring, cubic-bezier(0.32, 0.72, 0, 1)), transform 0.22s var(--ease-spring, cubic-bezier(0.32, 0.72, 0, 1)), border-color 0.22s ease;
   }
   .tag-brand {
     @apply tag bg-brand-50 text-brand-700;
@@ -177,10 +281,20 @@
     @apply px-3 py-2.5 text-[13px] text-ink-700;
   }
   .menu-item {
-    @apply flex items-center gap-2.5 rounded-control px-2.5 py-2 text-[13px] text-ink-300 transition-colors hover:bg-white/5 hover:text-white;
+    @apply flex items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-[13px] text-ink-300;
+    transition: all 0.22s var(--ease-liquid, cubic-bezier(0.34, 1.35, 0.64, 1));
   }
+  .menu-item:hover {
+    @apply bg-white/8 text-white;
+  }
+  /* 选中项：液态胶囊 —— 品牌渐变 + 顶部镜面高光 + 品牌色辉光 */
   .menu-item.active {
-    @apply bg-brand-600/20 text-brand-300;
+    background-image: linear-gradient(135deg, color-mix(in srgb, var(--brand-color, var(--brand-500)) 90%, #ffffff 10%) 0%, var(--brand-color, var(--brand-600)) 100%);
+    color: #fff;
+    box-shadow:
+      0 6px 20px -6px color-mix(in srgb, var(--brand-color, var(--brand-500)) 65%, transparent),
+      inset 0 1px 1px rgba(255, 255, 255, 0.4),
+      inset 0 -1px 1px rgba(15, 23, 42, 0.15);
   }
   .markdown-body h1 {
     @apply mb-2 mt-4 text-[20px] font-bold text-ink-900;
@@ -260,16 +374,33 @@
     border-color: #243244;
   }
   .dark .card {
-    background-color: #1e293b;
-    border-color: #243244;
+    background: rgba(30, 41, 59, 0.72);
+    border-color: rgba(148, 163, 184, 0.14);
+    box-shadow:
+      var(--shadow-card),
+      inset 0 1px 0 rgba(226, 232, 240, 0.08),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+  }
+  .dark .glass-panel {
+    background: linear-gradient(135deg, rgba(23, 32, 52, 0.78) 0%, rgba(15, 23, 42, 0.66) 100%);
+    border-color: rgba(226, 232, 240, 0.16);
+    box-shadow:
+      0 24px 56px -12px rgba(0, 0, 0, 0.6),
+      inset 0 1px 1px rgba(226, 232, 240, 0.14),
+      inset 0 -1px 1px rgba(0, 0, 0, 0.25),
+      inset 1px 0 1px rgba(226, 232, 240, 0.07);
+  }
+  .dark .glass-panel::before {
+    background: linear-gradient(115deg, rgba(226, 232, 240, 0.16) 0%, rgba(226, 232, 240, 0.04) 22%, transparent 42%);
+    opacity: 0.5;
   }
   .dark .input {
-    background-color: #0f172a;
+    background-color: rgba(15, 23, 42, 0.8);
     border-color: #334155;
     color: #e2e8f0;
   }
   .dark .btn-outline {
-    background-color: #1e293b;
+    background-color: rgba(30, 41, 59, 0.7);
     border-color: #334155;
     color: #cbd5e1;
   }
@@ -294,7 +425,20 @@
     color: #cbd5e1;
   }
   .dark .shadow-pop {
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 24px 56px -12px rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* 液态光斑慢漂动画：translate + 轻微缩放，18s 循环，幅度小不抢戏 */
+@keyframes liquid-orb-drift {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(3vw, -2.5vh, 0) scale(1.08);
+  }
+  100% {
+    transform: translate3d(-2vw, 3vh, 0) scale(0.96);
   }
 }
 

@@ -514,11 +514,13 @@ def run_code(language, code, stdin="", timeout=None, args=None, env=None,
     timeout = _clamp_timeout(timeout)
     started = time.perf_counter()
 
-    with tempfile.TemporaryDirectory(prefix="codeforge_") as tmp:
+    # Windows 下解释器退出后可能仍短暂持有 __pycache__ 等文件句柄，
+    # 清理阶段会抛 WinError 145（目录不是空的）并冒泡成 422。
+    # 执行结果已收集完毕，清理失败不应影响本次运行。
+    with tempfile.TemporaryDirectory(prefix="codeforge_", ignore_cleanup_errors=True) as tmp:
         tmpdir = Path(tmp)
         src_name = _source_name(lang)
         src = tmpdir / src_name
-        src.write_text(str(code), encoding="utf-8")
 
         # 附加文件
         if files and isinstance(files, dict):
@@ -529,6 +531,9 @@ def run_code(language, code, stdin="", timeout=None, args=None, env=None,
                 target = tmpdir / safe_rel
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(str(content), encoding="utf-8")
+
+        # 入口代码最后写入，避免同名附加文件覆盖真正要执行的源码
+        src.write_text(str(code), encoding="utf-8")
 
         argv_src = [str(src)]
         argv_out = [str(tmpdir / (src.stem + (".exe" if IS_WINDOWS else ".out")))]
@@ -1060,19 +1065,23 @@ def estimate_complexity(code, language):
     lines = (code or "").split("\n")
     depth = 0
     max_depth = 0
-    loop_depths = []
+    max_loop = 0
+    loop_stack = []
     for line in lines:
         s = line.strip()
         if not s or s.startswith("#") or s.startswith("//"):
             continue
         indent = len(line) - len(line.lstrip())
         cur = indent // 4
+        # 循环嵌套按「循环栈」判断，避免把 if/函数缩进也算成循环层级
+        while loop_stack and indent <= loop_stack[-1]:
+            loop_stack.pop()
         if re.match(r"^\s*(?:for|while)\b", line):
-            loop_depths.append(cur + 1)
+            loop_stack.append(indent)
+            max_loop = max(max_loop, len(loop_stack))
         depth = cur
         max_depth = max(max_depth, cur)
 
-    max_loop = max(loop_depths) if loop_depths else 0
     if max_loop >= 3:
         big_o = "O(n^3) 或更高"
         hint = "三层及以上嵌套循环，注意数据规模"

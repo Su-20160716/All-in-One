@@ -1,5 +1,5 @@
 <template>
-  <header class="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-ink-100 bg-white px-5 py-2.5">
+  <header class="topbar-glass flex h-14 shrink-0 items-center justify-between gap-3 border-b border-black/5 px-5 py-2.5">
     <div class="flex min-w-0 items-center gap-3">
       <button class="btn-ghost px-2 text-[16px] md:hidden" aria-label="打开导航" @click="emit('toggle-sidebar')">☰</button>
       <h1 class="shrink-0 text-[15px] font-semibold text-ink-800">{{ route.meta.title || '全能协作平台' }}</h1>
@@ -17,7 +17,7 @@
           @keydown="onSearchKeydown"
           @blur="hideLater"
         />
-        <div v-if="searching && kw" id="global-search-panel" class="absolute left-0 top-10 z-50 w-96 rounded-card border border-ink-100 bg-white p-2 shadow-pop">
+        <div v-if="searching && kw" id="global-search-panel" class="glass-panel absolute left-0 top-10 z-50 w-96 rounded-card p-2">
           <template v-if="results.total">
             <!-- #177 ↑↓ 移动、Enter 打开、Esc 关闭；高亮项随键盘滚动可见 -->
             <div v-for="g in resultGroups" :key="g.title" class="search-group">
@@ -57,7 +57,7 @@
             {{ app.unreadCount > 99 ? '99+' : app.unreadCount }}
           </span>
         </button>
-        <div v-if="notifyOpen" id="notify-panel" class="absolute right-0 top-10 z-50 w-[26rem] rounded-card border border-ink-100 bg-white shadow-pop">
+        <div v-if="notifyOpen" id="notify-panel" class="glass-panel absolute right-0 top-10 z-50 w-[26rem] rounded-card">
           <div class="flex items-center justify-between gap-2 border-b border-ink-100 px-3 py-2">
             <span class="text-[13px] font-semibold">
               通知中心
@@ -218,7 +218,7 @@
           <span class="text-[13px] font-medium text-ink-700">{{ user.displayName }}</span>
           <span class="text-[10px] text-ink-400" aria-hidden="true">▾</span>
         </button>
-        <div v-if="menuOpen" id="user-menu" role="menu" class="absolute right-0 top-10 z-50 w-44 overflow-hidden rounded-card border border-ink-100 bg-white py-1 shadow-pop">
+        <div v-if="menuOpen" id="user-menu" role="menu" class="glass-panel absolute right-0 top-10 z-50 w-44 overflow-hidden rounded-card py-1">
           <RouterLink to="/profile" class="block px-3 py-2 text-[13px] hover:bg-ink-50" @click="menuOpen = false">个人设置</RouterLink>
           <RouterLink to="/announcements" class="block px-3 py-2 text-[13px] hover:bg-ink-50" @click="menuOpen = false">系统公告</RouterLink>
           <button class="block w-full px-3 py-2 text-left text-[13px] text-rose-600 hover:bg-rose-50" @click="logout">退出登录</button>
@@ -691,6 +691,18 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* 顶栏液态玻璃：高通透 + 底缘折射亮线，内容滚动时透出流动的环境光 */
+.topbar-glass {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.66) 0%, rgba(255, 255, 255, 0.5) 100%);
+  backdrop-filter: blur(28px) saturate(1.9);
+  -webkit-backdrop-filter: blur(28px) saturate(1.9);
+  box-shadow: inset 0 -1px 1px rgba(255, 255, 255, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+.dark .topbar-glass {
+  background: linear-gradient(180deg, rgba(10, 16, 30, 0.68) 0%, rgba(7, 13, 26, 0.55) 100%);
+  border-bottom-color: rgba(148, 163, 184, 0.12);
+  box-shadow: inset 0 -1px 1px rgba(226, 232, 240, 0.08), inset 0 1px 0 rgba(226, 232, 240, 0.06);
+}
 .search-group {
   padding: 4px 0;
 }

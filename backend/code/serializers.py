@@ -48,6 +48,9 @@ def get_file(user, pk, write=False):
 
 
 def ws_brief(obj):
+    # 列表视图用 file_count_agg/total_bytes_agg 注解避免 N+1；未注解时回落 property
+    fc_agg = getattr(obj, "file_count_agg", None)
+    tb_agg = getattr(obj, "total_bytes_agg", None)
     return {
         "id": obj.id,
         "name": obj.name,
@@ -57,8 +60,8 @@ def ws_brief(obj):
         "color": obj.color,
         "is_starred": obj.is_starred,
         "is_archived": obj.is_archived,
-        "file_count": obj.file_count or 0,
-        "total_bytes": obj.total_bytes or 0,
+        "file_count": fc_agg if fc_agg is not None else (obj.file_count or 0),
+        "total_bytes": tb_agg if tb_agg is not None else (obj.total_bytes or 0),
         "run_config": obj.run_config or {},
         "env_keys": obj.env_keys or [],
         "created_at": obj.created_at,

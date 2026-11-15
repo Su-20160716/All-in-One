@@ -21,6 +21,7 @@ from devtools.common import (
 )
 
 from core.pagination import OptionalPageNumberPagination
+from core.utils import filter_json_list_contains
 
 from . import runtime as rt
 from .models import (
@@ -127,8 +128,9 @@ def workspace_list(request):
     if not opt_bool(request, "include_archived", False):
         qs = qs.filter(is_archived=False)
     # B6：file_count/total_bytes 原是模型 property（每次访问 1-2 次查询），
-    # 列表 200 条就是 400+ 次；annotate 同名属性覆盖 property，整批 1 次聚合
-    qs = qs.annotate(file_count=Count("files"), total_bytes=Sum("files__size"))
+    # 列表 200 条就是 400+ 次；聚合后整批 1 次查询。
+    # 注意：注解名不能与 property 同名（Django 会 setattr 覆盖，无 setter 直接 AttributeError）。
+    qs = qs.annotate(file_count_agg=Count("files"), total_bytes_agg=Sum("files__size"))
     # B11：可选分页——不带 page 时仍返回全量（上限 200），items/total 结构不变
     pg = OptionalPageNumberPagination()
     page = pg.paginate_queryset(qs, request)
@@ -1154,7 +1156,11 @@ def run(request):
 
     language = rt.normalize_language(language)
     stdin = opt_str(request, "stdin", "")
-    timeout = opt_num(request, "timeout", rt.DEFAULT_TIMEOUT, minimum=0.5, maximum=rt.MAX_TIMEOUT)
+    # 超过上限的 timeout 直接夹紧（runtime 内部同样会夹紧），不返回 400
+    timeout = min(
+        float(opt_num(request, "timeout", rt.DEFAULT_TIMEOUT, minimum=0.5)),
+        float(rt.MAX_TIMEOUT),
+    )
     args = p(request, "args")
     env = p(request, "env")
     if env is not None and not isinstance(env, dict):
@@ -1836,7 +1842,7 @@ def snippet_list(request):
         qs = qs.filter(language=rt.normalize_language(lang))
     tag = opt_str(request, "tag").strip()
     if tag:
-        qs = qs.filter(tags__contains=[tag])
+        qs = filter_json_list_contains(qs, "tags", tag)
     # F669 收藏夹分组筛选：folder=__none 表示未分组，favorite=1 只看收藏
     folder = opt_str(request, "folder").strip()
     if folder == "__none__":

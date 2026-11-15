@@ -1,9 +1,9 @@
 <template>
   <Teleport to="body">
     <div v-if="open" class="fixed inset-0 z-[100]" @click.self="close">
-      <div class="absolute inset-0 bg-black/40" @click="close"></div>
-      <div class="relative mx-auto mt-[12vh] w-[90%] max-w-xl rounded-xl bg-white shadow-2xl dark:bg-slate-800">
-        <div class="flex items-center border-b border-gray-200 px-4 dark:border-slate-700">
+      <div class="absolute inset-0 bg-ink-900/35 backdrop-blur-sm" @click="close"></div>
+      <div class="glass-panel relative mx-auto mt-[12vh] w-[90%] max-w-xl overflow-hidden rounded-card">
+        <div class="flex items-center border-b border-ink-100 px-4 dark:border-slate-700">
           <span class="text-gray-400">⌘</span>
           <input
             ref="inputEl"

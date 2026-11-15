@@ -2272,6 +2272,26 @@ class PreferenceView(APIView):
         return Response({"message": "偏好已保存", **_pref_dict(request.user)})
 
 
+# ---------------- #37 WS 一次性 ticket 签发 ----------------
+
+class WsTicketView(APIView):
+    """签发短时一次性 WS ticket（60 秒有效，握手校验即作废）。
+
+    前端 WebSocket 握手用 /ws/.../?ticket=<ticket> 替代 ?token=<access_token>，
+    避免长期令牌落入访问日志 / 代理日志 / 浏览器历史。签发失败（cache 不可用）
+    时返回 ok=False，前端自动回落到 ?token= 旧方式。
+    """
+
+    @_guard
+    def post(self, request):
+        from ws_app.middleware import WS_TICKET_TTL, mint_ws_ticket
+
+        ticket = mint_ws_ticket(request.user)
+        if not ticket:
+            return Response({"ok": False, "error": "ticket 签发暂不可用"}, status=503)
+        return Response({"ok": True, "ticket": ticket, "expires_in": WS_TICKET_TTL})
+
+
 # ---------------- F621 长期访问令牌 PAT ----------------
 
 def _pat_item(t):

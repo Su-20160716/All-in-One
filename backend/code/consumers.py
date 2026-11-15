@@ -224,7 +224,7 @@ class CodeCollabConsumer(AsyncJsonWebsocketConsumer):
                 f.content = text[:400000]
                 # #63：落库前按最终正文重算字节数与行数，避免 size/lines 与正文不一致
                 f.size = len(f.content.encode("utf-8"))
-                f.lines = f.content.count("\n") + 1 if f.content else 0
+                f.lines = len(f.content.splitlines()) if f.content else 0
                 f.save(update_fields=["content", "size", "lines", "updated_at"])
         return state.revision
 

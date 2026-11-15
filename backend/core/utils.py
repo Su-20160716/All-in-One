@@ -60,3 +60,21 @@ def file_kind(name: str) -> str:
     if e in ARCHIVE_EXTS:
         return "archive"
     return "other"
+
+
+def filter_json_list_contains(qs, field: str, value):
+    """跨数据库的 JSON 数组包含过滤。
+
+    SQLite 后端不支持 JSONField 的 contains lookup（会抛 NotSupportedError），
+    此时先取候选主键到 Python 侧精确匹配；PostgreSQL 走原生 JSONB 包含。
+    """
+    from django.db import connection
+
+    if connection.vendor == "postgresql":
+        return qs.filter(**{f"{field}__contains": [value]})
+    pks = [
+        obj.pk
+        for obj in qs.only("pk", field).iterator()
+        if isinstance(getattr(obj, field), list) and value in getattr(obj, field)
+    ]
+    return qs.filter(pk__in=pks)

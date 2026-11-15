@@ -3,8 +3,8 @@
   <Transition name="toast">
     <div
       v-if="app.toast.show"
-      class="fixed bottom-6 left-1/2 z-[999] -translate-x-1/2 rounded-pill px-4 py-2 text-[13px] text-white shadow-pop"
-      :class="app.toast.type === 'error' ? 'bg-rose-500' : app.toast.type === 'success' ? 'bg-emerald-500' : 'bg-ink-800'"
+      class="fixed bottom-6 left-1/2 z-[999] -translate-x-1/2 rounded-pill px-4 py-2 text-[13px] text-white shadow-pop backdrop-blur-md"
+      :class="app.toast.type === 'error' ? 'bg-rose-500/92' : app.toast.type === 'success' ? 'bg-emerald-500/92' : 'bg-ink-800/88'"
     >
       {{ app.toast.text }}
     </div>
@@ -73,11 +73,11 @@ watch(() => user.token, syncWs)
 <style scoped>
 .toast-enter-active,
 .toast-leave-active {
-  transition: all 0.25s ease;
+  transition: all 0.28s cubic-bezier(0.32, 0.72, 0, 1);
 }
 .toast-enter-from,
 .toast-leave-to {
   opacity: 0;
-  transform: translate(-50%, 10px);
+  transform: translate(-50%, 12px) scale(0.96);
 }
 </style>

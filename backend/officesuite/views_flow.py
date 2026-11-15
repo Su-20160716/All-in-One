@@ -95,7 +95,7 @@ def approval_submit(request):
     return ok({"id": r.id, "status": r.status, "title": r.title})
 
 
-@endpoint()
+@endpoint(("GET", "POST"))
 def approval_my_submitted(request):
     """我提交的审批单。"""
     qs = ApprovalRequest.objects.filter(owner=request.user).order_by("-created_at")
@@ -105,7 +105,7 @@ def approval_my_submitted(request):
     return ok({"items": [obj_dict(o) for o in qs[:100]], "count": qs.count()})
 
 
-@endpoint()
+@endpoint(("GET", "POST"))
 def approval_my_pending(request):
     """待我处理的审批单（数据范围可见 + pending）。"""
     qs = scope_queryset(ApprovalRequest.objects.filter(status="pending"), request.user).exclude(owner=request.user)
@@ -191,7 +191,7 @@ def approval_comment(request, pk):
     return ok({"id": r.id, "comments": len((r.data or {}).get("events", []))})
 
 
-@endpoint()
+@endpoint(("GET", "POST"))
 def approval_events(request, pk):
     """审批流转历史。"""
     r = get_obj(ApprovalRequest, pk, request.user)

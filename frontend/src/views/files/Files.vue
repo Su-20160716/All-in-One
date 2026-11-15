@@ -144,7 +144,7 @@
                draggable="true" @dragstart="onRowDragStart(f, $event)" @click="focusRow(f)">
             <input type="checkbox" :checked="selected.has(f.id)" @click.stop @change="toggleOne(f.id)" />
             <button class="text-[16px]" @click.stop="toggleStar(f)">{{ f.is_star ? '⭐' : '☆' }}</button>
-            <img v-if="f.thumbnail_url" :src="f.thumbnail_url" class="h-8 w-8 rounded-control object-cover" />
+            <img v-if="f.thumbnail_url" :src="f.thumbnail_url" loading="lazy" decoding="async" class="h-8 w-8 rounded-control object-cover" />
             <span v-else class="grid h-8 w-8 place-items-center rounded-control text-[14px]" :class="typeMeta(f).color">{{ typeMeta(f).icon }}</span>
             <div class="min-w-0 flex-1">
               <div class="truncate text-[13px] font-medium text-ink-800">{{ f.name }}</div>

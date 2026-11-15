@@ -80,9 +80,9 @@ web/
 │       ├── api/              # axios 封装 + 全模块 API
 │       ├── stores/           # Pinia：user / app(通知+WS)
 │       ├── router/           # 路由 + 登录守卫
-│       ├── components/       # Sidebar / Topbar / Modal
+│       ├── components/       # Sidebar / Topbar / Modal / CommandPalette / 平台可视化组件
 │       ├── views/            # 登录、工作台、文件、笔记、看板、聊天、后台、工具、个人
-│       │   └── code/         # v6 代码工坊：CodeForge / LearnCenter / SharedCode ★ 本次新增
+│       │   └── code/         # v6 代码工坊：CodeForge / LearnCenter / SharedCode
 │       └── utils/            # WebSocket 客户端、格式化、SHA-1（秒传）、markdown 渲染
 ├── scripts/
 │   └── stats.py              # 项目规模统计（文档里的数字都来自它）
@@ -116,12 +116,23 @@ web/
 - **看板**：原生 HTML5 拖拽跨列移动 + 列内排序；默认三列（待办/进行中/已完成）；成员、评论、活动流、逾期统计。
 - **降级原则**：任何外部依赖（LibreOffice / LLM / 代码运行时）缺失都**不返回 500**，而是返回结构化错误码（`RUNTIME_NOT_FOUND` / `LIBREOFFICE_NOT_FOUND`）或走本地实现，前端置灰而非崩溃。
 
+## 性能与工程结构
+
+- **按需加载**：`router/index.js` 全量路由懒加载；CodeMirror 语言包、marked、yjs 保持动态 import 边界，不并入 vendor。
+- **缓存友好分包**：`vite.config.js` 只把 `vue/vue-router/pinia`（`vendor-vue`）与 `axios`（`vendor-axios`）拆为长期缓存 chunk；业务代码更新不影响其 hash。
+- **前端渲染**：列表缩略图 `loading="lazy" decoding="async"`；搜索/未读刷新防抖；液态光斑用径向渐变替代大尺寸模糊滤镜；`prefers-reduced-motion` 全量降级。
+- **后端查询**：列表接口显式 `select_related` / `prefetch_related`；`files`、`im`、`core` 等热点表已建复合索引；统计走聚合而非循环查询；分页上限 100。
+- **死代码**：已清理无引用组件；`backend` 无备份/临时模块，`frontend/src` 无未引用页面。
+- **UI 材质**：全站液态玻璃（Liquid Glass）——高通透渐变 + `blur(30px) saturate(1.9)` + 上下折射高光 + 镜面光泽 streak + 18px 连续圆角 + 回弹缓动，详见 [docs/06-UI设计说明.md](docs/06-UI设计说明.md)。
+
 ## 验证结果
 
 - `manage.py check`：**System check identified no issues (0 silenced)**
 - 规模（`python scripts/stats.py`）：**16 个 app / 1518 条路由 / 145 个模型 / 41 个页面**
 - 路由契约：`code` 模块 `urlpatterns` = **110**（断言 `_EXPECTED = 110` 通过）、`public_urlpatterns` = **2**、`minitools` = **375**
-- 前端 `vite build`：**成功**（`CodeForge` 65.58 kB / gzip 19.78 kB，`LearnCenter` 26.60 kB / gzip 8.58 kB，CodeMirror 独立 chunk 426.87 kB / gzip 138.87 kB）
+- 前端 `vite build`：**成功**；`vendor-vue` 110.92 kB（gzip 43.22）、`vendor-axios` 51.44 kB（gzip 19.49）、`CodeEditor` 173 kB（懒加载）、最大共享 chunk 243 kB；无 >600 kB 警告
+- 前端质量门禁：`npm run lint` / `typecheck` / `test`（vitest）全绿
+- 后端：`manage.py test` 全量用例通过（见 `backend/*/tests.py` 与五套冒烟测试）
 - 冒烟测试五套**串行**：v2 基线 161 / v3 学习中心 80 / v4 扩展 78 / v5 套件 537 / minitools 36 —— 改后端后必须串行跑，并行会撞 SQLite `database is locked`
 - CI：GitHub Actions（`.github/workflows/ci.yml`）= `check` + 五套冒烟 + 前端 `npm ci && npm run build`
 

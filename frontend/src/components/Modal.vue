@@ -1,13 +1,14 @@
 <template>
   <Teleport to="body">
-    <div
-      v-if="visible"
-      class="fixed inset-0 z-[100] flex items-center justify-center bg-ink-900/40 p-4"
-      @click.self="dismiss"
-    >
+    <Transition name="modal">
+      <div
+        v-if="visible"
+        class="fixed inset-0 z-[100] flex items-center justify-center bg-ink-900/35 p-4 backdrop-blur-sm"
+        @click.self="dismiss"
+      >
       <div
         ref="dialogRef"
-        class="max-h-[85vh] w-full overflow-y-auto rounded-card bg-white shadow-pop"
+        class="glass-panel modal-panel max-h-[85vh] w-full overflow-y-auto rounded-card"
         :style="{ maxWidth: width }"
         role="dialog"
         aria-modal="true"
@@ -23,7 +24,8 @@
           <slot />
         </div>
       </div>
-    </div>
+      </div>
+    </Transition>
   </Teleport>
 </template>
 
@@ -111,3 +113,23 @@ function dismiss() {
   emit('update:modelValue', false)
 }
 </script>
+
+<style>
+/* 液态玻璃弹窗：遮罩淡入 + 面板缩放上浮，带回弹的液态收尾 */
+.modal-enter-active,
+.modal-leave-active {
+  transition: opacity 0.24s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.modal-enter-active .modal-panel,
+.modal-leave-active .modal-panel {
+  transition: transform 0.3s cubic-bezier(0.34, 1.35, 0.64, 1), opacity 0.24s ease;
+}
+.modal-enter-from,
+.modal-leave-to {
+  opacity: 0;
+}
+.modal-enter-from .modal-panel,
+.modal-leave-to .modal-panel {
+  transform: scale(0.94) translateY(14px);
+}
+</style>

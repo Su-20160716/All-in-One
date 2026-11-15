@@ -74,7 +74,7 @@
           <button v-if="row.hasChildren" class="w-4 shrink-0 text-[10px] text-ink-400" @click.stop="toggleExpand(row.n.id)">{{ row.expanded ? '▾' : '▸' }}</button>
           <span v-else class="w-4 shrink-0"></span>
           <span class="min-w-0 flex-1 truncate" :style="{ paddingLeft: row.depth * 8 + 'px' }">
-            <img v-if="row.n.cover_thumb" :src="row.n.cover_thumb" class="mr-1 inline-block h-4 w-6 rounded object-cover align-middle" alt="" />
+            <img v-if="row.n.cover_thumb" :src="row.n.cover_thumb" loading="lazy" decoding="async" class="mr-1 inline-block h-4 w-6 rounded object-cover align-middle" alt="" />
             <span v-if="row.n.color" class="mr-1 inline-block h-2 w-2 shrink-0 rounded-full align-middle" :style="{ background: colorHex(row.n.color) }"></span>{{ row.n.icon || noteIcon(row.n) }} {{ row.n.title }}
           </span>
         </div>
@@ -502,7 +502,7 @@
       </div>
       <div class="grid max-h-64 grid-cols-4 gap-2 overflow-y-auto">
         <button v-for="f in coverFiles" :key="f.id" class="overflow-hidden rounded-card border border-ink-100 hover:border-brand-400" @click="setCover(f.id)">
-          <img :src="f.thumbnail || f.url" :alt="f.name" class="h-20 w-full object-cover" />
+          <img :src="f.thumbnail || f.url" :alt="f.name" loading="lazy" decoding="async" class="h-20 w-full object-cover" />
           <div class="truncate px-1 py-0.5 text-[10px] text-ink-500">{{ f.name }}</div>
         </button>
         <div v-if="!coverFiles.length" class="col-span-4 py-6 text-center text-[12px] text-ink-400">没有可用的图片文件</div>

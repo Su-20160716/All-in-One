@@ -1030,9 +1030,10 @@ def ai_complete_apply(request, pk):
         raise ValueError("code 不能为空")
     if new_code == f.content:
         return ok({"changed": False, "file": file_brief(f)})
+    note = opt_str(request, "message", "", max_len=200).strip()
     CodeVersion.objects.create(
         file=f, content=f.content,
-        message=opt_str(request, "message", "AI 修改前快照"),
+        message="AI 修改前快照" + (f" · {note}" if note else ""),
         size=len(f.content.encode("utf-8")), created_by=request.user,
     )
     f.content = new_code

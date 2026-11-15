@@ -36,7 +36,7 @@
             <td class="td"><input type="checkbox" :checked="selected.has(u.id)" @change="toggleOne(u.id)" /></td>
             <td class="td">
               <div class="flex items-center gap-2.5">
-                <img v-if="u.avatar" :src="u.avatar" class="h-8 w-8 rounded-full object-cover" />
+                <img v-if="u.avatar" :src="u.avatar" loading="lazy" decoding="async" class="h-8 w-8 rounded-full object-cover" />
                 <div v-else class="grid h-8 w-8 place-items-center rounded-full bg-brand-100 text-[12px] font-semibold text-brand-700">{{ (u.nickname || u.username).slice(0, 1) }}</div>
                 <div>
                   <div class="font-medium">{{ u.nickname || u.username }} <span v-if="u.is_superuser" class="tag bg-amber-50 text-amber-600">超管</span></div>

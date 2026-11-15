@@ -1,7 +1,7 @@
 <template>
-  <div class="grid min-h-screen place-items-center bg-ink-900 p-4">
-    <div class="grid w-full max-w-4xl overflow-hidden rounded-card bg-white shadow-pop lg:grid-cols-2">
-      <div class="hidden flex-col justify-between bg-ink-900 p-8 text-white lg:flex">
+  <div class="login-bg grid min-h-screen place-items-center p-4">
+    <div class="login-card grid w-full max-w-4xl overflow-hidden rounded-[18px] bg-white/92 shadow-pop backdrop-blur-2xl lg:grid-cols-2">
+      <div class="login-hero hidden flex-col justify-between p-8 text-white lg:flex">
         <div>
           <div class="flex items-center gap-2">
             <div class="grid h-9 w-9 place-items-center rounded-control bg-brand-600 text-[16px] font-bold">A</div>
@@ -165,3 +165,34 @@ async function submit() {
   }
 }
 </script>
+
+<style scoped>
+/* 登录页环境光背景：品牌色 + 紫色光晕，衬托液态玻璃卡片 */
+.login-bg {
+  background:
+    radial-gradient(56rem 28rem at 85% 8%, color-mix(in srgb, var(--brand-color, var(--brand-500)) 36%, transparent), transparent 62%),
+    radial-gradient(46rem 28rem at 8% 92%, rgba(139, 92, 246, 0.28), transparent 60%),
+    radial-gradient(36rem 22rem at 55% 115%, rgba(56, 189, 248, 0.16), transparent 58%),
+    #0b1220;
+}
+.login-card {
+  animation: login-in 0.6s cubic-bezier(0.34, 1.35, 0.64, 1);
+  /* 液态边缘高光：上亮下暗的折射边 */
+  box-shadow:
+    0 32px 80px -16px rgba(0, 0, 0, 0.55),
+    inset 0 1px 1px rgba(255, 255, 255, 0.7),
+    inset 0 -1px 1px rgba(15, 23, 42, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+}
+.login-hero {
+  background:
+    radial-gradient(30rem 18rem at 110% -10%, color-mix(in srgb, var(--brand-color, var(--brand-500)) 38%, transparent), transparent 60%),
+    linear-gradient(160deg, #0f172a 0%, #111c33 100%);
+}
+@keyframes login-in {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.96);
+  }
+}
+</style>

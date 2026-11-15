@@ -1,10 +1,10 @@
 <template>
   <aside
-    class="fixed inset-y-0 left-0 z-50 flex w-56 shrink-0 flex-col bg-ink-900 text-ink-300 transition-transform duration-200 md:static md:translate-x-0"
+    class="sidebar-glass fixed inset-y-0 left-0 z-50 flex w-56 shrink-0 flex-col text-ink-300 transition-transform duration-300 md:static md:translate-x-0"
     :class="mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'"
   >
     <div class="flex items-center gap-2 px-4 py-4">
-      <div class="grid h-8 w-8 place-items-center rounded-control bg-brand-600 text-[15px] font-bold text-white">A</div>
+      <div class="logo-tile grid h-8 w-8 place-items-center rounded-[10px] text-[15px] font-bold text-white">A</div>
       <div>
         <div class="text-[14px] font-semibold text-white">全能协作平台</div>
         <div class="text-[11px] text-ink-500">All-in-One v8.0</div>
@@ -19,14 +19,32 @@
         </span>
       </RouterLink>
     </nav>
-    <div class="border-t border-white/5 p-3 text-[11px] text-ink-500">
-      <div class="flex items-center gap-1.5">
-        <span class="h-1.5 w-1.5 rounded-full" :class="app.wsConnected ? 'bg-emerald-400' : 'bg-ink-600'"></span>
+    <div class="border-t border-white/8 p-3 text-[11px] text-ink-500">
+      <div class="inline-flex items-center gap-1.5 rounded-pill bg-white/5 px-2.5 py-1">
+        <span class="h-1.5 w-1.5 rounded-full" :class="app.wsConnected ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,.9)]' : 'bg-ink-600'"></span>
         {{ app.wsConnected ? '实时通道已连接' : '实时通道重连中…' }}
       </div>
     </div>
   </aside>
 </template>
+
+<style scoped>
+/* 液态暗玻璃侧栏：高通透 + 右缘折射亮线 + 环境光透出 */
+.sidebar-glass {
+  background: linear-gradient(180deg, rgba(13, 20, 36, 0.72) 0%, rgba(8, 13, 26, 0.62) 100%);
+  backdrop-filter: blur(30px) saturate(1.8);
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  border-right: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: inset -1px 0 1px rgba(255, 255, 255, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.logo-tile {
+  background-image: linear-gradient(135deg, color-mix(in srgb, var(--brand-color, var(--brand-500)) 88%, #ffffff) 0%, var(--brand-color, var(--brand-600)) 100%);
+  box-shadow:
+    0 6px 18px -4px color-mix(in srgb, var(--brand-color, var(--brand-500)) 65%, transparent),
+    inset 0 1px 1px rgba(255, 255, 255, 0.45),
+    inset 0 -1px 1px rgba(15, 23, 42, 0.18);
+}
+</style>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'

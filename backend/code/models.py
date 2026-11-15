@@ -97,7 +97,7 @@ class CodeFile(models.Model):
         if self.content is None:
             self.content = ""
         self.size = len(self.content.encode("utf-8"))
-        self.lines = self.content.count("\n") + 1 if self.content else 0
+        self.lines = len(self.content.splitlines()) if self.content else 0
         if not self.name:
             self.name = self.path.rsplit("/", 1)[-1]
         super().save(*args, **kwargs)

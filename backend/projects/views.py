@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 from accounts.models import User
 from core.models import notify, notify_many
+from core.utils import filter_json_list_contains
 from core.validators import as_date, as_datetime, as_int, parse_bool
 from projects.models import (
     AcceptanceItem,
@@ -953,7 +954,7 @@ class CardSearchView(APIView):
             qs = qs.filter(assignees__id=assignee)
         label = request.query_params.get("label")
         if label:
-            qs = qs.filter(labels__contains=[label])
+            qs = filter_json_list_contains(qs, "labels", label)
         due = request.query_params.get("due")
         today = timezone.now().date()
         if due == "overdue":

@@ -13,6 +13,7 @@
  */
 import { API_BASE } from '../api/base'
 import { refreshAccessToken } from '../api/refresh'
+import request from '../api/request'
 
 const REFRESH_SKEW_MS = 60 * 1000 // 提前 60 秒视为过期，避免握手瞬间失效
 const BASE_RETRY_MS = 3000
@@ -70,18 +71,41 @@ export async function ensureFreshToken() {
   return localStorage.getItem('access_token') || current
 }
 
+function wsBase() {
+  // 生产环境（VITE_API_BASE 指向 Render）时把后端域名转成 ws/wss；本地开发仍用当前域名
+  return API_BASE
+    ? API_BASE.replace(/^http/, 'ws')
+    : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
+}
+
 /**
  * 带 JWT 的 WebSocket 地址（浏览器无法自定义请求头，只能用查询参数）。
  * 不传 token 时读取 localStorage，保持对旧调用的兼容。
  */
 export function buildWsUrl(path, token) {
-  // 生产环境（VITE_API_BASE 指向 Render）时把后端域名转成 ws/wss；本地开发仍用当前域名
-  const base = API_BASE
-    ? API_BASE.replace(/^http/, 'ws')
-    : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
+  const base = wsBase()
   const value = token === undefined ? localStorage.getItem('access_token') || '' : token
   const sep = path.includes('?') ? '&' : '?'
   return `${base}${path}${value ? `${sep}token=${encodeURIComponent(value)}` : ''}`
+}
+
+/** #37 一次性 ticket 的握手地址（60 秒有效、校验即作废，不落访问日志） */
+export function buildWsTicketUrl(path, ticket) {
+  const sep = path.includes('?') ? '&' : '?'
+  return `${wsBase()}${path}${sep}ticket=${encodeURIComponent(ticket)}`
+}
+
+/**
+ * 尝试向服务端换一枚一次性 WS ticket；失败（网络/ cache 不可用）返回 ''，
+ * 调用方回落到 ?token= 旧方式。绝不向用户抛错。
+ */
+async function mintWsTicket() {
+  try {
+    const r = await request.post('/auth/ws-ticket/', {})
+    return (r && (r.ticket || r.data?.ticket)) || ''
+  } catch (e) {
+    return ''
+  }
 }
 
 let lastPongAt = 0
@@ -137,7 +161,10 @@ async function openNotify() {
     return null
   }
 
-  ws = new WebSocket(buildWsUrl('/ws/notify/', token))
+  // #37 优先一次性 ticket 握手（不落日志）；签发失败回落 ?token=
+  const ticket = await mintWsTicket()
+  if (stopped) return null
+  ws = new WebSocket(ticket ? buildWsTicketUrl('/ws/notify/', ticket) : buildWsUrl('/ws/notify/', token))
 
   ws.onopen = () => {
     retryDelay = BASE_RETRY_MS
@@ -234,7 +261,10 @@ class AuthedSocket {
       return
     }
     this._token = token
-    const socket = new WebSocket(buildWsUrl(this.path, token))
+    // #37 协同等独立通道同样优先一次性 ticket
+    const ticket = await mintWsTicket()
+    if (this._closed) return
+    const socket = new WebSocket(ticket ? buildWsTicketUrl(this.path, ticket) : buildWsUrl(this.path, token))
     this._socket = socket
 
     socket.onopen = () => {
