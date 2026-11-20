@@ -290,7 +290,9 @@ def _health_card_uncached() -> dict:
     try:
         with connection.cursor() as cur:
             cur.execute(
-                "SELECT app_label, name, applied_at FROM django_migrations ORDER BY applied_at DESC LIMIT 1"
+                # Django 的迁移表列名是 app / name / applied（没有 app_label / applied_at），
+                # 旧 SQL 在 SQLite 上必然报 no such column，导致体检卡永远拿不到迁移信息。
+                "SELECT app, name, applied FROM django_migrations ORDER BY applied DESC LIMIT 1"
             )
             row = cur.fetchone()
             if row:
