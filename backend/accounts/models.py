@@ -149,8 +149,11 @@ class User(AbstractUser):
     """扩展用户：昵称、头像、邮箱验证、角色多对多、禁用标志"""
 
     nickname = models.CharField(max_length=50, blank=True, verbose_name="昵称")
+    real_name = models.CharField(max_length=50, blank=True, verbose_name="姓名")
     avatar = models.ImageField(upload_to="avatars/", null=True, blank=True, verbose_name="头像")
     phone = models.CharField(max_length=20, blank=True, verbose_name="手机号")
+    birthday = models.DateField(null=True, blank=True, verbose_name="出生日期")
+    address = models.CharField(max_length=255, blank=True, verbose_name="地址")
     bio = models.CharField(max_length=255, blank=True, verbose_name="个人简介")
     is_disabled = models.BooleanField(default=False, verbose_name="已禁用")
     storage_quota_mb = models.IntegerField(default=2048, verbose_name="存储配额(MB)")

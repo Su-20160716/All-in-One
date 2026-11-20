@@ -1,4 +1,6 @@
 """用户/角色/权限/租户/部门 序列化"""
+import re
+
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
@@ -61,7 +63,28 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["username", "password", "nickname", "email", "phone"]
+        fields = [
+            "username", "password", "nickname", "email",
+            "real_name", "phone", "birthday", "address",
+        ]
+
+    def validate_phone(self, value):
+        """手机号选填；填写时必须是 11 位大陆手机号"""
+        if value and not re.fullmatch(r"1[3-9]\d{9}", value):
+            raise serializers.ValidationError("手机号格式不正确")
+        return value
+
+    def validate_birthday(self, value):
+        from django.utils import timezone
+
+        if value is None:
+            return value
+        today = timezone.localdate()
+        if value > today:
+            raise serializers.ValidationError("出生日期不能晚于今天")
+        if value.year < 1900:
+            raise serializers.ValidationError("出生日期无效")
+        return value
 
     def create(self, validated_data):
         user = User.objects.create_user(
@@ -69,7 +92,10 @@ class RegisterSerializer(serializers.ModelSerializer):
             password=validated_data["password"],
             nickname=validated_data.get("nickname", ""),
             email=validated_data.get("email", ""),
+            real_name=validated_data.get("real_name", ""),
             phone=validated_data.get("phone", ""),
+            birthday=validated_data.get("birthday"),
+            address=validated_data.get("address", ""),
         )
         # 新用户默认赋予"普通用户"角色
         default_role = Role.objects.filter(code="user").first()
@@ -90,7 +116,8 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            "id", "username", "nickname", "email", "phone", "bio", "avatar", "tags",
+            "id", "username", "nickname", "real_name", "email", "phone", "birthday", "address",
+            "bio", "avatar", "tags",
             "is_superuser", "is_active", "is_disabled", "storage_quota_mb",
             "date_joined", "last_login", "last_active_at", "is_online",
             "dnd_start", "dnd_end", "role_names", "role_ids",

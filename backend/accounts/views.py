@@ -2482,7 +2482,11 @@ class AvatarHistoryView(APIView):
     """GET 头像历史 / POST <pk>/restore 切回指定历史头像"""
 
     @_guard
-    def get(self, request):
+    def get(self, request, pk=None):
+        # /history/<pk>/restore/ 只允许 POST；GET 该地址直接打开会带着 pk 进来，
+        # 不显式处理会抛 TypeError（被兜底成 422），这里返回标准 405。
+        if pk is not None:
+            return Response({"ok": False, "error": "该地址仅支持 POST", "code": 405}, status=405)
         rows = AvatarHistory.objects.filter(user=request.user)[:20]
         current = request.user.avatar.url if request.user.avatar else ""
         return Response({
