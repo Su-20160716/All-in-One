@@ -385,9 +385,11 @@ def insights(request):
     } for r in by_lang]
 
     # 目录分布（按路径前缀，取一级目录）
+    # 注意：files 带 select_related("workspace")，用 .only("id","path") 会抛
+    # FieldError（workspace 同时被延迟和关联遍历），这里直接用 values_list。
     dirs = {}
-    for f in files.only("id", "path"):
-        top = f.path.split("/")[0] if "/" in f.path else "(根目录)"
+    for path in files.values_list("path", flat=True):
+        top = path.split("/")[0] if "/" in path else "(根目录)"
         dirs[top] = dirs.get(top, 0) + 1
     top_dirs = [
         {"dir": d, "count": c,

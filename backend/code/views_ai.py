@@ -646,15 +646,6 @@ def ai_generate(request):
     return ok({"code": _strip_fence(text), "source": "llm", "llm": meta})
 
 
-def _strip_fence(text):
-    """去掉模型爱加的 Markdown 围栏。"""
-    t = (text or "").strip()
-    m = re.match(r"^```[\w+-]*\s*\n(.*?)\n?```$", t, re.DOTALL)
-    if m:
-        return m.group(1)
-    return t
-
-
 @endpoint(("POST",))
 def ai_transform(request):
     """一个入口覆盖：解释 / 找 bug / 重构 / 生成测试 / 翻译 / 加注释 / 测试数据 / 反出题 / 审查。

@@ -933,6 +933,16 @@ class CodeV6Tests(TestCase):
         self.assertNotIn("owner_id", d)
         self.assertNotIn("id", d)
 
+    def test_d1b_public_share_api_alias(self):
+        """前端分享页走 /api/share/code/<token>/，必须与根级别名同样免登录可读。"""
+        ws = self.mkws()
+        f = self.mkfile(ws["id"], "pub2.py", "print('alias')\n")
+        token = self.js(self.api("post", "/api/code/shares/create/", {"file": f["id"]}))["data"]["token"]
+        anon = Client()
+        r = anon.get(f"/api/share/code/{token}/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("alias", json.loads(r.content.decode())["data"]["code"])
+
     def test_d2_public_share_bad_token(self):
         anon = Client()
         r = anon.get("/share/code/totallyinvalidtoken999/")
@@ -1051,3 +1061,30 @@ class CodeV6Tests(TestCase):
     def test_f5_force_refresh_probe(self):
         r = self.js(self.api("get", "/api/code/runtimes/?force=true"))["data"]
         self.assertGreaterEqual(r["total_count"], 10)
+
+    def test_f6_insights_without_workspace(self):
+        """工程洞察不传 workspace 也必须可用。
+
+        历史实现 files.only("id", "path") 与 file_qs 的
+        select_related("workspace") 冲突，FieldError 被兜底成 422，
+        代码工坊首页洞察整块失灵。
+        """
+        ws = self.mkws()
+        self.mkfile(ws["id"], "insight_a.py", "print(1)\n")
+        r = self.api("get", "/api/code/insights/")
+        self.assertEqual(r.status_code, 200, r.content[:300])
+        d = self.js(r)["data"]
+        self.assertIn("summary", d)
+        self.assertEqual(len(d["activity"]), 30)
+        self.assertGreaterEqual(d["summary"]["files"], 1)
+
+    def test_f6b_insights_with_workspace(self):
+        ws = self.mkws("洞察工作区")
+        self.mkfile(ws["id"], "insight_b.py", "print(2)\n")
+        other = self.mkws("其他工作区")
+        self.mkfile(other["id"], "ignore_me.py", "print(3)\n")
+        r = self.api("get", f"/api/code/insights/?workspace={ws['id']}")
+        self.assertEqual(r.status_code, 200, r.content[:300])
+        d = self.js(r)["data"]
+        # 只统计指定工作区：入口文件 + insight_b.py，其他工作区的文件不计入
+        self.assertEqual(d["summary"]["files"], 2)

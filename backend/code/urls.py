@@ -260,8 +260,13 @@ urlpatterns = [path(route, view) for route, view in VIEWS.items()]
 
 # 公开分享（无需登录），挂到 /api/share/code/<token>/
 public_urlpatterns = [
+    # 旧根级路由（已发布的外链继续有效）
     path("share/code/<str:token>/", A.public_share_view, name="code_public_share"),
     path("share/code/<str:token>/run/", A.public_share_run, name="code_public_share_run"),
+    # F3 对齐 files/projects：前端分享页走 /api/share/*，根级 /share/* 是 history 页面路由，
+    # 不能再让 API 与页面同前缀（否则打开分享链接会直接看到 JSON）
+    path("api/share/code/<str:token>/", A.public_share_view, name="code_public_share_api"),
+    path("api/share/code/<str:token>/run/", A.public_share_run, name="code_public_share_run_api"),
 ]
 
 # 契约断言：接口数量变化时必须显式确认
