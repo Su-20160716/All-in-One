@@ -11,6 +11,8 @@ backend/staticfiles/
 backend/media/
 backend/db.sqlite3
 backend/_*.sqlite3
+# `manage.py test --parallel` 在 SQLite 下生成的 worker 克隆库
+backend/default_*.sqlite3
 *.sqlite3-journal
 *.sqlite3-wal
 *.sqlite3-shm
@@ -19,6 +21,8 @@ backend/*.log
 # ---- Node / 前端 ----
 frontend/node_modules/
 frontend/dist/
+# 构建验证用的临时输出目录（沙箱 safe-delete 拦清空 dist 时改用此目录），绝不入库
+frontend/dist-verify/
 # 本机 Avast 会拦 esbuild 在系统 Temp 里删临时文件，构建时把 TMP 指到项目内这个目录
 frontend/.esbuild-tmp/
 

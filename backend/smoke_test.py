@@ -11,6 +11,14 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 django.setup()
 
 from rest_framework.test import APIClient  # noqa: E402
+from django.contrib.auth import get_user_model  # noqa: E402
+
+# 脚本依赖固定账号 admin 做登录断言。库里没有就自动建一个超管，
+# 已存在则不改密码；密码不同的库可用 SMOKE_ADMIN_PASSWORD 指定。
+ADMIN_PASSWORD = os.environ.get("SMOKE_ADMIN_PASSWORD", "admin123")
+_User = get_user_model()
+if not _User.objects.filter(username="admin").exists():
+    _User.objects.create_superuser("admin", "", ADMIN_PASSWORD)
 
 passed, failed = [], []
 
@@ -45,7 +53,7 @@ def main():
     access, refresh = r.data.get("access"), r.data.get("refresh")
     c = auth_client(access)
 
-    r = APIClient().post("/api/auth/login/", {"username": "admin", "password": "admin123"}, format="json")
+    r = APIClient().post("/api/auth/login/", {"username": "admin", "password": ADMIN_PASSWORD}, format="json")
     check("登录返回用户信息", r.status_code == 200 and r.data.get("user", {}).get("username") == "admin")
     ca = auth_client(r.data["access"])
 

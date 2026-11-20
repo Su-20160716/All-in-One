@@ -1,8 +1,8 @@
-# CI：后端静态检查 + 串行冒烟 + 前端构建
+# CI：后端静态检查 + 全量单测 + 前端构建
 # 触发：push/PR 到 main/master。
 # 设计要点：
-# - 冒烟**串行**执行（同一 job 内顺序跑）——并行会撞 SQLite database is locked
-# - 不跑 manage.py test（Django TestCase 与冒烟脚本双轨制，冒烟是主力）
+# - 后端跑 `manage.py test`（Django TestCase 全量）；SQLite 下必须串行，
+#   `--parallel` 会因 worker 克隆库失败而报错
 # - 前端只 build 验证（不部署）
 name: CI
 
@@ -14,7 +14,7 @@ on:
 
 jobs:
   backend:
-    name: 后端 check + 冒烟
+    name: 后端 check + 单测
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -64,14 +64,11 @@ jobs:
       - name: OpenAPI 契约校验（drf-spectacular）
         run: python manage.py spectacular --file "$RUNNER_TEMP/schema.yaml" --validate
 
-      - name: 冒烟（串行——并行会撞 SQLite 锁）
-        run: |
-          python smoke_test.py
-          python extensions_smoke_test.py
-          python learning_smoke_test.py
-          python suite_smoke_test.py
-          python minitools_smoke.py
-          python bizhub_smoke_test.py
+      - name: 后端单元测试（Django TestCase 全量）
+        # 仓库里的 smoke_*.py 依赖"已 migrate + 已有 admin 账号"的本地开发库，
+        # CI 是全新 checkout（db.sqlite3 被 gitignore），直接跑必然 no such table。
+        # 因此 CI 用 TestCase 全量套件（自建临时库 + 自建测试用户）。
+        run: python manage.py test --verbosity 1
 
   frontend:
     name: 前端构建
