@@ -64,14 +64,14 @@ web/
 │   ├── learning/             # v3 学习中心（132 条路由）
 │   ├── minitools/            # v7/v8 迷你工具箱（26 家族 374 工具，纯函数无表）
 │   ├── assistant/            # v4 AI 助手（对话 / 摘要 / 出题 / 批改）
-│   ├── code/                 # v6 代码工坊（110 接口 + 2 公开接口）
+│   ├── code/                 # v6 代码工坊（130 接口 + 4 公开接口）
 │   │   ├── models.py         # 15 个模型（工作区/文件/版本/片段/执行/协作/判题/评论/分享 + 每日一题/成就/错题/路径）
 │   │   ├── runtime.py        # 代码执行沙箱 + 静态分析（指标/大纲/复杂度/流程图）
 │   │   ├── views_core.py     # 工作区/文件/版本/执行/判题/片段/导出 + 判题核心 run_judge()
 │   │   ├── views_ai.py       # 静态分析 8 + AI 辅助 15 + 评论/协作/分享
 │   │   ├── views_eng.py      # L4 工程化：blame / TODO 聚合 / diff / 洞察 / 贡献者
 │   │   ├── views_learn.py    # L5 竞技教学：每日一题 / 成就 / 错题本 / 学习路径 / 竞技场
-│   │   └── urls.py           # SUBSYSTEMS + VIEWS 显式映射，结尾 `_EXPECTED = 110` 契约断言
+│   │   └── urls.py           # SUBSYSTEMS + VIEWS 显式映射，结尾 `_EXPECTED = 130` 契约断言
 │   ├── ws_app/               # WebSocket 统一消费者 + 推送封装
 │   ├── smoke_test.py         # v2 基线冒烟测试（另有 learning/extensions/suite/minitools 四套）
 │   └── manage.py
@@ -108,7 +108,7 @@ web/
 
 ## 核心亮点
 
-- **代码工坊（v6）**：15 张表 / **110 个登录接口 + 2 个公开接口** / 3 个前端页面。CodeMirror 6 编辑器（主题、缩进、字体、快捷键、自动换行、括号配对、行号、vim 键位**全部热切换**，语言包按需异步加载）；多语言安全执行沙箱 + REPL；版本快照/diff/回滚；多人协作行评论；只用例判题与排行榜；AI 生成/解释/找 Bug/重构/翻译/注释/优化/单测/摘要（**无密钥自动本地降级**）；TODO 聚合、代码归属（blame）、并排 diff、工程洞察；每日一题、成就徽章、错题本、学习路径、竞技场。
+- **代码工坊（v6）**：18 张表 / **130 个登录接口 + 4 个公开接口** / 3 个前端页面。CodeMirror 6 编辑器（主题、缩进、字体、快捷键、自动换行、括号配对、行号、vim 键位**全部热切换**，语言包按需异步加载）；多语言安全执行沙箱 + REPL；版本快照/diff/回滚；多人协作行评论；只用例判题与排行榜；AI 生成/解释/找 Bug/重构/翻译/注释/优化/单测/摘要（**无密钥自动本地降级**）；TODO 聚合、代码归属（blame）、并排 diff、工程洞察；每日一题、成就徽章、错题本、学习路径、竞技场。
 - **文件**：前端分片（5MB/块）→ 后端按块落盘 → 合并校验 SHA1；断点续传（重复分片幂等）；秒传（同 SHA1 复用存储）；回收站双态（恢复/彻底删除）；图片自动缩略图；文本在线预览；共享链接带权限与过期时间，匿名可访问可下载。
 - **权限**：自定义 RBAC —— 权限点 → 角色 → 用户；内置管理员恒真；`/api/auth/me/permissions/` 供前端按钮级权限。**行级数据权限统一收口在 `core/scoping.py`**（`self` / `dept` / `dept_and_sub` / `all`），业务模型不加冗余字段。
 - **实时**：Channels 统一消费者，JWT 登录后进入个人频道组；通知/聊天/文件/看板/协作事件统一消息协议；前端建连前用 `ensureFreshToken()` 保证 token 新鲜，**认证失败（4001）与网络断开区别处理**，避免重连死循环。
@@ -128,11 +128,12 @@ web/
 ## 验证结果
 
 - `manage.py check`：**System check identified no issues (0 silenced)**
-- 规模（`python scripts/stats.py`）：**16 个 app / 1518 条路由 / 145 个模型 / 41 个页面**
-- 路由契约：`code` 模块 `urlpatterns` = **110**（断言 `_EXPECTED = 110` 通过）、`public_urlpatterns` = **2**、`minitools` = **375**
+- 规模（`python scripts/stats.py`）：**29 个 app / 2891 条路由 / 404 个模型 / 101 个页面**
+- 路由契约：`code` 模块 `urlpatterns` = **130**（断言 `_EXPECTED = 130` 通过）、`public_urlpatterns` = **4**、`minitools` = **384**
 - 前端 `vite build`：**成功**；`vendor-vue` 110.92 kB（gzip 43.22）、`vendor-axios` 51.44 kB（gzip 19.49）、`CodeEditor` 173 kB（懒加载）、最大共享 chunk 243 kB；无 >600 kB 警告
 - 前端质量门禁：`npm run lint` / `typecheck` / `test`（vitest）全绿
-- 后端：`manage.py test` 全量用例通过（见 `backend/*/tests.py` 与五套冒烟测试）
-- 冒烟测试五套**串行**：v2 基线 161 / v3 学习中心 80 / v4 扩展 78 / v5 套件 537 / minitools 36 —— 改后端后必须串行跑，并行会撞 SQLite `database is locked`
-- CI：GitHub Actions（`.github/workflows/ci.yml`）= `check` + 五套冒烟 + 前端 `npm ci && npm run build`
+- 后端：`manage.py test` 全量用例通过（见 `backend/*/tests.py`）
+- 冒烟脚本（五套，需已 `migrate` + 已有 admin 的本地开发库）：`smoke_test.py`（v2 基线 161）/ `learning_smoke_test.py`（v3 学习 80）/ `extensions_smoke_test.py`（v4 扩展 78）/ `suite_smoke_test.py`（v5 套件 537）/ `minitools_smoke.py`（36）；admin 密码不同时用 `SMOKE_ADMIN_PASSWORD` 覆盖
+- 注意：SQLite 下测试必须**串行**，`manage.py test --parallel` 会因 worker 克隆库失败而报错
+- CI：GitHub Actions（`.github/workflows/ci.yml`）= `check` + 迁移漂移 + OpenAPI 校验 + 后端全量单测 + 前端 `npm ci && npm run build`
 
