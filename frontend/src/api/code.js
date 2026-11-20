@@ -127,7 +127,6 @@ export const codeApi = {
   },
 
   // ===== 导出 =====
-  exportZipUrl: () => apiUrl('/api/code/export/zip/'),
   exportFileUrl: (id) => apiUrl(`/api/code/export/file/${id}/`),
   exportZip: (data) => request.post('/code/export/zip/', data, { responseType: 'blob' }),
 

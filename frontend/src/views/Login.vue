@@ -26,10 +26,30 @@
             <label class="mb-1 block text-[12px] font-medium text-ink-600">用户名</label>
             <input v-model="form.username" class="input" placeholder="请输入用户名" required />
           </div>
-          <div v-if="mode === 'register'">
-            <label class="mb-1 block text-[12px] font-medium text-ink-600">昵称</label>
-            <input v-model="form.nickname" class="input" placeholder="选填" />
-          </div>
+          <template v-if="mode === 'register'">
+            <FloatingField
+              id="register-phone"
+              v-model="form.phone"
+              label="手机号"
+              type="tel"
+              inputmode="numeric"
+              maxlength="11"
+              autocomplete="tel"
+              required
+            />
+            <FloatingField
+              id="register-real-name"
+              v-model="form.real_name"
+              label="姓名"
+              autocomplete="name"
+              required
+            />
+            <div>
+              <label class="mb-1 block text-[12px] font-medium text-ink-600">出生日期</label>
+              <DateWheelPicker v-model="form.birthday" />
+            </div>
+            <AddressCascader v-model="form.address" />
+          </template>
           <div>
             <label class="mb-1 block text-[12px] font-medium text-ink-600">密码</label>
             <input v-model="form.password" type="password" class="input" placeholder="至少 6 位" required @input="checkStrength" />
@@ -69,9 +89,6 @@
           {{ mode === 'login' ? '还没有账号？' : '已有账号？' }}
           <button class="font-medium text-brand-600 hover:underline" @click="toggle">{{ mode === 'login' ? '立即注册' : '去登录' }}</button>
         </div>
-        <div v-if="isDev" class="mt-4 rounded-control bg-ink-50 px-3 py-2 text-[11px] text-ink-400">
-          演示账号：admin / admin123（管理员）· 也可注册新账号
-        </div>
       </div>
     </div>
   </div>
@@ -83,17 +100,27 @@ import { useRouter } from 'vue-router'
 import { authApi } from '../api'
 import { useUserStore } from '../stores/user'
 import { useAppStore } from '../stores/app'
+import FloatingField from '../components/FloatingField.vue'
+import DateWheelPicker from '../components/DateWheelPicker.vue'
+import AddressCascader from '../components/AddressCascader.vue'
+import { composeAddress } from '../utils/region'
 
 const router = useRouter()
 const user = useUserStore()
 const app = useAppStore()
-// F13：演示账号提示仅开发环境显示（生产构建 import.meta.env.DEV 为 false）
-const isDev = import.meta.env.DEV
 const mode = ref('login')
 const loading = ref(false)
 const error = ref('')
 const locked = ref(false)
-const form = reactive({ username: '', password: '', nickname: '', invite_code: '' })
+const form = reactive({
+  username: '',
+  password: '',
+  invite_code: '',
+  phone: '',
+  real_name: '',
+  birthday: '',
+  address: { province: '', city: '', district: '', detail: '' },
+})
 // #F615 两步验证状态：后端返回 twofa_required 时切换到验证码输入
 const twoFa = reactive({ required: false, code: '' })
 const pwdScore = ref(0)
@@ -133,7 +160,32 @@ async function submit() {
   locked.value = false
   try {
     if (mode.value === 'register') {
-      await user.register({ ...form })
+      if (!/^1[3-9]\d{9}$/.test(form.phone)) {
+        error.value = '请输入正确的 11 位手机号'
+        return
+      }
+      if (!form.real_name.trim()) {
+        error.value = '请填写姓名'
+        return
+      }
+      if (!form.birthday) {
+        error.value = '请选择出生日期'
+        return
+      }
+      const { province, city, district } = form.address
+      if (!province || !city || !district) {
+        error.value = '请选择所在省 / 市 / 区'
+        return
+      }
+      await user.register({
+        username: form.username,
+        password: form.password,
+        invite_code: form.invite_code,
+        phone: form.phone,
+        real_name: form.real_name.trim(),
+        birthday: form.birthday,
+        address: composeAddress(form.address),
+      })
     } else {
       const res = await authApi.login({
         username: form.username,

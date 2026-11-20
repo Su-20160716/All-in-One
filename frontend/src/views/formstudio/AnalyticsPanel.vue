@@ -120,7 +120,7 @@
                 <div class="mb-2 flex flex-wrap items-end gap-2">
                   <label class="flex min-w-[200px] flex-1 flex-col gap-1 text-[11px] text-ink-500">
                     分布字段
-                    <select v-model="selectedFieldKey" class="input" @change="onFieldChange">
+                    <select v-model="selectedFieldKey" class="input">
                       <option v-for="field in fieldRows" :key="field.field_key" :value="field.field_key">
                         {{ field.label }}（{{ field.field_key }}）
                       </option>
